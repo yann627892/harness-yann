@@ -2,6 +2,7 @@
 refetches its thread on every turn of every session (BUS_TURN_KEYS of the web app)."""
 from __future__ import annotations
 
+import os
 import time
 
 from maxxing import bus
@@ -18,6 +19,19 @@ def _session(path: str) -> str:
     return meta["id"]
 
 
+_mt = 0
+
+
+def _update(sid: str, **fields) -> None:
+    """`store.update` + a strictly newer mtime: on a host whose file clock ticks in whole seconds, two writes in the
+    same second keep the same mtime_ns and the watcher would see no change."""
+    global _mt
+    store.update(sid, **fields)
+    p = store.meta_path(sid)
+    _mt = max(_mt + 2_000_000_000, time.time_ns())
+    os.utime(p, ns=(_mt, _mt))
+
+
 def _pass() -> set[str]:
     service._scan(True)
     out = set(service._agent_turns)
@@ -32,13 +46,15 @@ def test_an_agent_turn_start_and_end_name_the_agent(mx):
     other = _session("projects/acme/topics/blog")
     service._scan(False)                                              # baseline
     service._agent_turns.clear()
-    store.update(sid, state="running")
+    # `spawned_at`: a running session whose runner is not alive is repaired to "error" by public() (and the file
+    # rewritten), which on a host with a 1 s file clock can land on the baseline's own mtime.
+    _update(sid, state="running", spawned_at=time.time())
     assert _pass() == {AGENT}                                         # started
-    store.update(sid, state="idle", turns=1, finished_at=time.time())
+    _update(sid, state="idle", turns=1, finished_at=time.time())
     assert _pass() == {AGENT}                                         # ended
-    store.update(other, state="running")
+    _update(other, state="running")
     assert _pass() == set()                                           # a normal session's turn: no agent page
-    store.update(sid, title="renamed")
+    _update(sid, title="renamed")
     assert _pass() == set()                                           # metadata only (no state / unread change)
     service._known.clear()
 
