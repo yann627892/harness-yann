@@ -1,6 +1,7 @@
-// Tabs view (Sessions page, per browser): one session on screen, the open sessions as chips above it. A chip shows
-// its session (and whether it works, waits for you or failed); click it, Alt+←/→ or swipe on a phone to change;
-// its cross closes the session. Turned off, the columns are back exactly as they were (the view never moves them).
+// Tabs mode (Sessions page, per browser; the default): one session on screen, the open sessions as chips above it.
+// A chip shows its session (and whether it works, waits for you or failed); click it, Alt+←/→ or swipe on a phone to
+// change; its cross closes the session. The other mode, Zones, shows the sessions side by side: going there puts the
+// columns back exactly as they were (Tabs never moves them).
 import * as React from 'react'
 import { ChevronLeft, ChevronRight, PanelTop, X } from 'lucide-react'
 import { useT } from '@/i18n'
@@ -14,21 +15,53 @@ import { useTabIndicator } from './tabMotion'
 /** Shown first by "Next waiting": a session that finished and was not read, or stopped on an error. */
 const waits = (s: Session | undefined) => !!s && s.state !== 'running' && (s.unread || s.state === 'error')
 
-export function TabsToggle({ compact }: { compact?: boolean }) {
+/** Computer: the one button at the top right of the page that goes from one way of showing the open sessions to the
+ *  other. Tabs = one session on screen, the others as chips; Zones = the sessions next to each other (columns, grid,
+ *  layouts). One icon, no text, in the colour of the icons beside it, square blocks as in the logo: it draws the
+ *  mode in use with four bars - three tab heads over the
+ *  session, or three columns - and the bars move from one picture to the other when the mode changes (globals.css
+ *  `.mx-view-glyph`). The tooltip names where a click leads. */
+export function ViewSwitch() {
+  const t = useT()
+  const tabs = useSessionsUI((s) => s.tabs)
+  const label = tabs ? t('tabs.toZones') : t('tabs.toTabs')
+  return (
+    <Tooltip content={`${label} (Alt+T)`}>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={() => useSessionsUI.getState().setTabs(!tabs)}
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-md transition-colors outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        data-testid="tabs-toggle"
+        data-mode={tabs ? 'tabs' : 'zones'}
+      >
+        <span aria-hidden className="mx-view-glyph" data-kind={tabs ? 'tabs' : 'zones'}>
+          <i />
+          <i />
+          <i />
+          <i />
+        </span>
+      </button>
+    </Tooltip>
+  )
+}
+
+/** Phone: one button in the session's header shows or hides the chips of the open sessions (pressed = Tabs). */
+export function TabsToggle() {
   const t = useT()
   const on = useSessionsUI((s) => s.tabs)
   return (
-    <Tooltip content={`${on ? t('tabs.off') : t('tabs.on')} (Alt+T)`}>
+    <Tooltip content={t('tabs.tabsTip')}>
       <Button
         variant={on ? 'secondary' : 'ghost'}
-        size={compact ? 'icon-sm' : 'sm'}
+        size="icon-sm"
         aria-pressed={on}
-        aria-label={t('tabs.toggle')}
+        aria-label={t('tabs.tabs')}
         onClick={() => useSessionsUI.getState().setTabs(!on)}
-        className={cn(on && 'text-primary', compact && 'pointer-coarse:size-10')}
+        className="pointer-coarse:size-10"
         data-testid="tabs-toggle"
       >
-        <PanelTop /> {!compact && <span className="max-lg:hidden">{t('tabs.toggle')}</span>}
+        <PanelTop />
       </Button>
     </Tooltip>
   )
@@ -45,8 +78,11 @@ export function stepCol(dir: -1 | 1): Col | null {
   return st.cols[(i + dir + st.cols.length) % st.cols.length]
 }
 
+/** Where the chips are scrolled to: kept from one bar to the next (a phone mounts a bar per session). */
+let barScroll = 0
+
 /** Chips of the open sessions. `onPick` shows a col (desktop: focus; phone: its URL). */
-export function TabsBar({ sessions, onPick, className }: { sessions: Session[] | undefined; onPick: (c: Col) => void; className?: string }) {
+export function TabsBar({ sessions, onPick, className, compact }: { sessions: Session[] | undefined; onPick: (c: Col) => void; className?: string; /** "Waiting": its number only. */ compact?: boolean }) {
   const t = useT()
   const cols = useSessionsUI((s) => s.cols)
   const focused = useSessionsUI((s) => s.focused)
@@ -54,10 +90,24 @@ export function TabsBar({ sessions, onPick, className }: { sessions: Session[] |
   const bar = React.useRef<HTMLDivElement>(null)
   const line = React.useRef<HTMLSpanElement>(null)
   useTabIndicator(bar, line, [focused, cols.map((c) => c.key).join(' ')])
-  // the chip on screen stays visible in the bar
-  React.useEffect(() => {
-    bar.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' })
-  }, [focused])
+  // The chip on screen stays visible in the bar. Only the bar scrolls (scrollIntoView also moves every ancestor that
+  // can scroll). A phone gives each session its own bar (it sits in the session's header): a new bar starts where the
+  // last one was, without an animation - closing or changing a tab no longer sweeps the chips across the screen.
+  const mounted = React.useRef(false)
+  React.useLayoutEffect(() => {
+    const el = bar.current
+    if (!el) return
+    const first = !mounted.current
+    mounted.current = true
+    if (first) el.scrollLeft = barScroll
+    const chip = el.querySelector<HTMLElement>('[aria-selected="true"]')
+    if (!chip) return
+    const a = el.getBoundingClientRect()
+    const c = chip.getBoundingClientRect()
+    const left = c.left < a.left ? el.scrollLeft + c.left - a.left : c.right > a.right ? el.scrollLeft + c.right - a.right : null
+    if (left !== null) el.scrollTo({ left, behavior: first ? 'instant' : 'smooth' })
+    barScroll = left ?? el.scrollLeft
+  }, [focused, cols.length])
 
   const close = (c: Col) => {
     const st = useSessionsUI.getState()
@@ -71,7 +121,7 @@ export function TabsBar({ sessions, onPick, className }: { sessions: Session[] |
   if (!cols.length) return null
   return (
     <div className={cn('flex min-w-0 shrink-0 items-center gap-1 border-b bg-sidebar/40 px-2 py-1.5', className)} data-testid="tabs-bar">
-      <div ref={bar} role="tablist" className="relative flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+      <div ref={bar} role="tablist" onScroll={(e) => (barScroll = e.currentTarget.scrollLeft)} className="relative flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain [scrollbar-width:none]">
         <span
           ref={line}
           aria-hidden
@@ -87,8 +137,9 @@ export function TabsBar({ sessions, onPick, className }: { sessions: Session[] |
               role="tab"
               aria-selected={on}
               className={cn(
-                'group flex h-8 max-w-56 shrink-0 items-center gap-1.5 rounded-full border pr-1 pl-2.5 pointer-coarse:h-10 pointer-coarse:pr-0 text-[13px] transition-colors',
-                on ? 'border-primary/50 bg-primary/10 text-foreground' : 'border-transparent bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground',
+                // computer: the chips share the bar with the page's actions - they narrow (down to 7rem) before the bar scrolls
+                'group flex h-8 max-w-56 max-md:max-w-44 max-md:shrink-0 md:min-w-28 items-center gap-1.5 rounded-full border pr-1 pl-2.5 pointer-coarse:h-10 pointer-coarse:pr-0 text-[13px] transition-colors',
+                on ? 'border-primary/50 bg-primary/10 text-foreground' : 'border-transparent bg-muted text-muted-foreground hover:bg-muted hover:text-foreground',
               )}
               data-tab={c.key}
             >
@@ -122,7 +173,7 @@ export function TabsBar({ sessions, onPick, className }: { sessions: Session[] |
         <Tooltip content={t('tabs.nextWaitingTip')}>
           <Button variant="ghost" size="sm" onClick={() => onPick(waiting[0])} className="shrink-0 gap-1.5 tabular-nums" data-testid="tabs-next-waiting">
             <StatusDot tone="unread" className="size-1.5" />
-            <span className="max-md:hidden">{t('tabs.nextWaiting')}</span> {waiting.length}
+            {!compact && <span className="max-md:hidden">{t('tabs.nextWaiting')}</span>} {waiting.length}
           </Button>
         </Tooltip>
       )}
@@ -140,7 +191,7 @@ export function TabsArrows({ onPick }: { onPick: (c: Col) => void }) {
     if (c) onPick(c)
   }
   const cls =
-    'absolute top-1/2 z-20 flex size-10 -translate-y-1/2 items-center justify-center rounded-full border bg-background/80 text-muted-foreground opacity-40 shadow-sm backdrop-blur transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+    'absolute top-1/2 z-20 flex size-10 -translate-y-1/2 items-center justify-center rounded-full border bg-background/95 text-muted-foreground opacity-40 shadow-sm transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
   return (
     <>
       <Tooltip content={`${t('sessions.shortcuts.prev')} (Alt+←)`} side="right">

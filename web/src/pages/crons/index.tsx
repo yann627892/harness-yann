@@ -33,6 +33,7 @@ import {
   Tooltip,
   confirm,
   useMask,
+  useContextMenu,
 } from '@/components/ui'
 import { CronEditor, type EditorSeed } from '@/features/crons/CronEditor'
 import { KindBadge, LastRun, RunsHistory, StateBadge, cap, useJobWhen, useNow } from '@/features/crons/parts'
@@ -85,7 +86,7 @@ export default function CronsSection() {
   const external = q.data?.external ?? []
   return (
     <>
-      <div className="grid gap-8">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-8">
         <div className="-mt-2 flex justify-end">
           <Button onClick={() => setSeed({ mode: 'new' })}>
             <Plus />
@@ -205,21 +206,31 @@ function JobMenu({ job, actions }: { job: Cron; actions: Actions }) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-        <DropdownMenuItem onSelect={() => actions.edit(job)}>
-          <Pencil />
-          {t('common.edit')}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => actions.duplicate(job)}>
-          <Copy />
-          {t('crons.duplicate')}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem destructive onSelect={() => actions.remove(job)}>
-          <Trash2 />
-          {t('common.delete')}
-        </DropdownMenuItem>
+        <JobMenuItems job={job} actions={actions} />
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/** A job's actions: its "..." menu and its right click. */
+function JobMenuItems({ job, actions }: { job: Cron; actions: Actions }) {
+  const t = useT()
+  return (
+    <>
+      <DropdownMenuItem onSelect={() => actions.edit(job)}>
+        <Pencil />
+        {t('common.edit')}
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => actions.duplicate(job)}>
+        <Copy />
+        {t('crons.duplicate')}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem destructive onSelect={() => actions.remove(job)}>
+        <Trash2 />
+        {t('common.delete')}
+      </DropdownMenuItem>
+    </>
   )
 }
 
@@ -246,8 +257,9 @@ function RunButton({ job, actions, withLabel }: { job: Cron; actions: Actions; w
 function JobRow({ job, tz, now, onOpen, onToggle, actions }: { job: Cron; tz?: string; now: number; onOpen: () => void; onToggle: (v: boolean) => void; actions: Actions }) {
   const t = useT()
   const when = useJobWhen()
+  const ctx = useContextMenu()
   return (
-    <li className={cn('flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40', !job.enabled && 'opacity-70')} data-job-id={job.id}>
+    <li {...ctx.props} className={cn('flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted', !job.enabled && 'opacity-70')} data-job-id={job.id}>
       <button type="button" onClick={onOpen} className="grid min-w-0 flex-1 gap-1 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <span className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="truncate text-sm font-medium">
@@ -274,6 +286,7 @@ function JobRow({ job, tz, now, onOpen, onToggle, actions }: { job: Cron; tz?: s
         <RunButton job={job} actions={actions} />
         <JobMenu job={job} actions={actions} />
       </div>
+      {ctx.menu(<JobMenuItems job={job} actions={actions} />)}
     </li>
   )
 }
@@ -402,7 +415,7 @@ function JobSheet({
                 <h3 className="text-sm font-medium">{job.kind === 'claude' ? t('crons.field.prompt') : t('crons.field.command')}</h3>
                 <Sensitive block className="h-16">
                   {job.kind === 'claude' ? (
-                    <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm break-words whitespace-pre-wrap">{job.prompt}</div>
+                    <div className="rounded-lg border bg-fill-1 px-3 py-2.5 text-sm break-words whitespace-pre-wrap">{job.prompt}</div>
                   ) : (
                     <CodeBlock code={job.command} className="[&_pre]:break-all [&_pre]:whitespace-pre-wrap" />
                   )}

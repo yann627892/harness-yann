@@ -28,6 +28,7 @@ import {
   Tooltip,
   confirm,
   toast,
+  useContextMenu,
 } from '@/components/ui'
 import { Callout } from '@/features/common'
 import { SettingsCard } from './ui'
@@ -208,8 +209,28 @@ function FileRow({ f, onEdit }: { f: SecretFile; onEdit: () => void }) {
   const lang = useLang()
   const put = usePutSecretFile()
   const del = useDeleteSecretFile()
+  const ctx = useContextMenu()
+  const items = (
+    <>
+      <DropdownMenuItem onSelect={onEdit}>
+        <Pencil /> {t('common.edit')}
+      </DropdownMenuItem>
+      <DropdownMenuItem className="md:hidden" onSelect={() => put.mutate({ name: f.name, expose: !f.expose })}>
+        <KeyRound /> {f.expose ? t('keys.unexpose') : t('keys.exposeShort')}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem
+        destructive
+        onSelect={async () => {
+          if (await confirm({ title: t('keyfiles.deleteTitle', { name: f.name }), description: t('keyfiles.deleteDesc'), destructive: true })) del.mutate(f.name)
+        }}
+      >
+        <Trash2 /> {t('common.delete')}
+      </DropdownMenuItem>
+    </>
+  )
   return (
-    <li className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2 px-4 py-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_auto_auto]">
+    <li {...ctx.props} className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2 px-4 py-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_auto_auto]">
       <div className="grid min-w-0 gap-0.5">
         <span className="font-mono text-[13px] font-medium [overflow-wrap:anywhere]">{f.name}</span>
         <span className="flex min-w-0 text-xs text-muted-foreground">
@@ -225,7 +246,7 @@ function FileRow({ f, onEdit }: { f: SecretFile; onEdit: () => void }) {
         </span>
         {f.sha256 && (
           // the server gives the start of the SHA-256 only (12 hex characters): shown as is
-          <code className="shrink-0 rounded-md bg-muted/60 px-2 py-1 font-mono text-xs" title="SHA-256">
+          <code className="shrink-0 rounded-md bg-muted px-2 py-1 font-mono text-xs" title="SHA-256">
             {f.sha256}
           </code>
         )}
@@ -241,24 +262,9 @@ function FileRow({ f, onEdit }: { f: SecretFile; onEdit: () => void }) {
             <MoreHorizontal />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={onEdit}>
-            <Pencil /> {t('common.edit')}
-          </DropdownMenuItem>
-          <DropdownMenuItem className="md:hidden" onSelect={() => put.mutate({ name: f.name, expose: !f.expose })}>
-            <KeyRound /> {f.expose ? t('keys.unexpose') : t('keys.exposeShort')}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            destructive
-            onSelect={async () => {
-              if (await confirm({ title: t('keyfiles.deleteTitle', { name: f.name }), description: t('keyfiles.deleteDesc'), destructive: true })) del.mutate(f.name)
-            }}
-          >
-            <Trash2 /> {t('common.delete')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
+        <DropdownMenuContent align="end">{items}</DropdownMenuContent>
       </DropdownMenu>
+      {ctx.menu(items)}
     </li>
   )
 }
@@ -291,7 +297,7 @@ export function KeyFilesCard() {
           <EmptyState compact icon={FileKey} title={t('keyfiles.empty')} description={t('keyfiles.emptyDesc')} />
         ) : (
           <>
-            <div className="hidden grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_auto_auto] gap-4 border-y bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground md:grid">
+            <div className="hidden grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_auto_auto] gap-4 border-y bg-fill-1 px-4 py-2 text-xs font-medium text-muted-foreground md:grid">
               <span>{t('keys.name')}</span>
               <span>{t('keyfiles.file')}</span>
               <span>{t('keys.exposeShort')}</span>

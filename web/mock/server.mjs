@@ -5,6 +5,7 @@
 //   MOCK_PORT=8899 MOCK_SCENARIO=setup node mock/server.mjs
 //   curl -X POST localhost:8809/__mock/scenario -d '{"name":"login"}'   # reset state at runtime
 //   curl -X POST localhost:8809/__mock/bus -d '{"topics":["sessions","workspace"]}'   # emit a bus event
+//   curl -X POST localhost:8809/__mock/team -d '{"chat":"d-romain","text":"Hello"}'   # a Team message arrives (MOCK_FEATURES=all)
 //
 // Implements every endpoint of docs/dev/API.md with in-memory state and fake, product-neutral data.
 // Serves the built SPA from ../dist (web/dist). Scenarios: setup | login | onboarding | ready | maxxing.
@@ -290,7 +291,9 @@ function maxxingFinish(s, i) {
   s.turns += 1; s.cost_usd = +(s.cost_usd + cost).toFixed(4); s.updated = now(); s.unread = true; s.state = failed ? 'error' : 'idle'
   if (failed) {
     s.error = 'Claude exited with code 1: overloaded, retry later'
-    addEvents(s, { type: 'result', ok: false, error: s.error, cost_usd: cost, duration_ms: 20000, model, at: now() })
+    addEvents(s, { type: 'assistant', text: 'API Error: 529 Overloaded. Retry in a moment.', error: 'server_error', at: now() },
+      { type: 'result', ok: false, cost_usd: cost, duration_ms: 20000, model, at: now() },
+      { type: 'note', text: 'Turn failed: ' + s.error, level: 'error', failed: true, at: now() })
   } else {
     const answer = s.plan_mode
       ? `**Plan for “${s.title}”**\n\n1. Read the files involved.\n2. Make the change in small steps.\n3. Check the result and report.\n\nValidate the plan and I start.`
@@ -366,7 +369,10 @@ function conversation(s, d) {
     ev.push({ type: 'tool_use', id: e1, name: 'Edit', input: { file_path: `${cwd}/memory.md`, old_string: '## Decisions', new_string: `## Decisions\n- 2026-10-11: ${s.title}` }, summary: `Edit ${s.path}/memory.md`, at: at() })
     ev.push({ type: 'tool_result', tool_use_id: e1, text: 'The file has been updated successfully.', is_error: false, at: at() })
     if (s.state === 'error') {
-      ev.push({ type: 'note', text: 'Turn failed: ' + s.error, level: 'error', at: at() })
+      // a turn the API refused, as the server writes it: the line of Claude Code, the failed result, the process's end
+      ev.push({ type: 'assistant', text: "You've reached your Opus limit. Switch to another model, or manage usage credits at https://claude.ai/settings/usage, to continue.", error: 'rate_limit', at: at() })
+      ev.push({ type: 'result', ok: false, cost_usd: 0.35, duration_ms: 113000, model, usage: { input: 2100, output: 7600, cache_read: 909000, cache_write: 43900 }, at: at() })
+      ev.push({ type: 'note', text: 'Turn failed: ' + s.error, level: 'error', failed: true, at: at() })
       return ev
     }
     ev.push({ type: 'assistant', text: `Done — I added a line under **Decisions** in \`memory.md\`.\n\n${d.last}`, at: at() })
@@ -715,14 +721,14 @@ function later(s, ms, fn) {
 }
 function clearTimers(s) { for (const h of S.timers[s.id] || []) clearTimeout(h); S.timers[s.id] = [] }
 
-function startTurn(s, text, attachments = []) {
+function startTurn(s, text, attachments = [], cid = '') {
   const cwd = `${ROOT}/${s.path}`
   const model = s.model || S.claude.default_model
   s.state = 'running'; s.error = null; s.updated = now()
   if (s.plan_ready) s.plan_ready = false
   // Maxxing scenario: turns of 8 to 35 s, so several sessions finish while the user types
   const k = S.scenario === 'maxxing' ? (8000 + Math.random() * 27000) / 3400 : 1
-  addEvents(s, { type: 'user', text, attachments, at: now(), source: 'web' }, { type: 'init', model, cwd, at: now() })
+  addEvents(s, { type: 'user', text, attachments, at: now(), source: 'web', ...(cid ? { client_ids: [cid] } : {}) }, { type: 'init', model, cwd, at: now(), ...(s.mockAgent ? { same: true } : {}) })   // its background agent runs on
   bus('sessions', 'workspace')
   const tu = `toolu_${crypto.randomBytes(6).toString('hex')}`
   later(s, 700 * k, () => addEvents(s, { type: 'thinking', text: `Let me look at the files in this topic before answering: "${text.slice(0, 80)}"`, at: now() }))
@@ -1307,6 +1313,12 @@ R('POST', '/api/sessions/:id/steer', ({ params }) => {
   if (steered) { s.queue = 1; bus('sessions') }
   return { steered, interrupted: steered, session: s }
 })
+R('POST', '/api/sessions/:id/inject', ({ params }) => {
+  const s = S.sessions.find((x) => x.id === params.id) || fail(404, 'not_found', 'Session not found')
+  const injected = s.state === 'running' && s.queue > 0
+  if (injected) { s.queue = 0; s.queue_items = []; bus('sessions') }
+  return { injected, reason: injected ? null : 'idle', session: s }
+})
 R('GET', '/api/search', ({ q }) => {
   const term = (q.get('q') || '').trim().toLowerCase()
   if (term.length < 2) return { results: [], took_ms: 0 }
@@ -1318,6 +1330,24 @@ R('GET', '/api/search', ({ q }) => {
   }
   for (const tk of S.tasks.tasks) if ((tk.title + ' ' + tk.notes).toLowerCase().includes(term)) results.push({ kind: 'task', id: tk.id, path: '', title: tk.title, snippet: mark(tk.title + ' ' + tk.notes), at: tk.updated, score: 1 })
   return { results: results.slice(0, 30), took_ms: 1.2 }
+})
+// The sessions open on screen, shared by the user's browsers (server: sessions/opened.py).
+const openShared = { ids: null, rev: 0 }
+R('GET', '/api/sessions/open', () => openShared)
+R('POST', '/api/sessions/open', ({ body }) => {
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [])
+  const closed = new Set(list(body.close))
+  let ids = (openShared.ids || []).filter((x) => !closed.has(x))
+  for (const x of list(body.open)) if (!ids.includes(x) && !closed.has(x)) ids.push(x)
+  const order = list(body.order)
+  if (order.length) {
+    const rank = (x) => (order.includes(x) ? order.indexOf(x) : order.length)
+    ids = ids.map((x, i) => [x, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map((x) => x[0])
+  }
+  if (openShared.ids && ids.join() === openShared.ids.join()) return openShared
+  Object.assign(openShared, { ids, rev: openShared.rev + 1 })
+  bus('open_sessions')
+  return openShared
 })
 R('GET', '/api/sessions/search', ({ q }) => {
   const term = (q.get('q') || '').trim().toLowerCase()
@@ -1381,7 +1411,7 @@ R('POST', '/api/sessions/:id/messages', ({ params, body }) => {
     pushEvents(s.id, [])
     return { queued: true, session: s }
   }
-  startTurn(s, text, body.attachments || [])
+  startTurn(s, text, body.attachments || [], body.client_id)
   return { queued: false, session: s }
 })
 R('POST', '/api/sessions/:id/plan/approve', ({ params, body }) => {
@@ -1823,6 +1853,27 @@ R('PUT', '/api/settings', ({ body }) => {
   for (const k of ['timezone', 'language', 'public_url', 'files_root', 'presentation_default', 'usage_widget', 'memory_max_lines', 'donation_hidden', ...PAGE_FLAGS, 'sidebar_order']) if (body[k] !== undefined) S.settings[k] = body[k]
   return S.settings
 })
+/* ---- feedback: checked first (a word decides here: "bug" or "idea" is sent, "model" or "API" is for this
+   installation, the rest is answered), then sent nowhere */
+R('GET', '/api/settings/feedback', () => ({ email: 'you@example.com', version: 'mock' }))
+R('POST', '/api/settings/feedback/check', async ({ body }) => {
+  const msg = String(body.message || '').trim()
+  if (!msg) fail(422, 'message_required', 'Write a message')
+  await sleep(900)
+  const out = (verdict, answer = '', prompt = '', topic = '') => ({ verdict, answer, prompt, topic, checked: true })
+  if (/bug|crash|id[ée]e|idea/i.test(msg)) return out('send')
+  const topic = `projects/${WORKSPACE[0].name}/topics/${WORKSPACE[0].topics[0][0]}`
+  if (/mod[èe]le?|api|endpoint/i.test(msg))
+    return out('self', 'This is specific to **your installation**, so your Harness can set it up here: nothing has to change in the product.\n\n1. Open a session with the request below.\n2. It edits the configuration of this server and tells you what it changed.', `Set this up on this installation, then tell me what you changed: ${msg}`, topic)
+  return out('answer', 'It is already there: **Settings -> Voice -> Microphone** picks the microphone.\n\nIf the list is empty, allow the microphone in the browser first (`https` is needed).', msg, topic)
+})
+R('POST', '/api/settings/feedback', async ({ body }) => {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(body.email || ''))) fail(422, 'invalid_email', 'Enter a valid email address')
+  if (!String(body.message || '').trim()) fail(422, 'message_required', 'Write a message')
+  await sleep(300)
+  return { ok: true }
+})
+
 const secretOut = (s) => ({ name: s.name, note: s.note, expose: s.expose, updated: s.updated, preview: s.value.slice(0, 4) + '…' })
 R('GET', '/api/secrets', () => S.secrets.map(secretOut))
 R('PUT', '/api/secrets/:name', ({ params, body }) => {
@@ -2180,6 +2231,17 @@ const server = http.createServer(async (req, res) => {
       if (!Array.isArray(topics) || !topics.length) return sendJson(res, 422, { error: 'invalid', message: 'topics must be a non-empty list' })
       bus(...topics)
       return sendJson(res, 200, { ok: true })
+    }
+    if (url.pathname === '/__mock/team' && req.method === 'POST') { // a message arrives, e.g. {"chat":"d-romain","author":"romain","text":"Hello"}
+      let b
+      try { b = JSON.parse((await readBody(req)).toString() || '{}') } catch { b = {} }
+      const c = TEAM.chats.find((x) => x.chat.id === b.chat)
+      if (!c) return sendJson(res, 404, { error: 'not_found', message: 'No such chat' })
+      const m = { id: `${c.chat.id}-${c.messages.length}`, author: String(b.author || c.chat.members[0]), at: Math.max(Math.floor(Date.now() / 1000), (c.chat.last?.at || 0) + 1), text: String(b.text || ''), kind: 'text' }
+      c.messages.push(m)
+      Object.assign(c.chat, { last: { author: m.author, at: m.at, kind: 'text', text: m.text, files: 0 }, unread: c.chat.unread + 1, updated: m.at })
+      bus('team')
+      return sendJson(res, 200, m)
     }
     if (url.pathname.startsWith('/api/') || url.pathname === '/api') return await handleApi(req, res, url)
     if (url.pathname.startsWith('/ext/')) return serveExt(req, res, url)

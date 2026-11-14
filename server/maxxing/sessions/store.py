@@ -196,18 +196,31 @@ def empty_tokens() -> dict:
     return {k: 0 for k, _ in TOKEN_KEYS}
 
 
-def turn_cost(total: float, prev: float) -> float:
+def turn_cost(total: float, prev: float, estimated: float = 0.0) -> float:
     """Cost of one turn from Claude's `total_cost_usd`, which adds up over the whole Claude thread (every
     `--resume` reports the thread's running total): the increase since the previous turn of the same thread, or the
-    total itself when it went down (a new thread, a thread Claude no longer knew)."""
+    total itself when it went down (a new thread, a thread Claude no longer knew). `estimated`: what the lost turns
+    since then were already charged (agent_cost): Claude saves a turn stopped by SIGTERM in the thread's total, so
+    the increase holds them again - taken off, never below 0."""
     total, prev = float(total or 0), float(prev or 0)
-    return round(total - prev, 6) if total >= prev else round(total, 6)
+    cost = total - prev if total >= prev else total
+    return round(max(0.0, cost - max(0.0, float(estimated or 0))), 6)
 
 
 def thread_prev_cost(m: dict, csid: str | None) -> float:
     """Running total last reported for Claude thread `csid` (0 for a thread not seen yet)."""
     tc = m.get("thread_cost") if isinstance(m.get("thread_cost"), dict) else {}
     return float(tc.get("total") or 0) if csid and tc.get("csid") == csid else 0.0
+
+
+def thread_estimated(m: dict, csid: str | None) -> float:
+    """Cost of the turns of Claude thread `csid` lost since its last reported total and charged from their log
+    (agent_cost.charge_unbilled): the next reported total holds them again (turn_cost)."""
+    tc = m.get("thread_cost") if isinstance(m.get("thread_cost"), dict) else {}
+    try:
+        return float(tc.get("estimated") or 0) if csid and tc.get("csid") == csid else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def day_of(when: float) -> str:
@@ -259,6 +272,16 @@ def known_windows() -> dict[str, int]:
     """Context window of every model Claude Code has reported on this server ({model id: tokens})."""
     d = config.read_json(windows_path(), {}) or {}
     return {str(k): int(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0} if isinstance(d, dict) else {}
+
+
+def window_for(m: dict, cfg: dict) -> int | None:
+    """Context window of the model the next turn of session `m` runs on: the one Claude Code reported for that model
+    on this server, else the window of the session's last turn. None: not known yet (first turn of a new model)."""
+    try:
+        return known_windows().get(str(m.get("model") or cfg.get("default_model") or "")) \
+            or int(m.get("context_window") or 0) or None
+    except (TypeError, ValueError, OverflowError):   # a hand-edited meta
+        return None
 
 
 def record_windows(result: dict) -> None:
@@ -325,7 +348,7 @@ def list_ids() -> list[str]:
 
 
 def remove(sid: str) -> None:
-    for ext in (".json", ".log", ".lock", ".run"):
+    for ext in (".json", ".log", ".lock", ".run", ".live"):
         try:
             _path(sid, ext).unlink()
         except (FileNotFoundError, KeyError):

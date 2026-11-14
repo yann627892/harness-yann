@@ -1200,6 +1200,37 @@ def test_bucket_create_undoes_its_steps_when_one_fails(fake_caddy, monkeypatch):
     assert calls == []
 
 
+def test_bucket_create_undoes_its_steps_when_the_registry_fails(fake_caddy, monkeypatch):
+    """infra.json cannot be written (disk full): the bucket, its key, its site and its vault keys are undone."""
+    calls = []
+
+    def fake_garage(*args, timeout=60):
+        calls.append(args)
+        if args[:2] == ("key", "create"):
+            return 0, "Key ID:              GK123\nSecret key:          s3cr3t\n", ""
+        return 0, "", ""
+
+    declare = registry.declare
+
+    def full(rid, **k):
+        if k.get("kind") == "bucket":
+            raise OSError(28, "No space left on device")
+        return declare(rid, **k)
+    monkeypatch.setattr(actions, "garage_installed", lambda: True)
+    monkeypatch.setattr(actions, "_garage", fake_garage)
+    monkeypatch.setattr(registry, "declare", full)
+    with pytest.raises(OSError):
+        actions.bucket_create("media", public=True)
+    assert ("key", "delete", "--yes", "media-key") in calls and ("bucket", "delete", "--yes", "media") in calls
+    assert vault.get("S3_MEDIA_ACCESS_KEY_ID") is None and vault.get("S3_MEDIA_BUCKET") is None
+    assert not list(fake_caddy.rglob("media.caddy"))
+
+
+def test_pg_databases_keeps_a_name_with_a_space(monkeypatch):
+    monkeypatch.setattr(actions, "_psql", lambda q, *a, **k: (0, "my app\nother\n", ""))
+    assert actions.pg_databases() == ["my app", "other"]
+
+
 def test_pg_create_drops_the_role_when_the_database_fails(org, monkeypatch):
     sql = []
 
@@ -1265,6 +1296,24 @@ def test_a_lone_surrogate_is_refused_by_every_infra_route(client, org):
     assert client.get("/api/infra").status_code == 200
 
 
+def test_a_change_made_during_a_refresh_asks_for_another(org, monkeypatch):
+    """A server removed while the servers are probed: the snapshot was built from the old registry, so it is stale."""
+    monkeypatch.setenv("MAXXING_INFRA_CHECKS", "0")
+    monkeypatch.setattr(providers, "cloudflare", lambda: CF)
+    monkeypatch.setattr(providers, "hostinger", lambda: {"connected": False, "key": None})
+
+    def slow_probe(opts):
+        time.sleep(0.05)                        # past the file clock's tick
+        infra.mark_stale()
+        return _probes(str(org.ws))["local"]
+    monkeypatch.setattr(infra, "probe_local", slow_probe)
+    infra.refresh()
+    assert infra.is_stale(infra.load_snapshot())
+    monkeypatch.setattr(infra, "probe_local", lambda opts: _probes(str(org.ws))["local"])
+    infra.refresh()                             # nothing changed during this one
+    assert not infra.is_stale(infra.load_snapshot())
+
+
 def test_a_note_made_during_a_refresh_stays(org, monkeypatch):
     monkeypatch.setenv("MAXXING_INFRA_CHECKS", "0")
     monkeypatch.setattr(providers, "cloudflare", lambda: CF)
@@ -1293,6 +1342,27 @@ def test_a_malformed_probe_answer_costs_only_its_server(monkeypatch):
     assert res["server:a"]["status"] == "down" and "server:b" in res
 
 
+def test_a_probe_entry_without_its_fields_costs_only_its_server():
+    """Lists of objects missing a required field (a listener without port, a site without host): that server is
+    down, the other servers keep their resources."""
+    good = {"sites": [{"host": "ok.example.com", "kind": "static", "root": "/srv/ok"}]}
+    for bad in ({"listeners": [{}]}, {"containers": [{"name": "x"}]}, {"sites": [{"a": 1}]}, {"databases": [{"path": "/a.db"}]}):
+        servers = [{"name": n, "host": "h.example.com"} for n in ("bad", "good")]
+        res = {r["id"]: r for r in build.build({build.LOCAL: {}, "bad": bad, "good": good}, servers, {}, {}, {}, {}, "/w", None)}
+        assert res["server:bad"]["status"] == "down" and res["server:bad"]["status_detail"] == "bad_probe", bad
+        assert any(r.startswith("site:good:ok.example.com") for r in res), bad
+
+
+def test_a_malformed_server_section_costs_only_its_server():
+    """`server` with odd ips or disk fields: that server is down (bad_probe), the other servers are still built."""
+    good = {"sites": [{"host": "ok.example.com", "kind": "static", "root": "/srv/ok"}]}
+    for sv in ({"ips": [{}]}, {"ips": ["1.1.1.1"]}, {"ips": "abc"}, {"disk_free": "5", "disk_total": 10}):
+        servers = [{"name": n, "host": "h.example.com"} for n in ("bad", "good")]
+        res = {r["id"]: r for r in build.build({build.LOCAL: {}, "bad": {"server": sv}, "good": good}, servers, {}, {}, {}, {}, "/w", None)}
+        assert res["server:bad"]["status"] == "down" and res["server:bad"]["status_detail"] == "bad_probe", sv
+        assert any(r.startswith("site:good:ok.example.com") for r in res), sv
+
+
 def test_dns_providers_and_hosts_match_whole_labels():
     from maxxing.infra import dnsinfo
     assert dnsinfo.dns_provider(["ns1.surname.com"]) == "other"
@@ -1302,3 +1372,40 @@ def test_dns_providers_and_hosts_match_whole_labels():
     assert dnsinfo.hosted_by({"cname": ["evilgithub.io"]}) is None
     assert dnsinfo.hosted_by({"cname": ["me.github.io"]}) == "github"
     assert dnsinfo.hosted_by({"cname": ["cname.vercel-dns.com"]}) == "vercel"
+
+
+def test_pg_install_does_not_report_success_when_postgresql_did_not_start(monkeypatch):
+    def fake_run(args, input=None, timeout=60):
+        if args[:2] == ["systemctl", "is-active"]:
+            return 3, "inactive\n", ""
+        if args[:2] == ["systemctl", "enable"]:
+            return 1, "", "Job for postgresql.service failed"
+        return (2, "", "could not connect") if input else (0, "", "")    # psql cannot reach a stopped server
+    monkeypatch.setattr(actions, "_run", fake_run)
+    monkeypatch.setattr(actions, "ensure_backup_job", lambda: None)
+    with pytest.raises(actions.ActionError) as e:
+        actions.pg_install()
+    assert e.value.code == "start_failed" and "failed" in str(e.value)
+
+
+def test_fqdn_suffixes_relative_name_ending_with_zone_string():
+    assert providers._fqdn("myexample.com", "example.com") == "myexample.com.example.com"
+    assert providers._fqdn("www.example.com", "example.com") == "www.example.com"
+    assert providers._fqdn("example.com.", "example.com") == "example.com"
+    assert providers._fqdn("www", "example.com") == "www.example.com"
+    assert providers._fqdn("@", "example.com") == "example.com"
+
+
+def test_parse_nginx_regex_location_is_not_a_site_path():
+    conf = ("server {\n listen 80;\n server_name img.example.org;\n root /srv/img;\n"
+            " location ~* \\.(jpg|png)$ { root /srv/img; expires 30d; }\n location ~ \\.php$ { alias /srv/php; }\n}\n")
+    sites = probe.parse_nginx(conf)
+    assert [(s["host"], s["path"], s["kind"], s["root"]) for s in sites] == [("img.example.org", "", "static", "/srv/img")]
+
+
+def test_parse_nginx_regex_location_that_proxies_stays_listed():
+    conf = ("server {\n listen 80;\n server_name app.example.org;\n location / { root /srv/app; }\n"
+            " location ~ ^/api/ { proxy_pass http://127.0.0.1:4000; }\n location ~* \\.jpg$ { expires 7d; root /srv/app; }\n}\n")
+    sites = {s["path"]: s for s in probe.parse_nginx(conf)}
+    assert set(sites) == {"", "^/api"}
+    assert sites["^/api"]["kind"] == "proxy" and sites["^/api"]["upstreams"] == ["127.0.0.1:4000"]

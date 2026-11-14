@@ -62,7 +62,7 @@ def summary(tool: str, inp: Any) -> tuple[str, bool]:
     """`short()` and whether it shows the whole request (False: cut, or other keys left out such as the content of
     a Write). Only a complete summary may be allowed from a one-tap button (feed, Telegram)."""
     inp = inp if isinstance(inp, dict) else {}
-    for k in ("command", "file_path", "notebook_path", "path", "url", "pattern", "query", "prompt", "description"):
+    for k in ("command", "file_path", "notebook_path", "path", "url", "host", "pattern", "query", "prompt", "description"):
         if isinstance(inp.get(k), str) and inp[k].strip():
             text = " ".join(inp[k].split())
             rest = {o for o, v in inp.items() if o != k and v not in (None, "", [], {})} - _MINOR.get(tool, set())
@@ -121,7 +121,10 @@ def always_rule(d: dict) -> str:
         return f"Edit(/{p})"                        # "//abs": an absolute path; Edit rules cover Write too
     if tool == "WebFetch":
         from urllib.parse import urlsplit
-        host = urlsplit(str(inp.get("url") or "")).hostname or ""
+        try:
+            host = urlsplit(str(inp.get("url") or "")).hostname or ""
+        except ValueError:                           # "http://[::1": not a URL, no rule
+            return ""
         return f"WebFetch(domain:{host})" if re.fullmatch(r"[a-z0-9.-]{1,253}", host) else ""
     if tool in ("Task", "Agent", "Skill"):           # the subagent / skill runs under the same rules: ask each time
         return ""
@@ -147,7 +150,7 @@ def public(d: dict) -> dict:
             "tool": d.get("tool") or "", "input": _redact(d.get("input") if isinstance(d.get("input"), dict) else {}),
             "summary": short(str(d.get("tool") or ""), d.get("input")), "at": d.get("at"),
             "expires": d.get("expires"), "status": d.get("status"), "message": d.get("message") or "",
-            "decided_at": d.get("decided_at"), "clipped": bool(d.get("clipped"))}
+            "decided_at": d.get("decided_at"), "clipped": bool(d.get("clipped")), "kind": d.get("kind") or ""}
 
 
 _parsed: dict[str, tuple[tuple[int, int, int], dict | None]] = {}   # path -> ((inode, mtime_ns, size), content)
@@ -221,20 +224,38 @@ def decide(rid: str, decision: str, message: str = "", by: str = "web", always: 
                 workspace.add_topic_allowed_tool(topic, rule)
             except workspace.WorkspaceError as e:
                 raise ApprovalError(e.status, e.code, e.message) from None
+    # an agent's settings change that can no longer be applied as its card shows it (agent gone, a value changed
+    # since): the Allow is refused with the reason and the request closed (denied, `stale`), nothing applied
+    problem = ""
+    if decision == "allow":
+        d = get(rid)
+        if d.get("kind") == "agent_change" and d.get("status") == "pending":
+            from . import agents
+            problem = agents.change_problem(d)
     with _lock:                                 # web, Telegram and the feed at once: one answer, the others get 409
         d = get(rid)
         if d.get("status") != "pending":
             raise ApprovalError(409, "not_pending", f"This request is already {d.get('status')}")
         if decision == "allow" and d.get("clipped"):
             raise ApprovalError(409, "clipped", CLIPPED_NOTE)
-        d.update(status=decision, message=" ".join(str(message or "").split())[:MESSAGE_MAX], decided_at=time.time(),
-                 decided_by=by)
-        approval_mcp.write_atomic(_file(rid), d)
-        _seen[rid] = decision
+        if problem:
+            d.update(status="deny", stale=True, message=problem[:MESSAGE_MAX], decided_at=time.time(), decided_by=by)
+            approval_mcp.write_atomic(_file(rid), d)
+            _seen[rid] = "deny"
+        else:
+            d.update(status=decision, message=" ".join(str(message or "").split())[:MESSAGE_MAX], decided_at=time.time(),
+                     decided_by=by)
+            approval_mcp.write_atomic(_file(rid), d)
+            _seen[rid] = decision
     if _counts.get(d.get("session") or "", 0) > 0:
         _counts[d["session"]] -= 1
+    if d.get("kind") == "agent_change":
+        from . import agents
+        agents.change_decided(d)
     _note(d)
     _invalidate()
+    if problem:
+        raise ApprovalError(409, "stale_change", problem)
     return public(d)
 
 
@@ -401,7 +422,9 @@ def scan(force: bool = False) -> bool:
     final: list[dict] = []
     for d in items:
         rid, st = d["id"], d.get("status")
-        if st == "pending" and now - float(d.get("at") or now) > ORPHAN_GRACE_S and not _running(d.get("session") or ""):
+        change = d.get("kind") == "agent_change"         # outlives its turn, until it expires (agents.request_change)
+        if st == "pending" and (now > float(d.get("expires") or now) if change else
+                                now - float(d.get("at") or now) > ORPHAN_GRACE_S and not _running(d.get("session") or "")):
             with _lock:                         # its turn is gone: nobody waits for it (unless answered meanwhile)
                 cur = approval_mcp.read(_file(rid)) or d
                 if cur.get("status") == "pending":
@@ -439,7 +462,7 @@ def prime() -> None:
     for d in _all():
         if d.get("status") != "pending":
             _feed_done(d)                       # answered or expired while the server was down: its event says so
-        elif _running(d.get("session") or "") and _feed_new(d) is not False:
+        elif (_running(d.get("session") or "") or d.get("kind") == "agent_change") and _feed_new(d) is not False:
             _post(d, "approval", short(str(d.get("tool") or ""), d.get("input")), status="pending")
             _telegram("notify_approval", d)
         if d.get("status") != "pending" and now - float(d.get("decided_at") or d.get("at") or now) > KEEP_S:

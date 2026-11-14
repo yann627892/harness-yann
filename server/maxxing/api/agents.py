@@ -49,6 +49,7 @@ class Limits(BaseModel):
     timeout_s: Optional[int] = None
     debounce_s: Optional[int] = None
     approval_timeout_s: Optional[int] = None
+    chat_idle_h: Optional[int] = None
 
 
 class Trigger(BaseModel):
@@ -98,6 +99,7 @@ class AgentIn(BaseModel):
     writable: Optional[list[str]] = Field(default=None, max_length=20)
     rules: Optional[list[Rule]] = Field(default=None, max_length=20)
     subagent: Optional[bool] = None
+    chat_model: Optional[str] = Field(default=None, max_length=80)   # its model ("" = model)
     mail: Optional[list[dict]] = Field(default=None, max_length=10)    # mailboxes of the E-mail page (mail/access.py)
 
 
@@ -124,6 +126,9 @@ class RunIn(BaseModel):
     text: Optional[str] = None
     reply_to: Optional[str] = None       # a thread message: its session goes on (no new session)
     attachments: list[str] = Field(default_factory=list, max_length=agents.ATTACH_MAX)  # under <agent>/attachments/
+    model: Optional[str] = Field(default=None, max_length=80)     # a new conversation's model (the owner's pick)
+    effort: Optional[str] = Field(default=None, max_length=20)    # a new conversation's effort (the owner's pick)
+    voice: Optional[str] = None          # a voice message sent directly (under <agent>/attachments/): transcribed after
 
 
 class WebhookIn(BaseModel):
@@ -298,16 +303,31 @@ def run_agent(project: str, topic: str, name: str, body: RunIn):
     text = (body.text or "").strip()
     try:
         files = agents.checked_attachments(agents.folder(path), body.attachments)
+        voice = agents.checked_attachments(agents.folder(path), [body.voice])[0] if body.voice else None
     except agents.AgentError as e:
         raise HTTPException(e.status, detail={"error": e.code, "message": e.message}) from None
-    if files and not text:
+    if files and not text and not voice:
         text = "See the attached files."
+    if not text and not voice and not body.reply_to:
+        # Run now (no words): a run of its routine, like a schedule's - never a message of the conversation
+        return agents.fire(path, trigger="manual", source=agents.RUN_NOW_SOURCE)
     try:                       # typed by the user: an instruction, not outside data (no markers)
         return agents.fire(path, trigger="manual", prompt=text, source="manual", reply_to=body.reply_to or None,
-                           attachments=files or None)
+                           attachments=files or None, model=(body.model or "").strip() or None,
+                           effort=(body.effort or "").strip() or None, voice=voice)
     except Exception as e:     # SessionError (bad model...)
         raise HTTPException(getattr(e, "status", 500),
                             detail={"error": getattr(e, "code", "run_failed"), "message": str(e)}) from None
+
+
+@router.post("/{project}/{topic}/{name}/chat/new")
+def agent_new_chat(project: str, topic: str, name: str):
+    """The next message of the owner starts a new conversation."""
+    _on()
+    path = _path(project, topic, name)
+    if not agents.exists(path):
+        raise HTTPException(404, detail={"error": "not_found", "message": "Agent not found"})
+    return {"ok": agents.new_chat(path)}
 
 
 @router.post("/{project}/{topic}/{name}/seen")
@@ -370,6 +390,7 @@ async def _loop() -> None:
             if now - last_scan >= agents.FEED_POLL_S:
                 last_scan = now
                 await asyncio.to_thread(agents.scan_feed)
+                await asyncio.to_thread(agents.flush_waiting)
             if agents.debouncer.pending:
                 await asyncio.to_thread(agents.flush_due)
         except asyncio.CancelledError:

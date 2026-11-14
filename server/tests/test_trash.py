@@ -288,9 +288,9 @@ def test_restore_never_writes_outside_the_workspace(client, topic, mx):
     assert r.status_code == 200 and r.json()["restored_to"] == "", r.text
 
 
-def _agent(client, name="writer"):
+def _agent(client, name="writer", **extra):
     assert client.put("/api/settings", json={"agents_page": True}).status_code == 200
-    r = client.post("/api/agents", json={"topic_path": "projects/acme/topics/blog", "name": name})
+    r = client.post("/api/agents", json={"topic_path": "projects/acme/topics/blog", "name": name, **extra})
     assert r.status_code == 200, r.text
     return f"projects/acme/topics/blog/agents/{name}"
 
@@ -356,7 +356,7 @@ def test_a_new_agent_in_a_recreated_topic_starts_empty_and_the_restored_topic_ge
 
 def test_a_restored_agent_whose_name_was_taken_comes_back_as_an_agent(client, topic):
     from maxxing import agents, crons
-    a = _agent(client)
+    a = _agent(client, sandbox=True)                    # its settings come back with it (new agents are free)
     run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
     wait_idle(client, run["session"]["id"])
     job = client.post("/api/agents/acme/blog/writer/crons", json={"prompt": "NOTOOL x"}).json()
@@ -403,3 +403,10 @@ def test_an_agent_comes_back_with_its_crons_and_thread_even_through_a_linked_wor
     assert crons.get_job(job["id"]) is not None
     assert "hello thread" in [m["text"] for m in agents.thread(A)]
     assert not [p.name for p in config.state_dir("trash").iterdir() if p.name.endswith(".agents")]
+
+
+def test_trash_item_id_longer_than_a_file_name_is_a_400(client, mx):
+    # a name longer than 255 bytes cannot be in the trash: exists() raised "File name too long" (a 500)
+    long_id = "a" * 300
+    for r in (client.post(f"/api/trash/{long_id}/restore"), client.delete(f"/api/trash/{long_id}")):
+        assert r.status_code == 400 and r.json()["error"] == "bad_id", r.text

@@ -41,7 +41,7 @@ export function CommunityLink({ text }: { text: string }) {
       <Users className="size-3.5 shrink-0" />
       <span>
         {text}{' '}
-        <a href={COMMUNITY_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
+        <a href={COMMUNITY_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-primary hover:underline pointer-coarse:min-h-10">
           harness-maxxing.com/community <ExternalLink className="size-3" />
         </a>
       </span>
@@ -87,7 +87,7 @@ function ExtensionList({ kind, extra }: { kind: Kind; extra?: React.ReactNode })
           <ul className="divide-y border-t">
             {data.map((x) => (
               <li key={x.id} className="flex items-start gap-3 px-4 py-3.5">
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/50">
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted">
                   <NamedIcon name={x.icon} className="size-4.5 text-muted-foreground" />
                 </span>
                 <div className="grid min-w-0 flex-1 gap-1">

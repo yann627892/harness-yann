@@ -18,17 +18,23 @@ import { usePending } from './store'
 type Ev<T extends SessionEvent['type']> = Extract<SessionEvent, { type: T }>
 
 export type Item =
-  | { kind: 'user'; key: string; ev: Ev<'user'>; /** Voice message sent directly: its transcript once it came. */ heard?: Ev<'voice_text'> }
+  | { kind: 'user'; key: string; ev: Ev<'user'>; /** Voice message sent directly: its transcript once it came. */ heard?: Ev<'voice_text'>; /** The turn it started changed repositories (its number: "Revert to before this message"). */ changed?: number }
   | { kind: 'request'; key: string; ev: Ev<'user'> } // system-sourced prompt (compact / handoff summary)
   | { kind: 'assistant'; key: string; ev: Ev<'assistant'> }
   | { kind: 'thinking'; key: string; ev: Ev<'thinking'> }
   | { kind: 'tool'; key: string; use: Ev<'tool_use'>; result: Ev<'tool_result'> | null; /** The background work it started. */ task?: Task }
   | { kind: 'init'; key: string; ev: Ev<'init'> }
-  | { kind: 'result'; key: string; ev: Ev<'result'> }
-  | { kind: 'note'; key: string; ev: Ev<'note'> }
+  | { kind: 'result'; key: string; ev: Ev<'result'>; /** What the turn changed in git repositories. */ changes?: Ev<'changes'>; /** The turn failed: shown as one card. */ cut?: Cut }
+  | { kind: 'note'; key: string; ev: Ev<'note'>; /** The turn failed before any result line: shown as one card. */ cut?: Cut }
+  /** Changes of a turn that ended without a result line (stopped): shown alone. */
+  | { kind: 'changes'; key: string; ev: Ev<'changes'> }
 
-/** A task as the thread knows it: its `task` events merged. `interrupted`: a later turn started while it was
- *  still running (its Claude process is gone; a later event of the same task clears it). */
+/** How a failed turn ended, gathered for one card (Cut.tsx): what Claude Code wrote in place of an answer (`text`,
+ *  with its reason `api`: rate_limit, server_error…) and the last lines of the process (`detail`). */
+export type Cut = { text?: string; api?: string; detail?: string }
+
+/** A task as the thread knows it: its `task` events merged. `interrupted`: a later turn started in a new Claude
+ *  process while it was still running (it went with the old one; a later event of the same task clears it). */
 export type Task = Omit<TaskEvent, 'type' | 'at'> & { started: number; updated: number; ended?: number; interrupted?: boolean }
 
 export type LogState = {
@@ -55,6 +61,13 @@ export type LogState = {
   hidden: Record<string, boolean>
   /** Background work (sub-agents, commands), by task id; tool items carry theirs too (`task`). */
   tasks: Record<string, Task>
+  /** A turn started and its `init` has not come yet: it tells whether the turn got a new Claude process. */
+  turnOpen: boolean
+  /** A turn of these events started in a new Claude process: what ran in the background before it was cut. */
+  cut: boolean
+  /** The first `init` of these events, when it came before any turn start: a new process? (`null`: a turn
+   *  start came first; `undefined`: neither yet). It answers for a turn started at the end of the page before. */
+  headNew?: boolean | null
 }
 
 const EARLIER_EVENTS = 200
@@ -76,6 +89,8 @@ const INITIAL: LogState = {
   orphans: {},
   hidden: {},
   tasks: {},
+  turnOpen: false,
+  cut: false,
 }
 
 const cache = new Map<string, LogState>()
@@ -121,7 +136,7 @@ export function fold(st: LogState, evs: SessionEvent[], next: number, sid: strin
   let hidden = st.hidden
   let tasks = st.tasks
   let ownTasks = false // copy st.tasks once, on the first change of this fold
-  let { count, lastModel, lastUserAt } = st
+  let { count, lastModel, lastUserAt, turnOpen, cut, headNew } = st
   const setTask = (tk: Task) => {
     if (!ownTasks) {
       tasks = { ...tasks }
@@ -143,8 +158,11 @@ export function fold(st: LogState, evs: SessionEvent[], next: number, sid: strin
           settle(sid, ev.text)
         }
         lastUserAt = ev.at
-        // A new turn = a new Claude process: what the last one left running is gone.
-        for (const tk of Object.values(tasks)) if (tk.state === 'running' && !tk.interrupted) setTask({ ...tk, interrupted: true })
+        // A turn starts (a message added to a running turn does not): its `init` says in which process.
+        if (!ev.injected) {
+          turnOpen = true
+          if (headNew === undefined) headNew = null
+        }
         break
       case 'task':
         setTask(mergeTask(tasks[ev.id], ev))
@@ -167,16 +185,51 @@ export function fold(st: LogState, evs: SessionEvent[], next: number, sid: strin
         break
       }
       case 'init':
+        // A turn in a new Claude process: what the last one left running in the background is gone. In the same
+        // process (a message sent while only background tasks ran, a steer), they run on.
+        if (turnOpen) {
+          turnOpen = false
+          if (!ev.same) {
+            cut = true
+            for (const tk of Object.values(tasks)) if (tk.state === 'running' && !tk.interrupted) setTask({ ...tk, interrupted: true })
+          }
+        } else if (headNew === undefined) headNew = !ev.same
         // Only show the model row when it changes (first turn, or a different model).
         if (ev.model && ev.model !== lastModel) items.push({ kind: 'init', key, ev })
         if (ev.model) lastModel = ev.model
         break
-      case 'result':
-        items.push({ kind: 'result', key, ev })
+      case 'result': {
+        // A call the API refused: the line written in place of an answer belongs to the card of the failed turn.
+        const said = items[items.length - 1]
+        if (!ev.ok && said?.kind === 'assistant' && said.ev.error) items[items.length - 1] = { kind: 'result', key, ev, cut: { text: said.ev.text, api: said.ev.error } }
+        else items.push({ kind: 'result', key, ev })
         break
-      case 'note':
-        items.push({ kind: 'note', key, ev })
+      }
+      case 'note': {
+        // The end of a failed turn joins what the turn already said about it (one card, not three rows).
+        const end = items[items.length - 1]
+        if (!ev.failed) items.push({ kind: 'note', key, ev })
+        else if (end?.kind === 'result' && !end.ev.ok) items[items.length - 1] = { ...end, cut: { ...end.cut, detail: ev.text } }
+        else if (end?.kind === 'assistant' && end.ev.error) items[items.length - 1] = { kind: 'note', key, ev, cut: { text: end.ev.text, api: end.ev.error, detail: ev.text } }
+        else items.push({ kind: 'note', key, ev, cut: { detail: ev.text } })
         break
+      }
+      case 'changes': {
+        // On the turn's result line (written just before), and its message offers "Revert to before this message".
+        let placed = false
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i]
+          if (it.kind === 'result' && !placed) {
+            items[i] = { ...it, changes: ev }
+            placed = true
+          } else if (it.kind === 'user') {
+            items[i] = { ...it, changed: ev.n }
+            break
+          }
+        }
+        if (!placed) items.push({ kind: 'changes', key, ev })
+        break
+      }
       case 'hide':
         hidden = { ...hidden, [String(ev.ref)]: ev.hidden }
         break
@@ -192,7 +245,7 @@ export function fold(st: LogState, evs: SessionEvent[], next: number, sid: strin
       }
     }
   }
-  return { ...st, items, toolIdx, orphans, hidden, tasks, count, lastModel, lastUserAt, next }
+  return { ...st, items, toolIdx, orphans, hidden, tasks, count, lastModel, lastUserAt, next, turnOpen, cut, headNew }
 }
 
 function mergeTask(cur: Task | undefined, ev: TaskEvent): Task {
@@ -216,7 +269,8 @@ export function isShownTask(tk: Task | undefined): tk is Task {
 }
 
 export type TaskStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted'
-/** What a task shows: one still "running" after its session stopped (or a newer turn started) was interrupted. */
+/** What a task shows: one still "running" after its session stopped (or a newer turn started in a new Claude
+ *  process) was interrupted. */
 export function taskStatus(tk: Task, sessionRunning: boolean): TaskStatus {
   if (tk.state && tk.state !== 'running') return tk.state
   return tk.interrupted || !sessionRunning ? 'interrupted' : 'running'
@@ -230,8 +284,9 @@ export function foldBefore(st: LogState, evs: SessionEvent[], start: number, mor
   const orphans = { ...older.orphans }
   // Results already loaded whose tool_use only arrives now.
   // Tasks: the newer events win, field by field; one the older page left running was interrupted when the newer
-  // page holds a later turn.
-  const newerTurn = st.items.some((it) => it.kind === 'user' || it.kind === 'request')
+  // page holds a later turn in a new Claude process (also the turn the older page ends on, whose `init` is the
+  // first of the newer page).
+  const newerTurn = st.cut || (older.turnOpen && st.headNew === true)
   const tasks: Record<string, Task> = {}
   for (const tk of Object.values(older.tasks)) tasks[tk.id] = newerTurn && tk.state === 'running' ? { ...tk, interrupted: true } : tk
   for (const tk of Object.values(st.tasks)) {
@@ -274,6 +329,8 @@ export function foldBefore(st: LogState, evs: SessionEvent[], start: number, mor
     orphans,
     hidden: { ...older.hidden, ...st.hidden },           // the newer hide events win
     tasks,
+    cut: older.cut || newerTurn,
+    headNew: older.headNew !== undefined ? older.headNew : st.headNew,
     batches: st.batches + 1,
     lastModel: st.lastModel ?? older.lastModel,
     lastUserAt: st.lastUserAt ?? older.lastUserAt,
@@ -424,6 +481,16 @@ export function withoutHidden(items: Item[], hidden: Record<string, boolean>): I
     if (!skipping) out.push(it)
   }
   return out
+}
+
+/** Key of the failed turn the thread ends on (nothing was sent since), else null: its card offers to resume. */
+export function endingCut(items: Item[]): string | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]
+    if ((it.kind === 'result' || it.kind === 'note') && it.cut) return it.key
+    if (it.kind !== 'note' && it.kind !== 'changes') return null
+  }
+  return null
 }
 
 /** Keys of the user messages that got no answer (their turn was stopped or failed before Claude wrote anything):

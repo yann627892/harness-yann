@@ -32,8 +32,8 @@ once each (Memory compaction, Check for updates, Morning tasks and Renewal remin
 | `--files-root PATH` | root of the Files page (default: home folder) |
 | `--port N` | HTTP port (default 8787) |
 | `--bind IP` | `127.0.0.1` or the Tailscale IP; public addresses are refused |
-| `--public-url URL` | e.g. `https://ui.example.com`; `""` clears it |
-| `--timezone TZ` | IANA name (default: the system zone). Keep it equal to the system zone (`timedatectl`), which cron uses - unless the server clock is kept |
+| `--public-url URL` | e.g. `https://ui.example.com`; `""` clears it; a malformed URL is refused |
+| `--timezone TZ` | IANA name (default: the system zone). Keep it equal to the system zone (`timedatectl`), which cron uses - unless the server clock is kept. An unknown zone is refused |
 | `--system-clock follow\|keep` | `follow`: changing the time zone in the UI also switches the system zone; `keep`: never touch it (shared server), jobs check their schedule in your zone |
 | `--claude-dir PATH` | Claude Code folder for Harness Maxxing (default `~/.claude`; `""` = back to it). Another folder keeps it apart from a Claude Code already used on the server (passed to sessions as `CLAUDE_CONFIG_DIR`) |
 | `--language en\|fr` | interface language |
@@ -105,7 +105,7 @@ See [License](license).
 |---|---|
 | `maxxing import --prompt [hermes\|claude-code\|openclaw\|other]` | print the prompt to give your old agent |
 | `maxxing import ZIP --dry-run [--json]` | show what would be imported |
-| `maxxing import ZIP [--json]` | import it (nothing overwritten; see [Import](import)) |
+| `maxxing import ZIP [--json]` | import it (nothing overwritten; see [Import](import)), then print the message that lets a session finish (tasks, scheduled jobs, keys) |
 
 ## maxxing custom
 
@@ -133,7 +133,7 @@ Remotion, the Whisper models, Garage). As root.
 | `maxxing deps update [NAME...] [--notify]` | install the pinned versions next to the old ones, switch once they work (every `maxxing update` does it) |
 | `maxxing deps remove NAME [--force]` | delete what the manifest lists for it (`--force` for uv, Python, Claude Code) |
 | `maxxing deps clean [--dry-run] [--caches]` | old versions, unused browsers, leftovers, oversized logs (weekly job); `--caches` also empties root's uv / npm / pip / npx caches, shared with the other tools of the server |
-| `maxxing deps check [--notify]` | known vulnerabilities (osv.dev) in the lockfiles and components (weekly job, notification) |
+| `maxxing deps check [--notify] [--json]` | known vulnerabilities (osv.dev) in the lockfiles and components (weekly job, notification) |
 
 ## maxxing uninstall
 
@@ -149,7 +149,7 @@ Remotion, the Whisper models, Garage). As root.
 | Command | Purpose |
 |---|---|
 | `maxxing cron list` | jobs, schedules, last results |
-| `maxxing cron run <id>` | run a job now in your terminal and wait for it; `--detach` starts it in its own systemd unit with the memory limits and returns (what the crontab calls); `--if-due` runs it only if its schedule matches now in your zone (server clock kept) |
+| `maxxing cron run <id>` | run a job now in your terminal and wait for it; `--detach` starts it in its own systemd unit with the memory limits and returns (it runs it here if systemd refuses) (what the crontab calls); `--if-due` runs it only if its schedule matches now in your zone (server clock kept) |
 | `maxxing cron sync` | rewrite the managed crontab block from the job list |
 
 ## Notifications feed
@@ -162,13 +162,20 @@ Remotion, the Whisper models, Garage). As root.
 | `maxxing packs list [--json]` | starter projects and whether they are installed |
 | `maxxing packs add ID [ID...] [--json]` | add starter projects (never overwrites: only missing files are added; jobs created disabled) |
 
+## Team
+
+| Command | Purpose |
+|---|---|
+| `maxxing team send NAME MESSAGE... [--file PATH] [--json]` | send a message to a contact or a group, in your name (name: case and accents ignored, a unique beginning is enough, or a contact's address; `-` reads the message from stdin; `--file` repeatable). Team must be on |
+| `maxxing team list [--json]` | the contacts and groups you can write to |
+
 ## Keys
 
 | Command | Purpose |
 |---|---|
 | `maxxing keys list [--json]` | names, notes and whether each key is exposed, files marked `file` (never the values or contents) |
 | `maxxing keys get NAME` | print a value (exit code 1 when missing) |
-| `printf %s "$VALUE" \| maxxing keys set NAME [--note TEXT] [--no-expose]` | create or update a key; the value comes from stdin, never from the command line. A new key is exposed (environment variable of every session and shell job) unless `--no-expose`; an update keeps its note and exposure; a multi-line value (PEM, SSH key) keeps its final line break |
+| `printf %s "$VALUE" \| maxxing keys set NAME [--note TEXT] [--no-expose]` | create or update a key; the value comes from stdin, never from the command line. A new key is exposed (environment variable of every session and shell job) unless `--no-expose`; an update keeps its note and exposure; a multi-line value (PEM, SSH key) keeps its final line break; a value that is not UTF-8 text is refused (use `put-file`) |
 | `maxxing keys delete NAME` | remove a key |
 | `maxxing keys put-file NAME PATH [--note TEXT] [--no-expose]` | store a secret **file** (keystore, service-account JSON, certificate; 1 byte to 1 MiB) read from `PATH`, or from stdin with `-`. A new file is exposed (the environment variable `NAME` holds its path in sessions and shell jobs) unless `--no-expose`; never in the backup |
 | `maxxing keys get-file NAME [--output PATH] [--force]` | write the file to stdout, or to `PATH` (mode 600; refuses an existing path unless `--force`) |
@@ -207,7 +214,7 @@ OAuth sign-ins (state "To connect") are done in Settings -> MCP -> **Connect**. 
 | `maxxing agents on AGENT` / `off AGENT` | switch it on / off |
 | `maxxing agents silent AGENT` / `loud AGENT` | it works without notifying you (no Telegram, notifications already read, nothing unread) / back to normal |
 | `maxxing agents templates [--lang L] [--json]` | the ready-made agents (id, name, trigger) |
-| `maxxing agents create P/T/A --role TEXT\|--role-file F\|--template ID [--lang L] [--name N] [--model M] [--permission M] [--approvals] [--keys A,B] [--trust-outside] [--telegram] [--usd-per-day N] [--runs-per-hour N] [--domains H,H] [--writable D,D] [--mail ADDRESS] [--no-sandbox] [--off] [--json]` | create an agent in a topic (sandboxed unless `--no-sandbox`; `--template`: a ready-made agent, the other options override it; `--mail`: the mailbox of an e-mail template) |
+| `maxxing agents create P/T/A --role TEXT\|--role-file F\|--template ID [--lang L] [--name N] [--model M] [--permission M] [--approvals] [--keys A,B] [--trust-outside] [--telegram] [--usd-per-day N] [--runs-per-hour N] [--domains H,H] [--writable D,D] [--mail ADDRESS] [--no-sandbox] [--off] [--json]` | create an agent in a topic (sandboxed unless `--no-sandbox`; `--template`: a ready-made agent, the other options override it; `--mail`: a mailbox for the agent - the one an e-mail template needs, or for a role-only agent read + drafts with the `maxxing mail` tool allowed) |
 | `maxxing agents show AGENT` | its settings, role, triggers, schedule jobs and webhook URLs (JSON, no secret) |
 | `maxxing agents cron AGENT --schedule CRON [--prompt T] [--name N] [--json]` | add a schedule (a Claude job in the agent folder) |
 | `maxxing agents webhook AGENT [--kind generic\|stripe\|shopify\|github] [--prompt T] [--levels L] [--match W] [--json]` | add a webhook and print its URL |
@@ -247,6 +254,9 @@ OAuth sign-ins (state "To connect") are done in Settings -> MCP -> **Connect**. 
 | Command | Purpose |
 |---|---|
 | `maxxing memory [--json]` | every memory.md with its line count and the line limit (Settings -> Memory) |
+| `maxxing sessions send SESSION MESSAGE... [--file PATH] [--json]` | write to a session as if typed in it (SESSION: its id, its first 8 characters or its title - case and accents ignored, a unique beginning is enough; `--file` repeatable). Run by Claude from a session, the message says which session sent it; 3 sends in a row between sessions or agents at most. Refused in a sandboxed agent |
+| `maxxing sessions new TOPIC [MESSAGE...] [--title T] [--model M] [--effort E] [--file PATH] [--json]` | start a session in a topic (TOPIC: `<project>/<topic>` or `projects/<project>/topics/<topic>`) with a first message; no `--title`: made from the message. Run by Claude from a session or an agent, the message says which session started it, with the same limit of 3 sends in a row. An agent is started with `maxxing agents run` instead. Refused in a sandboxed agent |
+| `maxxing sessions list [--json]` | the sessions that are not archived: id, state, topic, title |
 | `maxxing sessions compact-logs [--dry-run]` | clip the tool outputs of existing session logs and drop the bulky Claude start-up lists and progress lines (frees disk space; `--dry-run` only reports what would be saved) |
 | `maxxing sessions token-report [--days N] [--json]` | where the tokens of your sessions go, read from Claude Code's transcripts: context size per call, cache rewritten after an idle hour or a model switch, the tools whose outputs fill the context, and what automatic compaction at 400k / 300k / 250k / 200k would have saved on the same calls |
 

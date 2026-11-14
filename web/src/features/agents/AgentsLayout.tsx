@@ -8,7 +8,7 @@
 //   /agents/groups/<project>/<name>          -> an agent group: the owner talks to several agents (GroupPage)
 //   /agents/groups/new?project=<p>           -> the form of a new group (GroupForm)
 //   ?new=1 opens the creation sheet, ?topic=<project>/<topic> narrows the list.
-// "New agent" and "Edit with Claude" open a new-session draft in Sessions (EditWithClaude.tsx), not a page here.
+// "New agent" opens the creation sheet (CreateAgent.tsx): where and a name, then the empty agent's conversation.
 // The left column, top to bottom: title, search, New agent, the Office entry, the state filter, the agents by project.
 // Touch layout: /agents is the list (like the contacts of a chat app: search, state filter, unread counts - easier to
 // scan on a phone than the cards) with the Office entry; the Office, an agent or a run opens full screen with a back
@@ -60,8 +60,9 @@ export default function AgentsLayout() {
   )
   const topic = params.get('topic') || ''
   const topicPath = topic ? `projects/${topic.replace('/', '/topics/')}` : undefined
-  // "New agent": the sheet asks where (the listed topic if the list is narrowed to one), then With Claude / By hand.
+  // "New agent": the sheet asks where (the listed topic if the list is narrowed to one) and a name.
   const newAgent = React.useCallback(() => openWith({}), [openWith])
+  const [query, setQuery] = React.useState('')
 
   if (on === false) return <AgentsOff />
 
@@ -84,12 +85,12 @@ export default function AgentsLayout() {
   // Office in the page.
   return (
     <div className="flex min-h-0 flex-1" data-testid="agents-layout">
-      <PageList id="agents" label={t('agents.title')}>
+      <PageList id="agents" label={t('agents.title')} search={{ value: query, onChange: setQuery, placeholder: t('agents.side.search') }}>
         {touch ? (
-          <AgentsList nav={<OfficeLink onNew={newAgent} />} className="min-h-0 flex-1" />
+          <AgentsList nav={<OfficeLink onNew={newAgent} />} query={query} className="min-h-0 flex-1" />
         ) : (
           <AgentHover className="min-h-0 flex-1">
-            <AgentsList nav={<OfficeLink onNew={newAgent} />} className="flex-1" />
+            <AgentsList nav={<OfficeLink onNew={newAgent} />} query={query} className="flex-1" />
           </AgentHover>
         )}
       </PageList>

@@ -42,9 +42,12 @@ missing and never re-create a project or topic you deleted.
 ## What you can do
 
 - **Sessions**: several conversations side by side, live streaming, attachments, message queue
-  (steer, edit, or ask a side question without interrupting), plan mode (validate before any change),
+  (steer, add to the plan, edit, or ask a side question without interrupting), plan mode (validate before any change),
   HUD mode, model choice per session, stop, compact, hand off, archive, full-text search, move a
   session to another topic.
+- **Code**: when Claude changes a git repository, a button under its answer opens the diff; undo a file, revert to
+  before a message, commit (Claude proposes the message), push and open a pull request, and a terminal under the
+  conversation (Settings -> Features -> Sessions -> Code mode). See [Code in a session](code).
 - **Sessions list**: three layouts (tree, one level at a time, sessions only), favorites and recent
   sessions on top, an emoji per project.
 - **Files**: browse, edit, and preview almost anything in one viewer (pictures, videos, PDF, CSV as a

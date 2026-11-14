@@ -42,12 +42,13 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, lazy: page(() => import('./pages/dashboard')) },
           // Feature pages — implemented in src/pages/<name>/index.tsx
-          { path: 'sessions/*', lazy: page(() => import('./pages/sessions'), ['files']) },
+          // `files.*` is asked only by the file menu and the preview (both on demand): the group loads then.
+          { path: 'sessions/*', lazy: page(() => import('./pages/sessions')) },
           { path: 'files/*', lazy: page(() => import('./pages/files'), ['files', 'media']) },
           { path: 'tasks/*', lazy: page(() => import('./pages/tasks'), ['tasks']) },
           // Crons moved into Settings (links in old notifications, Telegram reports and bookmarks keep working)
           { path: 'crons/*', Component: CronsMoved },
-          { path: 'feed', lazy: page(() => import('./pages/feed')) },
+          { path: 'feed', lazy: page(() => import('./pages/feed'), ['team']) },
           // Optional feature pages (Settings -> Features)
           { path: 'git', lazy: page(() => import('./features/git/GitPage'), ['git']) },
           // the list of agents + the selected agent / one of its runs (the session column needs the files texts)
@@ -57,11 +58,12 @@ export const routes: RouteObject[] = [
           { path: 'mail', lazy: page(() => import('./features/mail/MailPage'), ['mail']) },
           // Settings & docs
           { path: 'settings', element: <Navigate to="/settings/general" replace /> },
-          { path: 'settings/:section', lazy: page(() => import('./pages/settings'), ['settings', 'auth', 'show', 'tasks']) },
+          { path: 'settings/:section', lazy: page(() => import('./pages/settings'), ['settings', 'auth', 'show', 'tasks', 'team']) },
           { path: 'docs', lazy: page(() => import('./pages/docs')) },
           { path: 'docs/:slug', lazy: page(() => import('./pages/docs')) },
           // Extension pages: /x/<id> loads /ext/<id>/page.js
-          { path: 'x', lazy: page(() => import('./pages/ext/hub')) },
+          // the old Extensions page: the pinned ones are in the sidebar's Extensions folder, the rest in Settings -> Pages
+          { path: 'x', element: <Navigate to="/settings/pages" replace /> },
           { path: 'x/:id/*', lazy: page(() => import('./pages/ext')) },
           { path: '*', Component: NotFound },
         ],

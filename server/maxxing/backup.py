@@ -61,7 +61,7 @@ AUTHOR = ("Harness Maxxing", "backup@localhost")
 
 # Directories never descended into, files never copied (matched on the base name, case-insensitive).
 PRUNE_DIRS = {".git", "node_modules", "attachments", ".venv", "venv", "__pycache__", ".cache", ".trash",
-              ".ssh", ".gnupg", META_DIR}
+              ".ssh", ".gnupg", META_DIR, "worktrees"}     # worktrees: copies of Code mode
 DENY_FILES = [r"secrets\.json", r"keys\.json", r"\.env", r".*\.env", r"\.env\..*", r".*\.pem", r".*\.key",
               r".*\.p12", r".*\.pfx", r"id_(rsa|dsa|ecdsa|ed25519).*", r".*credentials.*", r".*\.log",
               r".*\.jsonl", r".*\.sqlite3?", r".*\.db", r"\.netrc", r"\.git-credentials", r".*\.kdbx"]
@@ -91,12 +91,15 @@ LEAKS: list[tuple[str, re.Pattern[bytes]]] = [(k, re.compile(p.encode())) for k,
     ("JSON web token", r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     # a password written next to its label (accounts.md is backed up): a value of 8+ characters mixing letters and
     # digits, not a sentence ("password: in the vault"), a placeholder (<...>, `...`), a variable ($DB_PASS), a link
-    # nor a password manager's name ("Password: 1Password")
+    # nor a password manager's name ("Password: 1Password") nor the name of the key that holds it ("mdp: SHOP_DB_PASS2",
+    # upper case words joined by underscores, each ending with at most two digits, the last one may be a number:
+    # how a password is meant to be noted next to an account; "S3CR3T_P4SS_9X" is not a key name)
     # The lookaheads are bounded: unbounded, a long token such as "password:password:..." rescans the rest of the
     # line at every label and the scan turns quadratic (minutes for a few hundred kB). Quotes around the label and
     # the value are allowed so JSON passwords ("password": "...") are caught too.
     ("password", r"(?i)(?:password|passwd|mot de passe|mdp)[\"']?[ \t]*[:=][ \t]*[\"']?(?!\$)(?![^\s]{0,256}://)"
                  r"(?!(?:1password|bitwarden|keepass\w*|lastpass|dashlane|protonpass|keychain)\b)"
+                 r"(?!(?-i:[A-Z]+[0-9]{0,2}(?:_[A-Z]+[0-9]{0,2})*_(?:[A-Z]+[0-9]{0,2}|[0-9]+))(?=[\s,.;:)\]|`'\"]|$))"
                  r"(?=[^\s`'\"<>()]{0,128}\d)(?=[^\s`'\"<>()]{0,128}[A-Za-z])[^\s`'\"<>()]{8,}"),
 ]]
 
@@ -372,6 +375,8 @@ def clean_include(include: Any) -> list[str]:
         if not isinstance(g, str):
             raise BackupError(f"Invalid pattern: {g!r}", "invalid_include")
         g = g.strip()
+        if not _utf8(g):                                    # a lone surrogate: valid JSON, not storable
+            raise BackupError("Invalid pattern (not valid text)", "invalid_include")
         while g.startswith("./"):
             g = g[2:]
         if not g or g.startswith(("/", "~")) or ".." in Path(g).parts:
@@ -671,9 +676,11 @@ def history(limit: int = 100) -> list[dict]:
     try:
         for ln in _history_path().read_text().splitlines():
             try:
-                out.append(json.loads(ln))
+                e = json.loads(ln)
             except ValueError:
-                pass
+                continue
+            if isinstance(e, dict):                      # null / 5 / [] from a hand edit are skipped like garbage
+                out.append(e)
     except OSError:
         pass
     return list(reversed(out))[:limit]

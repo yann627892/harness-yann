@@ -59,7 +59,7 @@ export function ClaudeStatusCard({ onReplace, onAdd }: { onReplace?: () => void;
     if (ok) remove.mutate({ kind, id })
   }
   return (
-    <div className="grid gap-3">
+    <div className="grid grid-cols-1 gap-3">
       <Callout
         tone={s.auth.ok ? 'success' : 'warning'}
         title={s.auth.ok ? t('claude.connected') : s.auth.method ? t('claude.signInExpired') : t('claude.notConnected')}
@@ -157,6 +157,19 @@ export function ClaudeStatusCard({ onReplace, onAdd }: { onReplace?: () => void;
           {onAdd && (
             <Button variant="outline" size="sm" onClick={() => window.dispatchEvent(new CustomEvent('maxxing:add-credential', { detail: onAdd }))}>
               <PlusCircle /> {t(onAdd === 'gateway' ? 'cconn.addGateway' : 'cconn.addAnthropic')}
+            </Button>
+          )}
+          {s.auth.method !== 'credentials' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-auto min-h-8 max-w-full shrink py-1 text-left whitespace-normal text-destructive hover:text-destructive"
+              loading={remove.isPending}
+              onClick={async () => {
+                if (await confirm({ title: t('claude.removeTitle'), description: t('claude.removeDesc'), destructive: true, confirmText: t('common.remove') })) remove.mutate()
+              }}
+            >
+              <Trash2 /> {t('claude.remove')}
             </Button>
           )}
         </div>

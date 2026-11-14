@@ -19,7 +19,8 @@ import {
   type VoiceModel,
   type VoiceStatus,
 } from './api'
-import { fmtClock, useRecorder } from './recorder'
+import { micId, setMicId, useMics } from './mic'
+import { fmtClock, micUnavailable, toMicError, useRecorder } from './recorder'
 import { LevelMeter, micErrorText } from './VoiceButton'
 
 export function EngineChoice({ status, compact }: { status: VoiceStatus; compact?: boolean }) {
@@ -209,6 +210,7 @@ export function VoiceOptions({ status }: { status: VoiceStatus }) {
   const s = status.settings
   return (
     <div className="divide-y">
+      <MicRow />
       <SettingRow label={t('voice.language')} description={t('voice.languageDesc')} htmlFor="voice-lang">
         <Select
           id="voice-lang"
@@ -227,6 +229,43 @@ export function VoiceOptions({ status }: { status: VoiceStatus }) {
         </SettingRow>
       )}
     </div>
+  )
+}
+
+/** Which microphone records on this device (kept in this browser, see mic.ts). */
+function MicRow() {
+  const t = useT()
+  const { mics, named, ask } = useMics()
+  const [id, setId] = React.useState(micId)
+  const [err, setErr] = React.useState<string | null>(null)
+  if (micUnavailable()) return null
+  const options = [{ value: 'default', label: t('voice.micDefault') }, ...mics.map((m, i) => ({ value: m.id, label: m.label || t('voice.micN', { n: i + 1 }) }))]
+  // chosen, then unplugged: it stays the choice (the default one records meanwhile)
+  if (id && !mics.some((m) => m.id === id)) options.push({ value: id, label: t('voice.micGone') })
+  const pick = (v: string) => {
+    const next = v === 'default' ? '' : v
+    setMicId(next)
+    setId(next)
+  }
+  return (
+    <SettingRow label={t('voice.mic')} description={err ? <span className="text-destructive">{err}</span> : t('voice.micDesc')} htmlFor="voice-mic">
+      {named ? (
+        <Select id="voice-mic" className="w-56" value={id || 'default'} onValueChange={pick} options={options} />
+      ) : (
+        <Button
+          id="voice-mic"
+          variant="outline"
+          onClick={() =>
+            void ask().then(
+              () => setErr(null),
+              (e) => setErr(micErrorText(t, toMicError(e))),
+            )
+          }
+        >
+          <Mic /> {t('voice.micShow')}
+        </Button>
+      )}
+    </SettingRow>
   )
 }
 
@@ -284,7 +323,7 @@ export function RecordTest({ status }: { status: VoiceStatus }) {
       </div>
       {err && <Callout tone="error">{err}</Callout>}
       {res && (
-        <div className="grid gap-2 rounded-lg border bg-muted/30 p-3.5" data-voice-result>
+        <div className="grid gap-2 rounded-lg border bg-fill-1 p-3.5" data-voice-result>
           <p className="text-sm whitespace-pre-wrap">{res.text || <span className="text-muted-foreground">{t('voice.noSpeech')}</span>}</p>
           <p className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted-foreground tabular-nums">
             <span>{t('voice.stat.audio', { s: res.duration_s.toFixed(1) })}</span>

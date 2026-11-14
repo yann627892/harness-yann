@@ -36,7 +36,8 @@ import { GroupFace } from './AgentsList'
 import { GroupForm, claudeTopic } from './GroupForm'
 import { draftUrl } from './EditWithClaude'
 import { AgentsOff, reasonText, useAgentsOn } from './parts'
-import { MentionChip, mentionComponents, mentionNodes, namedIn, useMentionMap, type MentionMap } from './mentions'
+import { MentionChip, mentionComponents, mentionNodes, mentionSpans, namedIn, useMentionMap, type MentionMap } from './mentions'
+import { ChipBackdrop } from '@/features/chips/Chip'
 import { AttachButton, AttachList, bringBackDraft, insertAtCaret, useAttachments, useDraftText, withQuote } from './attach'
 import { QuotePill } from '@/pages/sessions/Quote'
 import { agentDraftKey } from '@/lib/drafts'
@@ -255,7 +256,7 @@ function MemberBar({ group: g, onMention }: { group: AgentGroup; onMention: (slu
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className={cn('flex min-w-0 items-center gap-1.5 rounded-full py-0.5 pr-2.5 pl-0.5 text-left outline-none hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring', touch && 'min-h-10 pl-1', (m.paused || !m.exists) && 'opacity-55')}
+                    className={cn('flex min-w-0 items-center gap-1.5 rounded-full py-0.5 pr-2.5 pl-0.5 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring', touch && 'min-h-10 pl-1', (m.paused || !m.exists) && 'opacity-55')}
                     aria-label={m.display_name}
                   >
                     <AgentAvatarIcon avatar={m.avatar} size={touch ? 28 : 24} />
@@ -603,6 +604,12 @@ function Composer({ group: g, ref, first }: { group: AgentGroup; ref?: React.Ref
   const [hi, setHi] = React.useState(0)
   const [closed, setClosed] = React.useState(false)
   const input = React.useRef<HTMLTextAreaElement>(null)
+  // the element too (state): the chips' backdrop follows it from its first render (a restored "@name" draft)
+  const [inputEl, setInputEl] = React.useState<HTMLTextAreaElement | null>(null)
+  const setInput = React.useCallback((el: HTMLTextAreaElement | null) => {
+    input.current = el
+    setInputEl(el)
+  }, [])
   // The caret goes to `placeAt` as soon as the new text is in the box (before the next key is typed).
   const placeAt = React.useRef<number | null>(null)
   const putText = (pasted: string, start: number, end: number) =>
@@ -769,8 +776,9 @@ function Composer({ group: g, ref, first }: { group: AgentGroup; ref?: React.Ref
           <AttachList atts={files.atts} onRemove={files.remove} />
           <div className="flex items-end gap-1">
             <AttachButton onFiles={files.add} />
+            <ChipBackdrop text={text} spans={mentionSpans(text, names, '')} target={inputEl} />
             <Textarea
-              ref={input}
+              ref={setInput}
               value={text}
               onPaste={files.onPaste}
               onChange={(e) => {
@@ -789,7 +797,7 @@ function Composer({ group: g, ref, first }: { group: AgentGroup; ref?: React.Ref
               aria-label={t('groups.placeholder')}
               aria-expanded={popup}
               aria-autocomplete="list"
-              className="min-h-8 flex-1 resize-none border-0 bg-transparent px-1.5 py-1.5 text-[14px] shadow-none focus-visible:ring-0 dark:bg-transparent"
+              className="relative min-h-8 flex-1 resize-none border-0 bg-transparent px-1.5 py-1.5 text-[14px] shadow-none focus-visible:ring-0 dark:bg-transparent"
               data-testid="group-text"
             />
             <VoiceButton onTranscript={onTranscript} />

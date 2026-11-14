@@ -35,7 +35,7 @@ def _front(text: str) -> dict[str, str]:
         elif key and line[:1] in (" ", "\t"):
             out[key] = f"{out[key]} {line.strip()}".strip()
     for k, v in out.items():
-        v = v.removeprefix(">-").removeprefix(">").removeprefix("|").strip()
+        v = re.sub(r"^[|>][-+]?", "", v).strip()                  # a block scalar header: | |- |+ > >- >+
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
             v = v[1:-1]
         out[k] = " ".join(v.split())
@@ -61,9 +61,18 @@ def _read(folder: Path, origin: str, **where: str) -> dict | None:
     }
 
 
+def _utf8(p: Path) -> bool:
+    """A folder name that is not UTF-8 (surrogates) cannot be sent as JSON: it is left out."""
+    try:
+        p.name.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def _scan(root: Path, origin: str, skip: set[str] | None = None, **where: str) -> list[dict]:
     try:
-        folders = sorted(p for p in root.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
+        folders = sorted(p for p in root.iterdir() if _utf8(p) and p.is_dir() and (p / "SKILL.md").is_file())
     except OSError:
         return []
     out = []
@@ -86,16 +95,26 @@ def list_skills() -> list[dict]:
     out += _scan(ws / ".claude" / "skills", "workspace")
     projects = ws / "projects"
     try:
-        pdirs = sorted(p for p in projects.iterdir() if p.is_dir() and not p.name.startswith("."))
+        pdirs = sorted(p for p in projects.iterdir() if _utf8(p) and p.is_dir() and not p.name.startswith("."))
     except OSError:
         pdirs = []
     for p in pdirs:
         out += _scan(p / ".claude" / "skills", "project", project=p.name)
         try:
-            tdirs = sorted(t for t in (p / "topics").iterdir() if t.is_dir() and not t.name.startswith("."))
+            tdirs = sorted(t for t in (p / "topics").iterdir() if _utf8(t) and t.is_dir() and not t.name.startswith("."))
         except OSError:
             tdirs = []
         for t in tdirs:
             out += _scan(t / ".claude" / "skills", "topic", project=p.name, topic=t.name)
     return out
+
+
+def for_topic(path: str) -> list[dict]:
+    """The skills a session of the topic `path` (`projects/<p>/topics/<t>`, or a project, or "" = the workspace) can
+    start with /name: the server's, the workspace's, its project's and its own (the slash menu of the composer)."""
+    parts = (path or "").strip("/").split("/")
+    project = parts[1] if len(parts) >= 2 and parts[0] == "projects" else None
+    topic = parts[3] if len(parts) >= 4 and parts[2] == "topics" else None
+    return [s for s in list_skills() if s["origin"] in ("product", "user", "workspace")
+            or (project is not None and s.get("project") == project and (s["origin"] == "project" or s.get("topic") == topic))]
 

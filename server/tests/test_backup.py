@@ -105,8 +105,13 @@ def test_scanner_ignores_names():
     assert backup.scan_bytes(text) == []
     for ok in ("password: in the vault (Settings -> Keys)", "mot de passe : `<PASSWORD>`", "passwd = changeme",
                "password: see accounts", "| mdp: 1Password |", "password=$DB_PASS_2024",
-               "- Password: https://vault.bitwarden.com/#/vault?itemId=4f2a", "sk_live_ keys start like this", "the eyJ prefix of a JWT"):
+               "- Password: https://vault.bitwarden.com/#/vault?itemId=4f2a", "sk_live_ keys start like this", "the eyJ prefix of a JWT",
+               "(mdp : SHOP2_CF_PASSWORD)", "password: SMTP_PASS_2024, rotated", 'password: "SHOP_DB_PASS2"', "mdp: S3_SECRET_KEY"):
         assert backup.scan_bytes(ok.encode()) == [], ok
+    # a key name only when it is the whole value: a password that starts like one, or mixed case, is still caught
+    for bad in ("mdp : SHOP2_CF_Xk81mQ", "password: Shop_Db_2024x", "password: ABC_DEF12gh", "password: S3CR3T_P4SS_9X",
+                "mdp: P4SSW0RD_2024", 'password: "AB12CD_9X"'):
+        assert backup.scan_bytes(bad.encode()) == ["password"], bad
 
 
 def test_scanner_is_linear_on_a_crafted_token():
@@ -653,3 +658,21 @@ def test_the_restore_skips_files_larger_than_the_backup_limit(gh, ws, mx_state, 
     monkeypatch.setattr(backup, "MAX_RESTORE", 5)
     r = backup.restore()
     assert r["ok"] is False and r["code"] == "too_large"
+
+
+def test_hand_edited_history_lines_that_are_not_objects_are_skipped(mx_state):
+    p = backup._history_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"at": 1, "ok": true}\nnull\n5\n[]\nnot json\n', encoding="utf-8")
+    assert backup.status()["last"]["ok"] is True
+    assert backup.last_success_age_h() is not None
+    assert backup.history() == [{"at": 1, "ok": True}]
+
+
+async def test_a_lone_surrogate_in_the_backup_include_is_refused(gh, ws):
+    """Valid JSON that config.json cannot store: invalid_include, not a 500."""
+    app = bare_app(backup_api.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.put("/api/backup/settings", content=b'{"include": ["\\ud800"]}',
+                        headers={"content-type": "application/json"})
+        assert r.status_code == 400 and r.json()["error"] == "invalid_include", r.text

@@ -20,7 +20,7 @@ KEYS = ("timezone", "language", "public_url", "files_root", "presentation_defaul
         "maxxing_mode", "memory_max_lines", "result_line_hidden", "donation_hidden", "sidebar_order")
 RESULT_FIELDS = ("model", "duration", "cost", "tokens", "cache")   # parts of the line under each answer
 _ROUTE = re.compile(r"^/(x/[a-z0-9][a-z0-9-]{0,47}|[a-z0-9-]{0,40})\Z")   # a page (/sessions) or a pinned extension page (/x/<id>)
-_URL = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?(/[^\s]*)?$")
+_URL = config.PUBLIC_URL_RE
 
 
 class SettingsIn(BaseModel):
@@ -49,19 +49,22 @@ def _err(code: str, msg: str) -> HTTPException:
 
 def current() -> dict:
     cfg = config.load_config()
+    hidden = cfg.get("result_line_hidden")
+    hidden = hidden if isinstance(hidden, list) else []       # a hand-edited value of another type: nothing hidden
     return {"timezone": cfg.get("timezone") or "UTC", "language": cfg.get("language") or "en",
             "public_url": cfg.get("public_url") or "", "files_root": cfg.get("files_root") or "/root",
             "presentation_default": bool(cfg.get("presentation_default", False)),
             "usage_widget": bool(cfg.get("usage_widget", False)),
             "tasks_page": bool(cfg.get("tasks_page", False)),
             "git_page": bool(cfg.get("git_page", False)),
+            "code_mode": bool(cfg.get("code_mode", False)),   # read-only here: /api/term/enable|disable
             "infra_page": bool(cfg.get("infra_page", False)),
             "team_page": bool(cfg.get("team_page", False)),
             "agents_page": bool(cfg.get("agents_page", False)),
             "mail_page": bool(cfg.get("mail_page", False)),
             "maxxing_mode": bool(cfg.get("maxxing_mode", False)),
             "memory_max_lines": memory.max_lines(),
-            "result_line_hidden": [f for f in RESULT_FIELDS if f in (cfg.get("result_line_hidden") or [])],
+            "result_line_hidden": [f for f in RESULT_FIELDS if f in hidden],
             "donation_hidden": bool(cfg.get("donation_hidden", False)),
             "sidebar_order": sidebar_order(cfg.get("sidebar_order"))}
 
@@ -247,6 +250,12 @@ class FeedbackIn(BaseModel):
     type: Literal["bug", "idea", "other"] = "other"
     message: str
     image: Optional[FeedbackImageIn] = None   # the zone of the screen the user selected
+    forced: bool = False                      # sent although this server's Claude had answered it (feedback.check)
+
+
+class FeedbackCheckIn(BaseModel):
+    type: Literal["bug", "idea", "other"] = "other"
+    message: str
 
 
 @router.get("/feedback")
@@ -262,7 +271,18 @@ async def post_feedback(body: FeedbackIn):
     from .. import feedback
     try:
         shot = feedback.image(body.image.mime, body.image.data, body.image.width, body.image.height) if body.image else None
-        return await asyncio.to_thread(feedback.send, body.email, body.type, body.message, shot)
+        return await asyncio.to_thread(feedback.send, body.email, body.type, body.message, shot, body.forced)
+    except feedback.FeedbackError as e:
+        raise HTTPException(e.status, detail={"error": e.code, "message": str(e)}) from None
+
+
+@router.post("/feedback/check")
+async def post_feedback_check(body: FeedbackCheckIn):
+    """This server's Claude reads the message before it is sent: verdict `send` (a bug, a general idea: it goes),
+    `answer` or `self` (answered here, with the request for a new session). Never blocks: `send` when in doubt."""
+    from .. import feedback
+    try:
+        return await asyncio.to_thread(feedback.check, body.type, body.message)
     except feedback.FeedbackError as e:
         raise HTTPException(e.status, detail={"error": e.code, "message": str(e)}) from None
 
@@ -318,12 +338,14 @@ def put_settings(body: SettingsIn):
     changes = {k: v for k, v in changes.items() if k not in cfg or cfg[k] != v}
     if "timezone" in changes:
         try:
+            if changes["timezone"] in config.PSEUDO_ZONES:
+                raise ValueError
             ZoneInfo(changes["timezone"])
         except Exception:
             raise _err("invalid_timezone", f"unknown time zone {changes['timezone']!r}") from None
     if "public_url" in changes:
         url = changes["public_url"].strip().rstrip("/")
-        if url and not _URL.match(url):
+        if url and not (_URL.match(url) and _utf8(url)):
             raise _err("invalid_url", "public_url must look like https://ui.example.com")
         changes["public_url"] = url
     if "memory_max_lines" in changes:
@@ -338,10 +360,15 @@ def put_settings(body: SettingsIn):
             raise _err("invalid_sidebar_order", "sidebar_order: at most 40 page routes like /sessions or /x/<id>")
         changes["sidebar_order"] = list(dict.fromkeys(order))
     if "files_root" in changes:
-        p = Path(changes["files_root"]).expanduser()
-        if not p.is_absolute() or not p.is_dir():
+        try:
+            p = Path(changes["files_root"]).expanduser() if len(changes["files_root"]) <= 4096 else None
+            ok = p is not None and p.is_absolute() and p.is_dir()
+            if ok:
+                changes["files_root"] = str(p.resolve())
+        except (RuntimeError, OSError):               # ~user that does not exist, a name too long (ENAMETOOLONG)
+            ok = False
+        if not ok:
             raise _err("invalid_files_root", "files_root must be an existing absolute folder")
-        changes["files_root"] = str(p.resolve())
     if changes:
         config.update_config(**changes)
         if "timezone" in changes:

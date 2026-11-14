@@ -3,6 +3,520 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
+## 2.0.0-alpha.151 - 2026-11-14
+
+New:
+- **Chips for names and commands.** When you pick someone from the `@` menu (a session, an agent, a Team contact or
+  group), the name becomes a chip right in the box, and stays one in the sent message: a click opens that session or
+  agent. A `/command` or skill at the start of a message is a chip too, in sessions and in an agent's conversation.
+  The `@` of an agent group use the same chip.
+
+Fixed:
+- **Memory: a heavy memory.md no longer goes unnoticed, and sessions stop being summarized after almost every
+  message because of it.** A `memory.md` is part of the instructions of every session of its folder, and Claude
+  sends it again in full each time it changes. The nightly clean only counted lines: a file of 100 lines made of
+  very long bullets (70 KB, about 30,000 tokens) stayed "under the limit", was added to the conversation again at
+  each note written, and the session reached the automatic summary every two or three messages. The limit of
+  Settings -> Memory now also weighs the file (1 KB for 10 lines: 200 lines = 20 KB): heavier files are shown in
+  red, `maxxing memory` flags them, and the nightly clean (or **Clean now**) shortens their bullets. Claude is
+  also told to write one or two lines per note. Nothing to do: tonight's clean shortens the files that are too
+  heavy; **Clean now** does it right away.
+- **Sessions: background tasks no longer look stopped when you send a message.** A message sent once the answer is
+  written, while commands or agents still work in the background, goes to the same Claude: they keep running. The
+  conversation showed them as "interrupted" all the same and took away the "N running in the background" bar. They
+  now stay shown as running, with their bar, until they really end. They are only shown as interrupted when they
+  were: after **Stop**, or when the message had to start a new Claude (the model, Plan mode or the permissions
+  of the session changed in between, or the message names an MCP server that was not loaded).
+- **Sessions: with "Load MCP servers only when a session needs them", background tasks were sometimes stopped
+  for nothing.** The servers a message gets can change from one message to the next (another session of the topic
+  used a new one, a server was named once and never used): that alone started a new Claude and stopped the
+  commands and agents running in the background. Such a message now goes to the same Claude, and the new choice
+  applies once that work is over. A new Claude is still started when your message names a server that is not
+  loaded, or when Claude asked for one; the line in the conversation now says which server.
+- **Agents: on a phone, Deny / Allow no longer go off screen while the agent works.** On an agent's page, a
+  request waiting for your answer was drawn above the turn going on and its steps (up to 12 lines), so the two
+  buttons were pushed out of view and the agent looked stuck. The request is now the last thing of the
+  conversation, under the turn that asks.
+- **Files: on an iPhone, a video no longer stays at 0:00 once the player's volume was lowered.** An iPhone does
+  not let a page set the volume, so the player's slider sends the sound through the browser's audio engine. When
+  that engine was not running (Harness installed on the Home Screen, back from the background), the video showed
+  as playing and never moved; the same video played in Safari, where the volume was never touched. The sound now
+  takes that path only once the engine really runs, and pressing play wakes it: until then the video plays at the
+  level of the phone's buttons.
+
+## 2.0.0-alpha.150 - 2026-11-13
+
+New:
+- **Files: Word, Excel, PowerPoint and OpenDocument files open in the viewer.** A `.docx`, `.pptx`, `.odt` or `.odp`
+  shows as a page of text (headings, lists, tables, links, its pictures, one section per slide with its notes), a
+  `.xlsx` or `.ods` as a table per sheet with the column letters, the row numbers, a filter and the sheets as tabs at
+  the bottom - on the Files page and when a path is clicked in a conversation, with nothing to install. The words
+  and numbers of the file, not its layout: **Download** gives the original. Old `.doc` / `.xls` / `.ppt` still
+  download.
+- **Files: a PDF reads on a phone.** Where the browser shows no PDF inside a page (most phones: an empty frame or
+  the first page only), the PDF now opens page by page, as far as the last one: two fingers, a double tap or
+  **− / +** zoom, pages load as you scroll and the bar shows the page you are on. On a computer the browser's own
+  reader stays.
+- **Glass material** (Settings -> Appearance -> Material): the bars, menus, dialogs and the search window become
+  see-through and blurred over a soft backdrop in your accent color, in dark and light mode; cards, the message box,
+  buttons and the selected row become liquid glass (a see-through fill with a bright edge and a sheen, the selection
+  tinted by your accent). Menus and the message box stay nearly opaque so text reads easily, the folded list shown
+  over the page is no longer see-through, the phone menu shows the backdrop too, and no accent outline around the
+  message box. Solid stays the default.
+- The highlight of the current page in the sidebar and of the chosen option in switches glides to the one you click.
+- Extensions (pages and HTML widgets) follow the Glass material too: their cards, tiles and secondary buttons
+  become liquid glass like the app's.
+- The interface and the pages now appear top to bottom, in order: at startup, in the sessions list, in Settings and
+  on the dashboard (a card's content after the card).
+
+
+Changed:
+- **Files: the viewer opens faster.** A file clicked in a conversation used to wait three times before anything
+  showed: for the viewer itself, for a look at its folder, then for its date. The viewer is now ready before the
+  click, and a file with a known extension asks for its content at once: on a connection of 8 Mbit/s, an image, a
+  video, a Word or Excel file, a PDF or a file of code shows two to four times sooner (0.2 to 0.5 s instead of 0.5
+  to 0.9 s). A big image no longer downloads its original on a light connection before you zoom, and a PDF read page
+  by page asks each page once instead of twice.
+- **Clearer backgrounds: you see at a glance what you are looking at.** The sidebar, the list beside it and the page
+  no longer share the same background: the sidebar is the darkest (the lightest grey in light mode), the list is one
+  step lighter, and the page sits in a panel with rounded corners; cards, menus and dialogs each come one step
+  nearer. The same steps apply everywhere, with the neutral or tinted background and every accent color.
+- **Sub-agents: one line instead of two.** The bubble above the message box that said "8 subagents running" is
+  gone: the last line of the conversation says it (or adds "· 8 subagents" after what Claude is doing) and a click
+  on it lists them, as the bubble did.
+- **Hovered and selected rows look the same everywhere.** Light fills (hover, selection, quiet zones) are now three
+  shades of the text color instead of a different grey on each screen, so a row reacts the same in the sidebar, a
+  list, the page or a card.
+
+## 2.0.0-alpha.149 - 2026-11-13
+
+Changed:
+- **Files: the preview loads in the shape of the file.** While a file opens (a path clicked in a conversation, the
+  Files page), the viewer no longer shows the same grey bars for everything: a picture frame for an image, a page for
+  a PDF, a page of text for Markdown, a table for a CSV, numbered lines for code, a player for a video or a sound, a
+  card for the rest. A light band sweeps over it, and a file that opens at once no longer flashes a loader.
+
+## 2.0.0-alpha.148 - 2026-11-13
+
+New:
+- **Separate copy: one session, one branch, one folder (Code mode).** A new session in a topic with a git repository
+  can work on a **separate copy**: its own folder (`worktrees/` in the topic) and its own branch (`session/<title>`),
+  so two sessions on the same repository never step on each other. A command per repository prepares each new copy
+  (`npm ci`, `uv sync`…), the `.env` files and those named in a `.worktreeinclude` are copied, and each copy has
+  10 ports of its own for its dev servers (`$MAXXING_PORT`). A bar above the composer shows the branch against `main` and
+  ends it in one click: **Open a PR** on GitHub, **Merge into main** otherwise, or **Discard**; files left are committed
+  first with a message Claude proposes, and a conflict is handed to Claude in the session. Once its PR is merged on
+  GitHub, **Remove the copy** takes the copy and its branch.
+- **Pull requests in Harness.** A pull request opens in Harness from the Git page (Open / To review / Closed) or from the
+  badge of the Changes view: its conversation, its files with the same diff as the Changes view, comments on lines,
+  checks; **Comment**, **Approve**, **Request changes**, **Merge**, **Close**. **Work on this PR** starts a session on a
+  separate copy of its branch; **Ask Claude to review** starts one in plan mode that drafts the review as a card you
+  publish yourself. A pull request from outside the repository is marked and its sessions start in plan mode; the
+  copy of a pull request from a fork or from outside runs nothing by itself (no preparation command, no `.env`
+  copied). A PR opened from Harness starts from the repository's pull request template.
+- **Claude writes the PR and watches it.** **Open a PR** shows a title and a description Claude wrote from the
+  conversation, the commits and the diff (you can change them). While the PR is open, a failed check, a conflict or a
+  comment from someone of the repository wakes the session up: Claude fixes, pushes and says what it did - once per
+  event, 4 times a day at most, never for comments from outside the repository. The eye beside the PR in the bar of
+  the copy turns it off.
+- **Big diffs shown whole.** A PR's files show their whole diff; a file too big for GitHub links to it; a minified
+  line is cut until **Show all**.
+
+Changed:
+- **Session shortcuts list the new keys.** The shortcuts window of Sessions now shows `/` (commands at the start of
+  a message), `@` (name a session, an agent or a contact), Ctrl/⌘+Shift+V (paste as text) and, with Code mode on,
+  Ctrl+J (open or close the terminal).
+- **`maxxing sessions new`: start a session from the command line.** `maxxing sessions new acme/blog "Write the
+  newsletter"` starts a session in that topic with a first message (`--title`, `--model`, `--effort`, `--file`).
+  Claude can use it from a session or from an agent that is not in its sandbox, like `maxxing sessions send`: the
+  message says which session started it, and sends in a row stay limited to 3. Agents keep `maxxing agents create`,
+  `run` and `send`, which a session can already use.
+- **Agents: the message box works like a session's.** The microphone sends a voice message directly (Settings ->
+  Voice -> Send voice messages right away, on by default): the recording shows at once in the conversation and its
+  words under it once the server has transcribed them, instead of waiting for the transcript before sending. The
+  model and the intelligence are picked under the box and change the current conversation (before, a model picked
+  there only counted for the next new conversation). `/` opens the same menu as in a session: `/model`, `/effort`,
+  `/new` (new conversation), `/compact` and the skills of the topic.
+- **Sessions: compaction follows the model's context window.** The thresholds of Settings -> Claude (automatic
+  compaction 300k, compact when you come back 200k, smart resume 100k) were the same for every model: on a model
+  with a 200k window they were out of reach, so a long session was never summarized by Harness between two messages
+  and Claude Code compacted it by itself in the middle of its turns, near the end of the window (measured on one
+  server: 47 times in 3 days, about 75 s of waiting each). A threshold now counts as at most the model's window
+  minus 70k (130k on a 200k model); the note of the compaction says so. Models with a 1M window: no change. An
+  automatic compaction is also skipped when the context is mostly what every new thread loads anyway (CLAUDE.md,
+  memory), like the two other rules.
+- **Sessions: a turn that stops short says it in one card, with a button.** When Claude stops before the end
+  (usage limit reached, Claude's servers down, a crash), the thread no longer shows Claude Code's raw sentence, a
+  red technical line and the same line again above the message box: one card says what happened in plain words
+  ("Usage limit reached"), with **Resume** (sends "Continue where you stopped."), the model of the next turn right
+  beside it (to resume with another one), a link to the usage page when a limit is the cause, and the technical
+  lines behind **Details**. Once you have resumed, the card stays as a trace, without its buttons.
+
+Fixed:
+- **Settings: `localtime` is no longer accepted as a time zone.** tzdata ships it as a link to `/etc/localtime`;
+  written by `PUT /api/settings`, `maxxing init --timezone` or the installer, it made `/etc/localtime` point at
+  itself: the server silently fell back to UTC, and every scheduled job then ran twice (once at the right time
+  by the catch-up, once an hour or two later by cron). `maxxing doctor` already reports the mismatch (time zone
+  line); the fix is `timedatectl set-timezone <zone> && systemctl restart cron`.
+- **Scheduled jobs: no double run when the server's clock is not the configured time zone.** With the system
+  zone changed or broken outside Harness (server clock on "follow"), cron fires on the system clock while the
+  catch-up looked for missed runs in the configured zone: each job was "missed" at its displayed time, caught up
+  a few minutes later, then started again by cron. The catch-up now follows the clock cron really fires on: the
+  job runs once, at the system's time, until the zones are put back in line (`maxxing doctor`, time zone line).
+- **Videos: going back on the bar goes back.** While a video played, a click earlier on its bar (at 0:07, back to
+  0:01) could do nothing: the playback carried on from where it was. It happened when the player changed to the
+  lighter copy at that very moment, more often on a slow connection. The player now goes where you clicked.
+
+## 2.0.0-alpha.147 - 2026-11-13
+
+New:
+- **The sidebar says how the server is doing.** "All good" at the bottom of the sidebar (and of the phone menu) is
+  now one short sentence in your language, about the most pressing thing only: a problem in plain words ("The backup
+  is gathering dust."), "Running hot! CPU at 92%.", memory or disk filling up, more than ten unread notifications,
+  finished sessions waiting, agents with news, sessions at work. For the Claude plan, a light forecast: at the pace
+  of the current window, the quota runs out before its reset ("At this pace, 5-hour quota out by 16:40 (resets
+  18:00)."), or it will hold. Two lines at most; a click leads where it is dealt with.
+- **Sidebar: four icons on the last line.** Settings loses its name there: Settings, light / dark, presentation
+  mode and Help are four icons in the middle of the line (names on hover), on a computer and in the phone menu.
+- **Sessions: Tabs or Zones.** Two modes, one switch at the top right (Alt+T): **Tabs** shows one session at a
+  time with the open ones as tabs above, **Zones** puts them side by side. The switch is one icon left of
+  **New session**, no text, in the colour of the other icons of the bar: it draws the mode in use, and its bars move from one picture to the other when
+  you change (tab heads drop into columns, columns go back up into tabs). A new browser starts in Tabs; a browser
+  that already had its sessions keeps its mode.
+- **Sessions: the change of mode moves.** Going from Tabs to Zones, every session comes down from its tab and
+  unrolls into its column, one after the other; back to Tabs, the tabs rise from the columns and the session that
+  stays glides to the middle. Nothing jumps any more (and nothing moves when reduced motion is asked for).
+- **Sessions: Add to plan.** **Add now**, on the waiting messages, is now called **Add to plan**: it hands them to
+  the running task without interrupting it, Claude reads them at its next step and goes on with them in mind.
+  **Steer** remains the one that interrupts to be read at once. The message is marked *added to the plan* in the
+  conversation.
+- **Sessions: no more page title.** On a computer the title and its description are gone: one bar holds the tabs,
+  the switch and the actions (the buttons keep only their icon when the tabs need the room).
+- **Feedback: your own Harness reads the message first.** A question, a setting or something that already exists
+  is answered in the window; a change specific to your installation (another model, a custom endpoint, another
+  account, a tool of yours) gets a ready request and **Open a session**; only real bugs and general ideas go to the
+  team. **Send it to the team anyway** is always there, and the check never holds a message back.
+- **Import from Hermes or OpenClaw.** The prompt given to the old agent names the places these agents really use
+  (Hermes: `SOUL.md`, `memories/`, its scheduled jobs, profiles; OpenClaw: the workspace files, its own skills, its
+  job store), asks for your language, leaves out the stock skills and says how to zip without `zip`. A zip made one
+  folder too high is read instead of being set aside whole, skills sorted in categories are imported one by one,
+  `memories/MEMORY.md` and `USER.md` go to the root memory, and a new project or topic keeps its description.
+  `maxxing import ZIP` prints the last step (the message that lets a session create the tasks, propose the scheduled
+  jobs and list the keys).
+- **Claude knows the code tools of a session.** Asked for a terminal, it points to Code mode (Ctrl+J, `/terminal`)
+  instead of offering SSH; asked to undo a turn, to "Revert to before this message" and the Changes view. The help
+  topic knows Tabs and Zones, the intelligence of a session, `/` commands, `@` and `maxxing team send`.
+
+Fixed:
+- **Sessions: a side question works while the session is on its first turn.** Asked during the first turn of a
+  session, or during the first turn after its context was compacted, a side question was refused with "this session
+  has not answered once", even with a whole conversation above. It is now answered from what the session has done
+  so far.
+- **Small fixes.** The icons of the sidebar's last line are bigger to the finger; a long chat name no longer pushes
+  the Team message popup off screen; a WebFetch approval with a malformed address no longer breaks the list of
+  approvals; `maxxing agents show` reads a role file that is not UTF-8, and `maxxing agents set` with a too deeply
+  nested value says so instead of crashing.
+
+Security:
+- **Changes view: a diff no longer runs a program named by the repository.** A repository whose `.git/config`
+  declares a `textconv` converter (with `.git/info/attributes`) had it run by the server when you opened a file's
+  diff in Changes or asked for a commit message. Both now read the files as they are, like the Git page.
+
+## 2.0.0-alpha.146 - 2026-11-13
+
+New:
+- **Code in a session.** When Claude changes files of a git repository, a button under its answer sums it up
+  (**app · 3 files · +12 −4**). Click it: the changes open in the file viewer, one block per repository with its
+  branch, its pull request and the checks. Pick **This turn**, **Whole session**, **Not committed** or **Whole
+  branch**; click a file for its diff (← / → between files). **Undo this file** or **Undo all** without a
+  confirmation (**Restore** for 10 seconds). **Commit** (leave the message empty and Claude proposes one), **Push**,
+  **Open a pull request**, **New branch**. Click line numbers in a diff, then **Ask Claude**: the lines go into your
+  next message. [Show me](#show:code)
+- **Revert to before a message.** Right click (long press) one of your messages whose answer changed a repository:
+  the files go back as they were just before it, with **Restore** for 10 seconds.
+- **Code mode: a terminal under the conversation.** Settings -> Features -> Sessions -> **Code mode** (off by
+  default, your password is asked to turn it on). Then **Ctrl+J**, **/terminal** or the session's options open a
+  terminal in the session's repository, one tab per terminal, **Send the selection to Claude**; it survives a page
+  reload, closes after 30 minutes without activity. Keys for a phone. Never for agents.
+- `maxxing doctor` lists the programs started by hand that have been running for more than a week.
+
+## 2.0.0-alpha.145 - 2026-11-12
+
+New:
+- **An Extensions folder in the sidebar.** The extension pages you pin no longer sit among the pages: they are in an
+  **Extensions** folder at the end of them. Click it to unfold or fold it (it stays as you left it), drag a page in it
+  to reorder. Folded sidebar: its icon opens the same list beside it; on a phone it is in the menu of the drawer.
+  Which pages go in: Settings -> Pages (**In the sidebar**) or the pin of a page. The Extensions page is gone: every
+  page, pinned or not, is in Settings -> Pages and in the search (Ctrl/⌘+K). A page you had placed between two pages
+  moves into the folder.
+- **Team: Open in a bubble.** A chat in the Team page has **Open in a bubble** at its top: it goes into a bubble at
+  the bottom right and you are back where you were. The chat icon hidden in the sidebar's Team entry is gone; this
+  button also brings the bubbles back after their × hid them.
+
+## 2.0.0-alpha.144 - 2026-11-12
+
+New:
+- **A tidier session header.** The plan, bell and HUD buttons left the header: the **…** of a session (or a
+  right-click on its header, a long press on a phone) opens a window with the *Plan mode* and *Notify me on
+  Telegram* switches, then Compact, Summarise & restart, Open the folder, the HUD, the column actions (Detach,
+  Stack, Layout) and Archive / Delete. A small checklist or bell next to the topic shows what is on. *Move left /
+  right* (drag the grip) and *Copy ID* are gone. Plan mode is also `/plan` in the message box.
+
+## 2.0.0-alpha.143 - 2026-11-12
+
+New:
+- **Every page with a list works the same way.** Agents, Team, Infra, E-mail, Files, Tasks, Notifications, Sessions
+  and Git: the page's title is what you picked in its list (the page's name is at the top of the list), the 🔍
+  facing the list's title filters the list, its filters sit on one line, one purple button with its label. Agents:
+  the **Overview** (was the Office), **New group** in the ▾ of **New agent**. Team: one header. Files: the path under
+  the title. Tasks: projects without an open task folded, and a search that finds tasks. E-mail: the real number of
+  unread mails (no more 99+). Notifications: readable source names.
+- **Git, simpler.** The list holds the sources: this server, then one line per GitHub account; each shows its
+  repositories as cards. A repository opens its graph over the whole width, with a **Server | GitHub** switch when it
+  has both.
+- **Infra, calmer.** Colours tell a state only (down, to watch, fine); the places are grey. "How it works" and the
+  tabs' notes open from the **?** of the header instead of coming back by themselves; the search is the list's, the
+  project filter sits in the header.
+- **Phone: one drawer.** ☰ at the top left opens the sidebar of the computer; a page with a list slides to its
+  list, **‹** goes back to the menu. Search: the field at the top of the menu, and the 🔍 facing each list's title.
+- **Sidebar's last line.** Settings, then light / dark, presentation mode and Help as icons. The health line opens
+  the Notifications, or a window with one card per open problem (Open, Seen).
+- **Commands with `/` in the composer**, as in Claude Code: type `/` and a menu lists the session's commands
+  (`/model`, `/effort`, `/plan`, `/compact`, `/handoff`, `/new`, `/rename`) and the skills of the topic, with their
+  description. Arrows to choose, Tab to complete, Enter to run.
+- **Intelligence of a session.** The model menu of a session now also sets how much Claude thinks: Auto, Low,
+  Medium, High, Extra high or Max (Claude Code's effort level). It is kept on the session and shown next to the model.
+- **Team from a session.** Ask Claude "send Léa the summary above on Team" or "tell the Side project group the
+  site is online": it runs `maxxing team send <name> "<message>"` (with `--file` for a file), and the message goes
+  out in your name as if typed in Team. `maxxing team list` shows who you can write to. Nothing reads your chats.
+- **Name someone with `@` in the composer.** Type `@` and pick one of your other sessions, an agent or a Team
+  contact or group; then ask Claude: "summarize this and send it to @Shop opening", "ask @Lea if the site works
+  for her". Claude writes to them (nothing goes out unless your message asks for it) and says what it sent. A
+  session receives it as a message marked with the session that sent it. New command `maxxing sessions send
+  <session> "<message>"` (and `sessions list`), usable from a script too.
+- **Voice: choose the microphone.** Settings -> Voice has a **Microphone** line: pick the microphone that records
+  on this device (headset, USB microphone, the built-in one) instead of the one the browser picks. The choice stays
+  in this browser; if that microphone is unplugged, the default one records and the choice comes back with it.
+
+- **The same sessions on your computer and your phone.** The sessions open on the computer are the tabs of the
+  phone (tabs view on), and the other way round: open one on either, it appears on the other; close it anywhere, it
+  closes everywhere. Each device keeps its own layout (columns or tabs, widths, the session in front). The first
+  time, the phone takes the computer's sessions and keeps only the one on its screen. A session opened from another
+  device no longer takes the keyboard from the one you are typing in.
+- **Search: sessions first.** Search (Ctrl/⌘+K, the search icon on a phone) opens on your last sessions, and what
+  you type finds sessions by their title first, at once, before pages, settings and commands.
+- **Phone: a simpler sessions drawer.** All / Running / Unread sit on one line, full width; the view options and
+  the New session button moved up beside the title.
+- **Team: a new message pops up as a message.** Instead of a notice with an Open button, a message of a chat that is
+  not on screen shows who wrote and what they wrote, with a box to answer on the spot; tapping it opens the chat.
+  Chats that write at the same time share one popup; it leaves after a few seconds, never while you are writing.
+- **Phone: Team opens on the chats.** The page is the list of chats itself (no more "Choose a chat" screen with a
+  button that slid the list in); a chat has a back arrow to the list, and the phone's back gesture returns to it too.
+
+Fixed:
+- **Sessions: `maxxing sessions send` never writes into an agent's conversation** (an agent is reached with
+  `maxxing agents send`, with its own guards), a Team name goes into Claude's prompt as plain text, and your own
+  words merged with a message from another session are no longer introduced as that session's.
+- **Phone: closing a tab no longer sweeps the tabs sideways.** In tabs view, closing or changing a tab restarted
+  the row of tabs from its start and slid it across the screen.
+- **Narrow phones (320-360 px)**: option groups too wide for the screen (theme, priority, Telegram) go on a second
+  line instead of being cut; Settings -> Claude, MCP and System no longer spill out of their cards; a table in the
+  docs or in an answer keeps readable columns and scrolls sideways; a page title with no room left is hidden
+  rather than cut to two letters; Keyboard shortcuts is no longer offered in the search of a phone.
+- **Sessions: a message no longer shows twice.** On a slow connection, the message you just sent could appear a
+  second time under Claude's first steps, greyed with "Sending…", until the turn ended. It was sent only once.
+- **Agents: a message you send is on screen.** When you had scrolled up in an agent's conversation (a long answer
+  read from its start, on a phone above all), the message you sent stayed below the screen, as if it had not gone:
+  the conversation now goes back to the bottom when you send.
+- **Team: a message shows the moment you send it.** It waited for the server's answer and for the chat to be read
+  again (slow on a phone connection); it is now in the chat at once, and goes back to the box if the send fails.
+
+Security:
+- **Agents: the ready-made jobs that read the web start Protected.** Sales of the day, Orders to handle, Watch, Blog
+  writer and Site monitor (`maxxing agents create --template`) fetch pages without asking; a page can carry orders,
+  as a webhook or a mail does. They now start in their sandbox, like the webhook and mail templates: their commands
+  reach only their sites and no secret. Give Site monitor the host names it checks (its page -> Protection). Agents
+  already made from these templates are not changed: switch them to **Protected** on their page.
+- **Updated dependencies with known advisories**: certifi 2026.10.23 (a distrusted root certificate removed),
+  filelock 4.2.10 (voice transcription), zod 4.6.7 (in the Remotion tools; they are reinstalled at the next update).
+
+## 2.0.0-alpha.142 - 2026-11-12
+
+Fixed:
+- **Agents: the cost of a run cut short is counted once.** A run stopped by its time limit is counted from its log,
+  and the next answer in the same conversation no longer counts it a second time; a run that ended abruptly (out of
+  memory, a crash) no longer makes the next answer count 0 $.
+
+## 2.0.0-alpha.141 - 2026-11-12
+
+New:
+- **Right click everywhere**: a right click (a long press on a phone) on a row or a card opens its menu where you
+  clicked - settings lists, crons, notifications, mail, tasks, Team, an agent's triggers, a session's header. The
+  browser's menu stays on selected text, fields and links.
+- **Agents: edit and delete from the agent's menu.** Right click on an agent of the list or a desk of the Office, or
+  the new **...** on its page and in the Office conversation panel: Edit role, Name and look (the character at its
+  desk) and Delete (same confirmation as in its settings).
+- **Sessions: Add now** on waiting messages sends them into the running task without interrupting it: Claude reads
+  them at its next step instead of after the whole task (Steer still interrupts the current step).
+- **Phone: search in one tap** - a magnifier in the top bar and a search field atop the left drawers.
+
+Changed:
+- **Sidebar**: a click on the open page's entry opens its list in the second sidebar and keeps it open; a page opened
+  by a click shows its list at once.
+- **Agents: a run stopped by its timeout counts in the daily budget** (its cost is estimated from its log; it used to
+  count 0 $). A cron job's timeout no longer goes past the agent's own limit, runs are told to do one pass and never
+  wait inside a run, and a group member's session is renewed after a long pause.
+
+Fixed:
+- **Phone**: the crons list fits the screen, trash rows keep their names, the notifications header keeps its title.
+- **Bugs reported in #75** (each one proven by a failing test, thanks to its reporter):
+  - **Telegram**: long replies full of emoji are split by the length Telegram counts (an emoji counts 2), so they are
+    no longer refused for being over 4096.
+  - **E-mail**: an HTML-only draft reopens with its text; the size shown for a quoted-printable attachment is no
+    longer one byte too large per wrapped line.
+  - **Infra**: installing PostgreSQL no longer reports success when the service did not start; a relative DNS name
+    that only ends with the zone's text is shown under the zone; nginx regex locations that only serve files are no
+    longer listed as paths of a site (a regex location that proxies still is).
+  - **MCP**: a topic's own MCP server wins over a user server of the same name, as in Claude Code.
+  - **Team**: an address with an IPv6 host keeps its brackets.
+  - **Settings, Git page, Dashboard, uploads**: a files root or repository path with an unknown `~user`, a
+    hand-edited dashboard layout of the wrong shape or an infinite upload limit give a clean answer or the default
+    instead of a server error.
+  - **Shopify card**: the time of the latest orders uses the configured timezone.
+  - **CLI**: `maxxing pdf` on a page that never loads ends with "PDF failed"; `maxxing agents on|off|silent|loud` on
+    a broken agent prints the error (exit code 2); `agents create --role … --mail` also allows the `maxxing mail`
+    tool.
+  - **Import**: `.claude/agents/` and `.claude/commands/` of a zip are never imported (they are Claude Code
+    sub-agents and commands, not notes).
+  - **Agents**: a sandboxed agent can no longer create its topic's `.mcp.json` with Write/Edit.
+- **Office, Space view**: a right click (a long press on a phone) on a desk opens the agent's menu - Silent,
+  Switched on, Run now, Properties - as in the list and the Grid view.
+- **Memory backup**: a password noted by the name of its key ("password: SHOP_DB_PASS") no longer stops the
+  nightly backup as a leaked secret.
+- **Restoring a deleted scheduled job on a full disk no longer leaves it in the crontab.** If the job cannot be saved,
+  the crontab goes back to what it was, as it already did when you create, change or delete a job.
+- **Odd requests get a clean answer instead of a server error**: a trash item whose name is longer than a file name
+  can be, "mark as read" for a notification source with a broken character, or a repository path on the
+  Git page with a folder name longer than a file name can be.
+- **Slow connection: the interface no longer loads twice after an update.** Opening or reloading Harness Maxxing
+  after an update loaded the new version, then reloaded the page by itself a few seconds later (up to 20 s on a
+  phone network), once its offline copy was ready. The page you just loaded is kept; a tab left open over an update
+  still switches to the new version by itself.
+- **Sessions: the dashed drop zone no longer stays on a session.** Dragging a session over the top or the bottom
+  of another one shows where it would be stacked; when the drag was cancelled there (Escape, or a drop that did not
+  happen), the dashed frame stayed over the conversation until the next drag.
+- **Screen readers in French**: the close button of every window and side panel, the handles between session
+  columns and the masks of the presentation mode are read in your language, no longer always in English.
+- **Translations**: the "network error" message is now in your language, and the "Today" / "Yesterday" headings of
+  the feed and two Settings rows (Team bubbles, Team messages) no longer show blank for a moment while their texts load.
+- **`maxxing init`** refuses an unknown time zone or a malformed public URL instead of saving it.
+- **CLI output**: `maxxing proxy status` shows the port in its hint when the address is on no interface;
+  `maxxing deps check --json` and `maxxing import --json` print JSON, not a text line, when osv.dev is
+  unreachable or the zip is missing or refused; a negative `--page` of `maxxing mail list` lists the first page.
+- **CLI errors instead of tracebacks**: `maxxing deps verify|update` with an unknown name (`update` said nothing),
+  `cron run --if-due` on a job with a broken schedule, `cron list` with a damaged run history, `pdf` into a folder that
+  cannot be created and a failed `voice download` now print an error (on stderr) instead of a traceback;
+  `cron run --detach` runs the job here when systemd refuses to start it.
+- **Confirmations in Mail and Team use the app's own dialog**, in the app's theme, instead of the browser's. The
+  session tab arrows no longer blur what is behind them.
+- **A hand-edited setting of the wrong type no longer breaks the Settings, Extensions, Dashboard, Files, Git or Backup
+  page**: the wrong value is ignored instead of a server error.
+- **Renaming a project or topic to a name that is refused no longer saves the other changes sent with it** (its
+  emoji, permission mode or allowed tools).
+- **An invalid character no longer breaks saving.** A dashboard layout, a project emoji, the backup patterns or the
+  public address holding an invalid character (such as half of an emoji) now gets a clear error, or is ignored in a
+  dashboard layout, instead of a server error.
+- **A new file name with a null byte no longer causes a server error.** Creating or moving a file or folder to such a
+  name is refused with a clear message.
+
+## 2.0.0-alpha.140 - 2026-11-11
+
+Security:
+- **Agents: an answer to outside text stays out of your conversation.** A run started by a webhook, a
+  notification or another agent asks before any risky action. Its answer was then given as context to the next
+  session of the agent, which asked nothing: what the outside text said could come back there. A new conversation
+  with the agent no longer gets such an answer (it is still in the agent's page), and a run started by a script
+  that gets it asks first too, unless the agent trusts outside events.
+
+New:
+- **Extensions in the sidebar while a page is not pinned**: an **Extensions** entry ends the list of pages (a tile of
+  the ⊞ menu on a phone) as long as an extension page is not pinned: one click to the pages that are not in the
+  sidebar. With every page pinned, or no extension, the sidebar stays as it is.
+
+Fixed:
+- **The Extensions page can be opened again**: Settings -> Pages -> **All pages**, or **Extensions** in the search
+  (Ctrl K), lists every extension page, pinned or not; the guide said it was in the sidebar, which now shows only the
+  pinned ones.
+- **Tasks on a phone**: on a 393-412 px screen the view switch no longer pushes the menu button (⊞) off the screen: it
+  sits under the header below 480 px. **Show more** in the notifications is easier to tap.
+- **Forgetting the Telegram bot also forgets a message that was waiting for its topic.** Before, the "Where should
+  this session go?" question and your message came back when you linked a bot again.
+- **A skill whose description is written as a `|-` or `|+` block no longer starts with a stray dash or plus sign.**
+  The Skills list now shows the text of these blocks as written.
+- **A hand-edited agent file with a wrongly typed value no longer makes the agent fail to load.** A `triggers` that is
+  not a list, or an avatar value that is not text, is ignored like any other invalid value.
+
+- **Agents, after the 2.0.0-alpha.139 review**: a message you send while the agent works waits for its turn instead
+  of being refused; **Run now** starts the agent's routine, not a message of the conversation; a Free agent that
+  starts reading outside text (mail, webhook, feed) goes into its sandbox; a safety change you allow applies exactly
+  what its card showed; a sandboxed agent never rewrites its topic settings; a very long answer is no longer lost;
+  the agent's page keeps its place when older messages load and no longer reloads on every other session's turn;
+  silent agents still answer you on Telegram; the settings show the model of the conversation; French texts say
+  « vous ».
+- **Folded sidebar on a low window**: every page stays reachable (compact rows, a fade where rows are hidden).
+- **Agents**: a rule with an invalid character or a limit too big for a number is refused cleanly instead of an
+  error.
+- **Sessions**: a message sent after changing Plan mode, the model or the permissions starts a new process, so the
+  change applies.
+- **Phone**: typing a message, the first tap on Send is no longer lost.
+- **Tasks** beside a wide second sidebar: the view switch leaves the header so **New task** stays on screen.
+- **Agent settings**: a long domain or folder stays inside the sheet.
+- **Infra**: a broken probe entry marks only its own server down.
+- **Claude models**: a preview or variant name is no longer taken for a newer model.
+
+## 2.0.0-alpha.139 - 2026-11-10
+
+New:
+- **Talk to an agent like in a chat**: your messages to an agent (its page, Telegram) now go on in one conversation
+  instead of starting a new session each time. It remembers what you said and what it already did, answers faster
+  and costs less; a message typed while it works waits for its turn. **New conversation** (under the box, or `/new`
+  on Telegram) starts a fresh one, and so do 6 hours without a message (adjustable). Its schedules, webhooks,
+  e-mails and other agents still start sessions of their own. Every agent works this way, existing ones too.
+  Its page is now **one flow**, like a chat: your messages on the right, its answers on the left with its avatar,
+  live while it works, with every command and file it used and what it changed of itself (its memory, its role, its
+  settings) in green. What its schedules, webhooks, e-mails and other agents started shows in the same flow: what
+  started each run, then its answer with its steps folded in one line (**Reply** goes on with that run). Your own
+  messages no longer count in its runs per hour. Ask it to do its routine now and it starts a run of its own instead
+  of doing the work in the conversation. Scroll up to load older messages.
+- **Talk to an agent from the Office**: a click on its desk opens its conversation next to the Office (a sheet on a
+  phone) instead of leaving it; its page is one click away. Office views made by an extension can open it too.
+- **A new agent sets itself up**: **New agent** asks only for a name and a place, then opens its conversation. Tell
+  it its job in one go (a four-line brief: my job, when, results, never without me): it sets itself up in the same
+  answer - role, name, schedule in your time zone, its freedoms decided with simple rules - and asks only what it
+  cannot guess. The ready-made agents show as ideas that put their brief in the box, to fill in and send. Asking for
+  an agent in any session follows the same brief and rules. "Edit with Claude" is gone: ask the agent itself.
+- **New agents are free, like a session**: no sandbox by default, so they just work. One that reads text from
+  outside (a mailbox, a webhook, the feed) is better **Protected**: its settings say so, and it proposes it itself.
+  Existing agents keep their setting. A change that only makes an agent safer no longer waits for your OK.
+- **Simpler agent settings**: four sections - Essentials, Protection (Free or Protected), E-mail (once it has a
+  mailbox) and Advanced, folded and grouped; shorter texts. Its profile is lighter: one **Add a trigger** menu,
+  **Protection and budget** in plain words, a schedule shows its time zone when it is not your browser's.
+- **Fewer requests in an agent's conversation**: in its sandbox, the agent no longer asks before reading files,
+  searching the web or opening a page of its sites. It still asks to leave its sandbox, to open another site and to
+  change a safety setting.
+- **Ask an agent to change itself**: in its conversation, an agent can now rewrite its own role, update its memory,
+  add, change or remove its schedules and triggers, and change its other settings, when you ask. A change to what
+  keeps it safe (sandbox, sites, keys, approvals, budget...) shows up as a card with the change written out:
+  **Allow** applies it. A command that needs more than its sandbox asks you first instead of failing. Its runs
+  (schedules, webhooks, e-mails) still never change it. The conversation can use another model than its runs
+  (the model picker in its box).
+
+Fixed:
+- **Agents**: an agent's conversation changes that agent only, whatever the order of its options; a run that
+  stops without an answer (stopped, server restarted) shows its error in the flow, never the answer before it.
+- **New agent**: a name without a letter from a to z or a digit says why it cannot be used.
+- **Extension pages** no longer reload several times while they open.
+
 ## 2.0.0-alpha.138 - 2026-11-10
 
 New:

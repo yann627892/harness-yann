@@ -1,15 +1,17 @@
 // Rendering of one thread item. Every row is memoised on the item object (items keep their identity
 // when the log grows, see log.ts), so appending events only renders the new rows.
 import * as React from 'react'
-import { AlertTriangle, Brain, Check, ChevronRight, CircleAlert, Copy, FileText, GripVertical, Info, MessageSquarePlus, Mic, Paperclip, Pause, Pencil, Play, ScrollText, Trash2, X } from 'lucide-react'
+import { Link } from 'react-router'
+import { AlertTriangle, Brain, Check, ChevronRight, CircleAlert, Copy, FileText, GripVertical, History, Info, MessageSquarePlus, Mic, Paperclip, Pause, Pencil, Play, ScrollText, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useT, useLang } from '@/i18n'
 import { fmtDate, fmtNumber } from '@/lib/format'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Sensitive, Spinner, Tooltip, usePresentation } from '@/components/ui'
 import { Markdown } from '@/components/ui/markdown'
-import { filePreviewUrl, fileRawUrl, fileThumbUrl, knownFileStamp, prefetchImage, PREVIEW_W } from '@/lib/queries/files'
+import { filePreviewUrl, fileRawUrl, fileStamp, fileThumbUrl, prefetchImage, PREVIEW_W } from '@/lib/queries/files'
 import { Thumb } from '@/features/files/Thumb'
-import type { ClaudeModel, ResultField } from '@/lib/types'
+import type { ChangesEvent, ClaudeModel, ResultField, SentMention } from '@/lib/types'
+import { ChipText } from './mentions'
 import { costTip, ResultLineMenu, useCostIsBilled, useResultLine } from './resultLine'
 import { isShownTask, taskStatus, type Item } from './log'
 import { TaskDetails, TaskElapsed, TaskStatusIcon, useOpenTaskLine } from './Tasks'
@@ -17,6 +19,9 @@ import type { Seed } from './store'
 import { useOpenPreview } from './FilePreview'
 import { MediaPlayer } from '@/features/files/MediaPlayer'
 import { QuotedFile } from './QuotedFile'
+import { ChangesChip } from './ChangesChip'
+import { CutCard } from './Cut'
+import { useRevert } from '@/features/code/useRevert'
 import { SendToDialog, SendToSub, type SendTarget } from '@/features/team/SendTo'
 import { gripRef } from './contentDrag'
 import { authServerOf, McpAuthButton } from '@/features/mcp/AuthButton'
@@ -34,11 +39,16 @@ export type ItemCtx = {
    *  folders whose paths become links, thumbnails and players (server: GET .../media-roots), each file checked by the
    *  server through `within`. Unset (sessions): every path of filesRoot. */
   scope?: readonly string[] | null
+  /** The session shown (unset outside a session column): what the Changes chip opens. */
+  sid?: string
+  /** Its topic (`projects/<p>/topics/<t>`): the skills a "/name" message can start. */
+  path?: string
 }
 /** Hover / focus on a media thumbnail: start loading what the viewer will show (light preview, video poster). */
 function prefetchMedia(p: string) {
-  if (isImage(p)) prefetchImage(filePreviewUrl(p, PREVIEW_W, knownFileStamp(p)))
-  else if (isVideo(p)) prefetchImage(fileThumbUrl(p, 1280, knownFileStamp(p)))
+  // with the file's stamp, asked when not known yet: the very URL the viewer will ask for
+  if (isImage(p)) void fileStamp(p).then((v) => prefetchImage(filePreviewUrl(p, PREVIEW_W, v)))
+  else if (isVideo(p)) void fileStamp(p).then((v) => prefetchImage(fileThumbUrl(p, 1280, v)))
 }
 
 export const ItemContext = React.createContext<ItemCtx>({ filesRoot: null, models: undefined, running: false })
@@ -46,17 +56,22 @@ export const ItemContext = React.createContext<ItemCtx>({ filesRoot: null, model
 export const ItemRow = React.memo(function ItemRow({
   item,
   live,
+  last,
   onHide,
   onEdit,
   onFork,
 }: {
   item: Item
   live: boolean
+  /** The thread ends on this row, a failed turn: its card offers to resume. */
+  last?: boolean
   /** Only for a message that got no answer: delete it, or (with onEdit) bring it back into the composer. */
   onHide?: (key: string, at: number) => void
   onEdit?: (key: string, at: number, seed: Seed) => void
   onFork?: (seed: Seed) => void
 }) {
+  const { sid } = React.useContext(ItemContext)
+  const revert = useRevert(sid)
   switch (item.kind) {
     case 'user': {
       const { text, attachments, at, voice } = item.ev
@@ -70,9 +85,13 @@ export const ItemRow = React.memo(function ItemRow({
           heard={item.heard}
           at={at}
           source={item.ev.source}
+          from={item.ev.from}
+          mentions={item.ev.mentions}
+          injected={item.ev.injected}
           onFork={onFork && (() => onFork(seed()))}
           onEdit={onHide && onEdit && (() => onEdit(item.key, at, seed()))}
           onDelete={onHide && (() => onHide(item.key, at))}
+          onRevert={item.changed != null && sid ? () => void revert(item.changed!) : undefined}
         />
       )
     }
@@ -87,9 +106,17 @@ export const ItemRow = React.memo(function ItemRow({
     case 'init':
       return <InitRow model={item.ev.model} />
     case 'result':
-      return <ResultRow ev={item.ev} />
+      return item.cut ? (
+        <CutCard cut={item.cut} last={!!last}>
+          <ResultRow ev={item.ev} changes={item.changes} />
+        </CutCard>
+      ) : (
+        <ResultRow ev={item.ev} changes={item.changes} />
+      )
+    case 'changes':
+      return <LoneChanges ev={item.ev} />
     case 'note':
-      return <NoteRow text={item.ev.text} level={item.ev.level} />
+      return item.cut ? <CutCard cut={item.cut} last={!!last} /> : <NoteRow text={item.ev.text} level={item.ev.level} />
   }
 })
 
@@ -110,18 +137,20 @@ export type MsgActions = {
   onEdit?: () => void
   /** The message got no answer (stopped): removed from the thread. */
   onDelete?: () => void
+  /** Its turn changed git repositories: "Revert to before this message" (files only, Restore for 10 s). */
+  onRevert?: () => void
   /** Offer the menu (Copy, Send to) even when there is nothing else in it. */
   copy?: boolean
 }
 
 /** Right click (a long press on a phone) on a message: a menu at the pointer (placed inside the row - the thread scroller is a containing block).
  *  A selection keeps the browser's own menu (copy it, or Quote from the pill), and so does a link. With Team on, "Send to" a friend. */
-export function useMessageMenu({ text, onFork, onEdit, onDelete, copy }: MsgActions) {
+export function useMessageMenu({ text, onFork, onEdit, onDelete, onRevert, copy }: MsgActions) {
   const t = useT()
   const [menuAt, setMenuAt] = React.useState<{ x: number; y: number } | null>(null)
   const after = React.useRef<(() => void) | undefined>(undefined)
   const [sendTo, setSendTo] = React.useState<SendTarget | null>(null)
-  const any = !!(onFork || onEdit || onDelete || (copy && text?.trim()))
+  const any = !!(onFork || onEdit || onDelete || onRevert || (copy && text?.trim()))
   const onContextMenu = any
     ? (e: React.MouseEvent<HTMLElement>) => {
         if ((e.target as Element).closest('a')) return
@@ -202,6 +231,11 @@ export function useMessageMenu({ text, onFork, onEdit, onDelete, copy }: MsgActi
             <Pencil /> {t('sessions.msg.edit')}
           </DropdownMenuItem>
         )}
+        {onRevert && (
+          <DropdownMenuItem onSelect={onRevert} data-testid="msg-revert">
+            <History /> {t('sessions.revert')}
+          </DropdownMenuItem>
+        )}
         {onDelete && (
           <DropdownMenuItem destructive onSelect={onDelete} data-testid="msg-delete">
             <Trash2 /> {t('sessions.msg.delete')}
@@ -249,6 +283,9 @@ export function UserMessage({
   attachments,
   at,
   source,
+  from,
+  mentions,
+  injected,
   pending,
   queued,
   voice,
@@ -256,11 +293,18 @@ export function UserMessage({
   onFork,
   onEdit,
   onDelete,
+  onRevert,
 }: {
   text: string
   attachments: string[]
   at?: number
   source?: string
+  /** Sent by another session's turn (maxxing sessions send): a link to it. */
+  from?: { session: string; title: string }
+  /** The @ it names: drawn as chips (with the "/" command it starts with). */
+  mentions?: SentMention[]
+  /** Added to a running turn (Add to plan). */
+  injected?: boolean
   pending?: boolean
   queued?: boolean
   /** Voice message sent directly: its audio (paths; `true` for an optimistic one still uploading) and transcript. */
@@ -269,10 +313,10 @@ export function UserMessage({
 } & Omit<MsgActions, 'text'>) {
   const t = useT()
   const lang = useLang()
-  const { tz } = React.useContext(ItemContext)
+  const { tz, path } = React.useContext(ItemContext)
   // Quotes sent from the composer lead the message as Markdown blockquotes: shown as quote blocks (Copy keeps the raw text).
   const { quotes, rest } = React.useMemo(() => splitQuotes(text), [text])
-  const { onContextMenu, touch, menu } = useMessageMenu({ text: [text, heard?.text].filter(Boolean).join('\n\n'), onFork, onEdit, onDelete })
+  const { onContextMenu, touch, menu } = useMessageMenu({ text: [text, heard?.text].filter(Boolean).join('\n\n'), onFork, onEdit, onDelete, onRevert })
   return (
     <div className={cn('group/msg relative flex flex-col items-end gap-1.5 pl-8', pending && 'opacity-70')} onContextMenu={onContextMenu} {...touch}>
       {menu}
@@ -292,7 +336,7 @@ export function UserMessage({
                 </blockquote>
               ),
             )}
-            {quotes.length ? rest : text}
+            <ChipText text={quotes.length ? rest : text} mentions={mentions} path={path} />
           </Sensitive>
         </div>
       )}
@@ -304,7 +348,16 @@ export function UserMessage({
         ) : (
           <>
             {(text || heard?.text) && <MessageGrip text={[text, heard?.text].filter(Boolean).join('\n\n')} />}
-            {source && source !== 'web' && <span className="rounded bg-muted px-1">{sourceLabel(source, t)}</span>}
+            {from ? (
+              <Tooltip content={t('sessions.msg.from', { title: from.title || from.session.slice(0, 8) })}>
+                <Link to={`/sessions?session=${encodeURIComponent(from.session)}`} className="max-w-48 truncate rounded bg-muted px-1 hover:text-foreground">
+                  ↩ {from.title || from.session.slice(0, 8)}
+                </Link>
+              </Tooltip>
+            ) : (
+              source && source !== 'web' && <span className="rounded bg-muted px-1">{sourceLabel(source, t)}</span>
+            )}
+            {injected && <span className="rounded bg-muted px-1">{t('sessions.msg.injected')}</span>}
             {at ? <time className="opacity-0 transition-opacity group-hover/msg:opacity-100 max-md:opacity-100 pointer-coarse:opacity-100">{fmtDate(at, lang, tz, { dateStyle: undefined, timeStyle: 'short' })}</time> : null}
             {onEdit && (
               <Tooltip content={t('sessions.msg.edit')}>
@@ -339,7 +392,7 @@ export function UserMessage({
 }
 
 /** A voice message sent directly: the recording, then its transcript (what Claude got) - or "Transcribing…". */
-function VoiceNote({ paths, heard, pending }: { paths: string[]; heard?: { text: string; error: string | null; stopped?: boolean }; pending?: boolean }) {
+export function VoiceNote({ paths, heard, pending }: { paths: string[]; heard?: { text: string; error: string | null; stopped?: boolean }; pending?: boolean }) {
   // One bubble like a typed message: a mic button (tap = listen to the recording, again = pause) and the transcript.
   const t = useT()
   const audio = React.useRef<HTMLAudioElement>(null)
@@ -410,6 +463,8 @@ function VoiceNote({ paths, heard, pending }: { paths: string[]; heard?: { text:
 function sourceLabel(source: string, t: ReturnType<typeof useT>): string {
   if (source === 'telegram') return 'Telegram'
   if (source === 'cron') return t('sessions.source.cron')
+  if (source === 'cli') return t('sessions.source.cli')
+  if (source === 'github') return 'GitHub'
   return source
 }
 
@@ -565,8 +620,9 @@ function GifBadge() {
 const isGif = (p: string) => /\.gif$/i.test(p)
 
 function MaskedLines() {
+  const t = useT()
   return (
-    <div className="grid gap-1.5" aria-label="Hidden (presentation mode)">
+    <div className="grid gap-1.5" aria-label={t('presentation.hidden')}>
       <div className="h-3 w-11/12 rounded bg-muted" />
       <div className="h-3 w-9/12 rounded bg-muted" />
       <div className="h-3 w-10/12 rounded bg-muted" />
@@ -623,12 +679,12 @@ function ToolCard({ item, live }: { item: Extract<Item, { kind: 'tool' }>; live:
   const full = file && FILE_TOOLS.has(use.name) ? file : use.summary.startsWith(use.name) ? use.summary.slice(use.name.length).replace(/^[:\s]+/, '') : use.summary
   const summary = file && FILE_TOOLS.has(use.name) ? relPath(file, bases) : relPaths(full, bases)
   return (
-    <div ref={root} className={cn('min-w-0 overflow-hidden rounded-lg border bg-card/60 text-[13px]', err && 'border-destructive/40')}>
+    <div ref={root} className={cn('min-w-0 overflow-hidden rounded-lg border bg-card text-[13px]', err && 'border-destructive/40')}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex h-8 w-full min-w-0 items-center gap-2 px-2.5 text-left hover:bg-accent/60 focus-visible:bg-accent focus-visible:outline-none max-md:h-10"
+        className="flex h-8 w-full min-w-0 items-center gap-2 px-2.5 text-left hover:bg-muted focus-visible:bg-accent focus-visible:outline-none max-md:h-10"
       >
         <Icon className={cn('size-3.5 shrink-0', err ? 'text-destructive' : 'text-muted-foreground')} />
         <span className="shrink-0 font-medium">{name}</span>
@@ -650,7 +706,7 @@ function ToolCard({ item, live }: { item: Extract<Item, { kind: 'tool' }>; live:
       </button>
       {authServer && <McpAuthButton server={authServer} />}
       {open && (
-        <div className="grid gap-2 border-t bg-background/40 p-2.5">
+        <div className="grid gap-2 border-t bg-sunken p-2.5">
           <Sensitive block>
             {task && status && <TaskDetails task={task} status={status} />}
             <ToolInput name={use.name} input={input} diff={diff} display={file ? relPath(file, bases) : null} />
@@ -704,7 +760,7 @@ export function ToolInput({ name, input, diff, display }: { name: string; input:
       {diff ? (
         <DiffView lines={diff} />
       ) : name === 'Bash' && typeof input.command === 'string' ? (
-        <pre className="overflow-x-auto rounded-md bg-muted/60 px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">
+        <pre className="overflow-x-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">
           <span className="text-muted-foreground select-none">$ </span>
           {input.command}
         </pre>
@@ -718,7 +774,7 @@ export function ToolInput({ name, input, diff, display }: { name: string; input:
           ))}
         </ul>
       ) : !file || Object.keys(input).length > 1 ? (
-        <pre className="max-h-64 overflow-auto rounded-md bg-muted/60 px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">{JSON.stringify(input, null, 2)}</pre>
+        <pre className="max-h-64 overflow-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">{JSON.stringify(input, null, 2)}</pre>
       ) : null}
     </div>
   )
@@ -747,7 +803,7 @@ export function DiffView({ lines }: { lines: DiffLine[] }) {
   const [all, setAll] = React.useState(false)
   const shown = all || lines.length <= DIFF_ROWS ? lines : lines.slice(0, DIFF_ROWS)
   return (
-    <div className="max-h-96 overflow-auto rounded-md border bg-muted/30 font-mono text-[12px] leading-[1.55]">
+    <div className="max-h-96 overflow-auto rounded-md border bg-fill-1 font-mono text-[12px] leading-[1.55]">
       {shown.map((l, i) => (
         <div
           key={i}
@@ -780,7 +836,7 @@ function ToolOutput({ text, error }: { text: string; error: boolean }) {
   return (
     <div className="group/msg relative grid gap-1">
       <MessageGrip text={text} className="absolute top-1 right-1 bg-muted" />
-      <pre className={cn('max-h-80 overflow-auto rounded-md px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]', error ? 'bg-destructive/10 text-destructive' : 'bg-muted/60')}>
+      <pre className={cn('max-h-80 overflow-auto rounded-md px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]', error ? 'bg-destructive/10 text-destructive' : 'bg-muted')}>
         {shown}
         {long && !all && '…'}
       </pre>
@@ -805,10 +861,19 @@ function InitRow({ model }: { model: string }) {
   )
 }
 
-function ResultRow({ ev }: { ev: Extract<Item, { kind: 'result' }>['ev'] }) {
+function LoneChanges({ ev }: { ev: ChangesEvent }) {
+  const { sid } = React.useContext(ItemContext)
+  return sid ? (
+    <div className="flex">
+      <ChangesChip sid={sid} ev={ev} />
+    </div>
+  ) : null
+}
+
+function ResultRow({ ev, changes }: { ev: Extract<Item, { kind: 'result' }>['ev']; changes?: ChangesEvent }) {
   const t = useT()
   const lang = useLang()
-  const { models } = React.useContext(ItemContext)
+  const { models, sid } = React.useContext(ItemContext)
   const { hidden } = useResultLine()
   const billed = useCostIsBilled()
   const show = (f: ResultField) => !hidden.includes(f)
@@ -836,6 +901,7 @@ function ResultRow({ ev }: { ev: Extract<Item, { kind: 'result' }>['ev'] }) {
       ]
         .filter(Boolean)
         .flatMap((el, i) => (i ? [<span key={`s${i}`} aria-hidden>·</span>, el] : [el]))}
+      {changes && sid && <ChangesChip sid={sid} ev={changes} />}
       <ResultLineMenu />
     </div>
   )

@@ -96,11 +96,13 @@ UI; the server CLI is `maxxing`:
 | `maxxing cron list\|sync\|run <id>` | scheduled jobs |
 | `maxxing backup run\|status\|restore` | memory backup to a private GitHub repo |
 | `maxxing telegram status\|test` | Telegram bridge |
-| `maxxing import ZIP [--dry-run]` / `--prompt AGENT` | import another agent's memory (Settings -> Import does the same) |
+| `maxxing import ZIP [--dry-run]` / `--prompt AGENT` | import another agent's memory: Hermes, OpenClaw, Claude Code... (Settings -> Import does the same) |
 | `maxxing keys list\|get\|set\|delete` | the Keys vault from a script: `printf %s "$V" \| maxxing keys set NAME` (value on stdin); scripts read keys as env vars (`$NAME`) |
 | `maxxing packs list\|add <id>` | starter packs: ready-made projects (only missing files are added) |
 | `maxxing infra status\|list\|site\|db\|bucket\|server` | where every site / database / bucket / domain / server is; create them on this server the standard way |
 | `maxxing mcp list\|add\|remove` | MCP servers of Claude Code (every session or one topic), as in Settings -> MCP |
+| `maxxing team send NAME "message" [--file PATH]` / `team list` | write to a Team contact or group (Settings -> Features -> Team) by their name, as the user: only when the user asks for it |
+| `maxxing sessions send SESSION "message"` / `sessions new PROJECT/TOPIC "message"` / `sessions list` | write to another session (id or title), as a message typed in it, or start a new one in a topic: when the user asks for it (an `@` mention tells you which) |
 | `maxxing agents list\|run\|send\|on\|off` | agents (Settings -> Features -> Agents): start one, hand work from one agent to another (`send`), switch on / off |
 | `maxxing video new DIR` / `video status` | Remotion video project linked to the shared install / tools check |
 | `maxxing pdf IN.html OUT.pdf` | print an HTML page (or URL) to PDF |
@@ -134,6 +136,13 @@ servers -> Infra (`maxxing-infra`); repositories -> Git; a chat with other peopl
 dashboard or a page of its own -> an extension. Some pages are optional: `maxxing status` (line `Pages`)
 says which are on. When the right one is off, say it exists and that Settings -> Features turns it on in
 one click, then use it, rather than building a substitute.
+
+In a session: a shell the user types in themselves -> the terminal of Code mode (Ctrl+J, `/terminal`, or the
+session's ⋯ menu; only the user can open it; off by default, Settings -> Features -> Sessions, password asked);
+undo what a turn changed -> "Revert to before this message" (menu of the message) or the Changes view (button
+under the answer: diff, Undo a file, commit, push, pull request); a branch and a folder for one session -> a
+"Separate copy" when the session is created (Code mode); read, comment, approve or merge a pull request -> the PR view
+(Git page, or the PR badge of the Changes view).
 
 ## Safety with shared code and data
 

@@ -1,3 +1,4 @@
+import type * as React from 'react'
 import { Toaster as Sonner, toast as sonner } from 'sonner'
 import { useUI, resolveTheme } from '@/stores/ui'
 import { useIsMobile } from '@/stores/media'
@@ -30,7 +31,9 @@ export const toast = {
   error: (msg: string, description?: string) => sonner.error(msg, { description, duration: 7000 }),
   info: (msg: string, description?: string) => sonner(msg, { description }),
   /** A notice with one action button (e.g. "Open"). */
-  action: (msg: string, description: string | undefined, action: { label: string; onClick: () => void }) => sonner(msg, { description, action, duration: 8000 }),
+  action: (msg: string, description: string | undefined, action: { label: string; onClick: () => void }, duration = 8000) => sonner(msg, { description, action, duration }),
+  /** A card of its own in the stack (a Team message): it stays until `dismiss(id)`, or a swipe on a phone. */
+  card: (id: string, render: () => React.ReactElement, onGone?: () => void) => sonner.custom(render, { id, duration: Infinity, onDismiss: onGone }),
   promise: sonner.promise,
   dismiss: sonner.dismiss,
 }

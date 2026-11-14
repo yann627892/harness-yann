@@ -209,3 +209,55 @@ def test_an_export_to_an_unwritable_path_is_a_plain_error(client, topic, tmp_pat
     agents.create("projects/acme/topics/blog", "w", {})
     assert cli.main(["agents", "export", "w", "-o", str(tmp_path / "nodir" / "o.md")]) == 2
     assert "Cannot write" in capsys.readouterr().err
+
+
+def test_agents_off_on_a_broken_agent_returns_2(client, topic, capsys):
+    """A broken agent.json: on / off / silent / loud print the error and exit 2, as cron and webhook do."""
+    client.put("/api/settings", json={"agents_page": True})
+    agents.create("projects/acme/topics/blog", "w", {})
+    path = "projects/acme/topics/blog/agents/w"
+    (agents.folder(path) / agents.AGENT_FILE).write_text("{ not json")
+    for cmd in ("off", "on", "silent", "loud"):
+        assert cli.main(["agents", cmd, "w"]) == 2, cmd
+        err = capsys.readouterr().err
+        assert err.strip() and "Traceback" not in err
+
+
+def test_set_with_a_too_deep_json_value_says_it(client, topic, capsys):
+    _two_agents(client)
+    deep = "[" * 100000 + "]" * 100000
+    for args in (["--json", deep], [f"model={deep}"], [f"limits.usd_per_day={deep}"]):
+        assert cli.main(["agents", "set", "writer", *args]) == 2, args[0][:20]
+        err = capsys.readouterr().err
+        assert "nested too deeply" in err and "Traceback" not in err
+
+
+def test_show_reads_a_role_that_is_not_utf8(client, topic, capsys):
+    _two_agents(client)
+    (agents.folder(A) / "CLAUDE.md").write_bytes(b"# Writer\n\nwrites \xff posts\n")
+    assert cli.main(["agents", "show", "writer"]) == 0
+    assert "writes \ufffd posts" in json.loads(capsys.readouterr().out)["claude_md"]
+
+
+def test_webhook_and_watch_refuse_text_that_is_not_utf8(client, topic, capsys):
+    _two_agents(client)
+    for args in (["webhook", "writer", "--prompt", "\udcff"], ["watch", "writer", "--source", "shop", "--match", "\udcff"],
+                 ["watch", "writer", "--source", "shop", "--prompt", "a\udcffb"]):
+        assert cli.main(["agents", *args]) == 2, args
+        err = capsys.readouterr().err
+        assert "not valid text" in err and "Traceback" not in err
+    assert agents.load(A)["triggers"] == []
+
+
+def test_set_says_which_fields_were_ignored(client, topic, capsys):
+    _two_agents(client)
+    assert cli.main(["agents", "set", "writer", "bogus=1"]) == 2
+    out = capsys.readouterr()
+    assert "changed" not in out.out and "ignored" in out.err and "bogus" in out.err
+    assert cli.main(["agents", "set", "writer", 'enabled="no"']) == 2
+    assert "changed" not in capsys.readouterr().out and agents.load(A)["enabled"] is True
+    assert cli.main(["agents", "set", "writer", "enabled=false", "bogus=1"]) == 0
+    out = capsys.readouterr()
+    assert "changed: enabled" in out.out and "bogus" in out.err and agents.load(A)["enabled"] is False
+    assert cli.main(["agents", "set", "writer", "enabled=false"]) == 0      # already so: taken, not ignored
+    assert "changed: enabled" in capsys.readouterr().out

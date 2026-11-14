@@ -65,7 +65,7 @@ export function RunCommand({ defaultTarget = 'local' }: { defaultTarget?: string
                 <span>exit {result.exit_code}</span>
                 <span>· {result.duration_ms} ms</span>
               </div>
-              {result.stdout && <pre className="max-h-64 overflow-auto rounded-md bg-muted/60 p-3 font-mono text-xs whitespace-pre-wrap">{result.stdout}</pre>}
+              {result.stdout && <pre className="max-h-64 overflow-auto rounded-md bg-sunken p-3 font-mono text-xs whitespace-pre-wrap">{result.stdout}</pre>}
               {result.stderr && <pre className="max-h-64 overflow-auto rounded-md bg-destructive/10 p-3 font-mono text-xs text-destructive whitespace-pre-wrap">{result.stderr}</pre>}
               {!result.stdout && !result.stderr && <p className="text-xs text-muted-foreground">{t('infra.run.noOutput')}</p>}
             </div>

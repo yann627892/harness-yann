@@ -38,6 +38,7 @@ import {
   StarOff,
   Trash2,
   X,
+  GitBranch,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useLongPress } from '@/lib/long-press'
@@ -124,12 +125,17 @@ type Props = {
   /** Session ids open in columns. */
   openIds: Set<string>
   focusedId: string | null
-  /** Touch layout drawer: bigger header with New session next to the filter; the row menus open with a long press. */
+  /** Touch layout drawer: bigger header; the row menus open with a long press. */
   touch?: boolean
+  /** Touch layout drawer: its title row, given New session and the view menu to show on its right - the filter
+   *  below keeps the whole width (All / Running / Unread on one line, on the narrowest phone too). */
+  head?: (actions: React.ReactNode) => React.ReactNode
+  /** the list's search (PageList) */
+  query?: string
   className?: string
 }
 
-export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, focusedId, touch, className }: Props) {
+export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, focusedId, touch, head, query, className }: Props) {
   const t = useT()
   const ws = useWorkspace()
   const reorderProjects = useReorderProjects()
@@ -138,7 +144,8 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
   const [dialog, setDialog] = React.useState<DialogState>(null)
 
   // The archived sessions (most of them on a server used for a while) load only when an archived fold is open; the
-  // folds show their count from the tree (topic.archived_count) meanwhile. No filter field: Ctrl K finds sessions.
+  // folds show their count from the tree (topic.archived_count) meanwhile. The list's search narrows by title / folder;
+  // Ctrl K finds sessions by their content too.
   const archOpen = useSessionsUI((s) => Object.entries(s.expanded).some(([k, v]) => v && k.startsWith('a:')))
   const archived = useSessions(undefined, true, archOpen)
   const byPath = React.useMemo(() => group(live.data), [live.data])
@@ -146,11 +153,17 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
   // A badge was clicked (running / finished): only those sessions, unfolded.
   const show = useSessionsUI((s) => s.show)
   const setShow = useSessionsUI((s) => s.setShow)
-  const shows = React.useCallback((s: Session) => (show === 'running' ? s.state === 'running' : !!s.unread), [show])
-  const narrowed = !!show
+  // The list's search (the 🔍 of its head): sessions whose title or folder has the words, unfolded like a filter.
+  const q = (query || '').trim().toLowerCase()
+  const shows = React.useCallback(
+    (s: Session) => (!show || (show === 'running' ? s.state === 'running' : !!s.unread)) && (!q || s.title.toLowerCase().includes(q) || s.path.toLowerCase().includes(q)),
+    [show, q],
+  )
+  const narrowing = !!show || !!q
+  const narrowed = narrowing
   // A new filter unfolds everything again.
   const setNarrowFolded = useSessionsUI((s) => s.setNarrowFolded)
-  React.useEffect(() => setNarrowFolded({}), [show, setNarrowFolded])
+  React.useEffect(() => setNarrowFolded({}), [show, q, setNarrowFolded])
 
   // The rows rise in on the first visit only (coming back to the page shows them at once).
   const [intro, setIntro] = React.useState(!introPlayed)
@@ -184,8 +197,8 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
     }
     setExpanded(nodes)
   }
-  const rootSessions = (byPath.get('') || []).filter((s) => !show || shows(s))
-  const shown = React.useMemo(() => (show ? (live.data || []).filter(shows).sort((a, b) => b.updated - a.updated) : []), [show, shows, live.data])
+  const rootSessions = (byPath.get('') || []).filter((s) => !narrowing || shows(s))
+  const shown = React.useMemo(() => (narrowing ? (live.data || []).filter(shows).sort((a, b) => b.updated - a.updated) : []), [show, shows, live.data])
   /** "acme › blog", with the project's emoji in front when it has one (Favorites, Recent, flat layout). */
   const emojiOf = React.useMemo(() => new Map(projects.map((p) => [p.name, p.emoji || ''])), [projects])
   const rootLabel = t('sessions.root')
@@ -202,7 +215,7 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
   )
 
   const filtered = React.useMemo(() => {
-    if (show) {
+    if (narrowing) {
       const out: { p: Project; topics: { tp: Topic; sessions: Session[] }[] }[] = []
       for (const p of projects) {
         const topics = p.topics.map((tp) => ({ tp, sessions: (byPath.get(tp.path) || []).filter(shows) })).filter((x) => x.sessions.length)
@@ -211,11 +224,13 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
       return out
     }
     return projects.map((p) => ({ p, topics: p.topics.map((tp) => ({ tp, sessions: byPath.get(tp.path) || [] })) }))
-  }, [projects, byPath, show, shows])
+  }, [projects, byPath, narrowing, shows])
+  const rowAt = filtered.reduce<number[]>((at, _x, i) => [...at, i ? at[i - 1] + 1 + filtered[i - 1].topics.length : 0], [])
 
   const header = (
     <ListHeader
       touch={touch}
+      head={head}
       show={show}
       onShow={setShow}
       sessions={live.data || []}
@@ -223,7 +238,7 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
       menu={
         projects.length > 0 && (
           <ViewMenu
-            fold={!show && listBy === 'project' && mode === 'tree' ? { anyFolded, onFold: () => foldAll(anyFolded) } : null}
+            fold={!narrowing && listBy === 'project' && mode === 'tree' ? { anyFolded, onFold: () => foldAll(anyFolded) } : null}
             onNewProject={() => setDialog({ kind: 'project' })}
           />
         )
@@ -234,7 +249,7 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
   return (
     <nav aria-label={t('sessions.tree.label')} data-tour="tree" className={cn('flex min-h-0 flex-col', className)}>
       {header}
-      {show && !touch && shown.length > 1 && (
+      {narrowing && !touch && shown.length > 1 && (
         <div className="mx-2 mb-1 flex shrink-0 items-center gap-1.5 px-1 text-xs text-muted-foreground animate-in" role="status">
           <span className="tabular-nums">{t('sessions.tree.shownCount', { count: shown.length })}</span>
           <Button
@@ -270,8 +285,8 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
           />
         ) : (
           <>
-            {!show && <TopBlocks sessions={live.data || []} openIds={openIds} focusedId={focusedId} onOpen={onOpenSession} labelOf={labelOf} />}
-            {listBy === 'session' && !show ? (
+            {!narrowing && <TopBlocks sessions={live.data || []} openIds={openIds} focusedId={focusedId} onOpen={onOpenSession} labelOf={labelOf} />}
+            {listBy === 'session' && !narrowing ? (
               <FlatView
                 sessions={live.data || []}
                 openIds={openIds}
@@ -279,7 +294,7 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
                 onOpen={onOpenSession}
                 labelOf={labelOf}
               />
-            ) : mode === 'drill' && !show ? (
+            ) : mode === 'drill' && !narrowing ? (
               <DrillView
                 projects={projects}
                 byPath={byPath}
@@ -300,18 +315,19 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
               </p>
             )}
             {filtered.map(({ p, topics }, pi) => (
+              // a running row index (a project, then its topics), so the rows rise strictly top to bottom
               <ProjectNode
                 key={p.name}
                 project={p}
                 forceOpen={narrowed}
                 onDialog={setDialog}
-                stagger={Math.min(pi * 2, 10)}
+                stagger={Math.min(rowAt[pi], 10)}
                 onMove={narrowed ? undefined : (dragged, before) => reorderProjects.mutate(moveName(projects.map((x) => x.name), dragged, p.name, before))}
               >
                 {topics.map(({ tp, sessions }, ti) => (
                   <TopicNode
                     key={tp.path}
-                    stagger={Math.min(pi * 2 + ti + 1, 10)}
+                    stagger={Math.min(rowAt[pi] + ti + 1, 10)}
                     topic={tp}
                     sessions={sessions}
                     archived={narrowed ? [] : archivedByPath.get(tp.path) || []}
@@ -352,10 +368,12 @@ export function SessionTree({ onOpenSession, onNewSession, activePath, openIds, 
   )
 }
 
-/** Top of the list, the same on a computer and on a phone: the All / Running / Unread chips, then New session (touch)
- *  and the view menu. No filter field: Ctrl K (the search of the sidebar) finds sessions by title and content. */
+/** Top of the list: the All / Running / Unread filter, then the view menu. A phone (`head`): New session and the
+ *  view menu go up in the drawer's title row and the filter is one line of three equal parts.
+ *  No filter field: Ctrl K (the search of the sidebar) finds sessions by title and content. */
 function ListHeader({
   touch,
+  head,
   show,
   onShow,
   sessions,
@@ -363,6 +381,7 @@ function ListHeader({
   menu,
 }: {
   touch?: boolean
+  head?: (actions: React.ReactNode) => React.ReactNode
   show: 'running' | 'unread' | null
   onShow: (s: 'running' | 'unread' | null) => void
   sessions: Session[]
@@ -374,34 +393,51 @@ function ListHeader({
   const unread = sessions.filter((s) => s.unread).length
   const chip = (on: boolean) =>
     cn(
-      'flex shrink-0 items-center gap-1.5 rounded-full font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
-      touch ? 'h-10 px-3 text-[13px]' : 'h-6 px-2.5 text-xs',
-      on ? 'bg-foreground text-background' : 'bg-muted text-muted-foreground hover:text-foreground active:bg-accent',
+      'flex items-center font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
+      touch ? 'h-9 min-w-0 justify-center gap-1 rounded-lg px-1 text-[13px]' : 'h-6 shrink-0 gap-1.5 rounded-full px-2 text-xs',
+      on ? 'bg-foreground text-background' : cn('text-muted-foreground hover:text-foreground', touch ? 'active:bg-accent' : 'bg-muted active:bg-accent'),
     )
+  const newButton = touch && (
+    <Button size="icon" className="size-10 shrink-0 rounded-xl [&_svg]:size-5" aria-label={t('sessions.newSession')} disabled={!onNew} onClick={onNew} data-tour="new-session">
+      <SquarePen />
+    </Button>
+  )
+  const lifted = !!(touch && head)
   return (
-    <div className={cn('grid shrink-0', touch ? 'gap-2.5 px-3 pt-3 pb-2' : 'gap-2 px-2 pt-2 pb-1.5')} data-testid="tree-header">
-      <div className={cn('flex min-w-0 items-center', touch ? 'gap-2' : 'gap-1.5')}>
-        <div className="-my-1 flex min-w-0 flex-1 gap-1.5 overflow-x-auto py-1" role="group" aria-label={t('sessions.filter.label')} data-hscroll-ok>
-          <button type="button" className={chip(!show)} aria-pressed={!show} onClick={() => onShow(null)}>
-            {t('sessions.filter.all')}
-          </button>
-          <button type="button" className={chip(show === 'running')} aria-pressed={show === 'running'} onClick={() => onShow(show === 'running' ? null : 'running')} data-testid="chip-running">
-            <StatusDot tone="running" pulse={running > 0} className="size-1.5" /> {t('sessions.filter.running')}
-            {running > 0 && <span className="tabular-nums opacity-70">{running}</span>}
-          </button>
-          <button type="button" className={chip(show === 'unread')} aria-pressed={show === 'unread'} onClick={() => onShow(show === 'unread' ? null : 'unread')} data-testid="chip-unread">
-            <StatusDot tone="unread" className="size-1.5" /> {t('sessions.filter.unread')}
-            {unread > 0 && <span className="tabular-nums opacity-70">{unread}</span>}
-          </button>
-        </div>
-        <div className="ml-auto shrink-0">{menu}</div>
-        {touch && (
-          <Button size="icon" className="size-11 shrink-0 rounded-xl [&_svg]:size-5" aria-label={t('sessions.newSession')} disabled={!onNew} onClick={onNew} data-tour="new-session">
-            <SquarePen />
-          </Button>
+    <>
+      {lifted &&
+        head!(
+          <>
+            {menu}
+            {newButton}
+          </>,
         )}
+      <div className={cn('grid shrink-0', touch ? 'gap-2.5 px-3 pt-1 pb-2' : 'gap-2 px-2 pt-2 pb-1.5')} data-testid="tree-header">
+        <div className={cn('flex min-w-0 items-center', touch ? 'gap-2' : 'gap-1.5')}>
+          <div
+            className={cn('min-w-0 flex-1', touch ? 'grid grid-cols-[auto_1fr_1fr] gap-1 rounded-xl bg-muted p-1' : '-my-1 flex gap-1.5 overflow-x-auto py-1')}
+            role="group"
+            aria-label={t('sessions.filter.label')}
+            data-testid="tree-filter"
+            data-hscroll-ok={touch ? undefined : true}
+          >
+            <button type="button" className={cn(chip(!show), touch && 'px-3')} aria-pressed={!show} onClick={() => onShow(null)}>
+              {t('sessions.filter.all')}
+            </button>
+            <button type="button" className={chip(show === 'running')} aria-pressed={show === 'running'} onClick={() => onShow(show === 'running' ? null : 'running')} data-testid="chip-running">
+              <StatusDot tone="running" pulse={running > 0} className="size-1.5 shrink-0" /> <span className="truncate">{t('sessions.filter.running')}</span>
+              {running > 0 && <span className="tabular-nums opacity-70">{running}</span>}
+            </button>
+            <button type="button" className={chip(show === 'unread')} aria-pressed={show === 'unread'} onClick={() => onShow(show === 'unread' ? null : 'unread')} data-testid="chip-unread">
+              <StatusDot tone="unread" className="size-1.5 shrink-0" /> <span className="truncate">{t('sessions.filter.unread')}</span>
+              {unread > 0 && <span className="tabular-nums opacity-70">{unread}</span>}
+            </button>
+          </div>
+          {!lifted && <div className="ml-auto shrink-0">{menu}</div>}
+          {!lifted && newButton}
+        </div>
       </div>
-    </div>
+    </>
   )
 }
 
@@ -608,7 +644,7 @@ function ProjectNode({ project, forceOpen, onDialog, stagger, onMove, children }
         {...dnd.props}
         {...press}
         data-testid="tree-project"
-        className="group/row relative flex h-8 items-center gap-1 rounded-md pr-1 hover:bg-accent/60 max-md:h-12 max-md:select-none max-md:[-webkit-touch-callout:none]"
+        className="group/row relative flex h-8 items-center gap-1 rounded-md pr-1 hover:bg-muted max-md:h-12 max-md:select-none max-md:[-webkit-touch-callout:none]"
         onContextMenu={(e) => {
           e.preventDefault()
           setMenu(true)
@@ -814,7 +850,7 @@ function TopicNode({
         {...mergeDnd(dnd.props, drop.props)}
         {...press}
         data-testid="tree-topic"
-        className={cn('group/row relative flex h-8 items-center gap-0.5 rounded-md pr-1 pl-3 hover:bg-accent/60 max-md:h-12 max-md:select-none max-md:[-webkit-touch-callout:none]', active && 'bg-accent/70', drop.over && dropCls)}
+        className={cn('group/row relative flex h-8 items-center gap-0.5 rounded-md pr-1 pl-3 hover:bg-muted max-md:h-12 max-md:select-none max-md:[-webkit-touch-callout:none]', active && 'bg-muted', drop.over && dropCls)}
         onContextMenu={(e) => {
           e.preventDefault()
           setMenu(true)
@@ -984,7 +1020,7 @@ const SessionRow = React.memo(function SessionRow({
       {...press}
       data-testid="tree-session"
       className={cn(
-        'group/row relative flex items-center rounded-md pr-1 hover:bg-accent/60 max-md:h-14 max-md:select-none max-md:[-webkit-touch-callout:none]',
+        'group/row relative flex items-center rounded-md pr-1 hover:bg-muted max-md:h-14 max-md:select-none max-md:[-webkit-touch-callout:none]',
         compact ? 'h-8' : 'h-9',
         focused && 'bg-accent',
         s.unread && 'font-medium',
@@ -1042,7 +1078,15 @@ const SessionRow = React.memo(function SessionRow({
               </span>
             )}
             <span className="shrink-0 tabular-nums">{fmtRelative(s.updated, lang)}</span>
-            {model && !label && <span className="truncate">· {modelLabel(model, claude?.models)}</span>}
+            {s.worktree && !s.worktree.removed ? (
+              // on a separate copy: its branch says more than the model
+              <span className="inline-flex min-w-0 items-center gap-0.5 font-mono text-primary/80" data-testid="session-branch">
+                · <GitBranch className="size-3 shrink-0" />
+                <span className="truncate"><Sensitive length={8}>{s.worktree.branch}</Sensitive></span>
+              </span>
+            ) : (
+              model && !label && <span className="truncate">· {modelLabel(model, claude?.models)}</span>
+            )}
             {s.queue > 0 && <span className="shrink-0">· {t('sessions.queue.short', { count: s.queue })}</span>}
           </span>
         </span>
@@ -1432,14 +1476,17 @@ function DrillRow({
 }) {
   const t = useT()
   const [open, setOpen] = React.useState(false)
+  // iPhone Safari fires no contextmenu: a long press opens the menu too (its "..." is hidden on phones)
+  const press = useLongPress(() => setOpen(true))
   const row = (
     <div
-      className={cn('group/row flex h-9 items-center gap-0.5 rounded-md pr-1 hover:bg-accent/60 max-md:h-12', !below && 'mx-rise')}
+      className={cn('group/row flex h-9 items-center gap-0.5 rounded-md pr-1 hover:bg-muted max-md:h-12', !below && 'mx-rise')}
       style={below ? undefined : ({ '--i': stagger } as React.CSSProperties)}
       onContextMenu={(e) => {
         e.preventDefault()
         setOpen(true)
       }}
+      {...press}
     >
       <button type="button" onClick={onOpen} className={cn('flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 text-left text-[13px] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none', bold && 'font-semibold')} data-drill-row={name}>
         {icon}

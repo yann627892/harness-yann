@@ -11,17 +11,23 @@ stopped.
 
 - **Left pane**: the project / topic tree, in the second bar next to the sidebar (see below). Badges show
   running sessions and unread answers.
-- **Main area**: one or more **columns**, one session each. Open several sessions side by side,
-  resize and reorder the columns, or detach one into its own window.
+- **Main area**: the open sessions, in one of two modes. One button in the page's bar, top right, left of
+  **New session** (Alt+T), goes from one to the other at any time: its icon draws the mode in use (tab heads over a session for
+  **Tabs**, three columns for **Zones**) and moves from one picture to the other; a new browser starts in **Tabs**, and each browser remembers its
+  mode.
+  - **Tabs** (the default): one session at a time, full width, every open session as a tab at the top.
+  - **Zones**: the sessions side by side, in **columns**, one session each. Resize and reorder the columns, stack
+    them, or detach one into its own window.
+- **Grid**, **widening**, **scrolling sideways** and the **ready-made layouts** below belong to the Zones mode.
 - **Grid**: with two sessions or more, the grid button at the top right stacks them two per column (four sessions
-  = 2x2). You can also drop a column on the lower part of another (it goes under it) or on its upper part (it goes above it), or pick **Put under the column on the left** in
-  its **…** menu; a column holds up to three sessions (three stacked share the height evenly). Two stacked sessions
+  = 2x2). You can also drop a column on the lower part of another (it goes under it) or on its upper part (it goes above it), or pick **Stack** in
+  its **…** window; a column holds up to three sessions (three stacked share the height evenly). Two stacked sessions
   both keep their message box; in a stack of three, only the session you clicked shows its full message box and the
   others show a slim **Write…** bar - click it to write there. Drag the line
   between two stacked sessions to share the height (double-click: half and half). The same button, or **Give it its
   own column**, puts them back side by side. A stacked session shorter than about 560 px keeps a one-line header
-  (title, context, **…**, close): plan mode and Telegram notifications move into its **…** menu (their icon stays
-  while they are on), the project / topic line and the cost are hidden.
+  (title, context, **…**, close): the plan and bell marks stay while they are on, the project / topic line and the
+  cost are hidden.
 - **Widening a session to read**: drag the right edge of a column, up to 2000 px (never wider than the screen leaves
   room for, the other columns keep their minimum width). A widened column's conversation and message box use its
   whole width; otherwise the text stays at a comfortable 860 px. Double-click the edge to undo.
@@ -30,18 +36,24 @@ stopped.
 - **Ready-made layouts**: hold the mouse button down on a session's grip (the dots left of its title): small
   layouts appear, click the zone where it should go (the others fill the rest). Or drag the session by its grip: a
   layouts bar slides down at the top of the sessions, drop it on a zone. Rest the pointer on the grid button to
-  arrange every open session at once. With the keyboard: **…** menu > **Layouts…**. From four sessions, the
+  arrange every open session at once. With the keyboard: **…** > **Layout**. From four sessions, the
   **Half left / Half right** layouts give one session half the screen and put the others beside it, two or three
   per column: when they do not all fit, the strip scrolls as usual (the half moves with it, nothing slides under
   it). While a half is shown the widths are fixed (no resize handle).
   **Grid of 3** stacks three per column.
-- **Tabs view**: the **Tabs** button (window icon) at the top right of the Sessions page (Alt+T) shows one session at a time,
-  full width, with every open session as a chip above it. A chip shows whether its session is working, finished
+- **Tabs mode**: one session at a time, full width, with every open session as a tab in the bar at the top of the
+  page, left of the buttons. A tab shows whether its session is working, finished
   with an unread answer or stopped on an error; click it to show that session, or use the arrows on the left and
   right edges (Alt+← / Alt+→). Its cross closes the session. **Waiting** jumps to the next session that finished and
-  waits for your answer. Click the **Tabs** button again: your columns come back exactly as they were. On a phone, the same
-  button sits in the session's header; the chips show under the top bar, and a sideways swipe on the session
-  shows the previous or next one.
+  waits for your answer. With many tabs open, the buttons of the bar keep only their icon to leave
+  the room to the tabs. Switch to **Zones**: the same sessions are side by side, and your columns are exactly as
+  you left them. On a phone, the **Tabs** button (window icon) in the session's header turns the tabs on or off;
+  they show under the top bar, and a sideways swipe on the session shows the previous or next one.
+- **The same sessions on every device**: the sessions open on your computer are the tabs of your phone (Tabs
+  on, as it is on a new phone), and the other way round. Open one on either, it appears on the other; close it anywhere, it closes
+  everywhere. Each device keeps its own layout (Tabs or Zones, widths, stacks, the session in front), and a new
+  session not sent yet stays on the device where you type it. The first time, the phone takes the sessions of the
+  computer and keeps only the one on its screen.
 - **Fold the sidebar** with the button at its top, next to the logo (`Ctrl+\`): only its icons stay. A new browser
   starts with it unfolded.
 - **The second bar**: on a computer, the pages with a list (Sessions, Agents, Team, Tasks, Infra, Files, E-mail,
@@ -54,8 +66,8 @@ stopped.
 - On a phone or a tablet (the *touch layout*), one session fills the screen and the app opens on the last one.
   **☰** at the top left opens all your sessions: the **All / Running / Unread** chips with **New session** on
   their right (in the topic of the session on screen), then your projects and topics. **Press and hold** a session, a
-  topic or a project for its menu (rename, favorite, archive, delete...). The **plan button** (checklist icon)
-  sits right of the session's name; the session's **…** menu also holds *Telegram notifications*. **⊞** at the
+  topic or a project for its menu (rename, favorite, archive, delete...). Plan mode and *Notify me on
+  Telegram* are in the session's **…** window. **⊞** at the
   top right opens the rest of the app (see [Settings](11-settings-and-keys.md#on-a-phone-or-a-tablet)).
   While you type in the message box, it takes at most a third of the screen (its text scrolls inside) so the answer
   stays in sight, and the project line steps aside until the keyboard closes; held sideways, the session header
@@ -126,6 +138,22 @@ on its first message. A title you typed, a Telegram thread you named, or a renam
 ## The composer
 
 - **Enter** sends, **Shift+Enter** adds a new line.
+- **Commands (`/`)**: type `/` at the start of a message, as in Claude Code: a menu lists, in three groups, the
+  session's commands, the skills of this topic and project, then the other skills (a long group shows its first ones
+  and **+ N more**; typing searches them all). ↑/↓ to choose, **Tab** completes, **Enter** runs, **Esc** closes.
+  `/model` and `/effort` show their values next (or type them: `/model opus`, `/effort high`), `/plan` turns plan
+  mode on or off, `/compact` and `/handoff` as in the session menu, `/new` opens a new session in the topic,
+  `/rename New title` renames the session. These never reach Claude. A skill (`/post`, `/seo-audit https://…`) is
+  sent as typed: Claude starts that skill with what follows its name.
+- **Name someone (`@`)**: type `@` anywhere in the message: a menu lists, under a title each, your other sessions
+  (the running ones first), your agents and, when Team is on, your Team contacts and groups (a long list shows its
+  first ones and **+ N more**); type to filter, **Enter** or **Tab**
+  writes `@Name`, shown as a chip in the box and in the sent message (a click opens that session or agent). A
+  `/command` at the start of a message is a chip too. Nothing goes out by itself: Claude is told how to write to each one named, and does it when your
+  message asks for it - "summarize this and send it to @Shop opening", "ask @Lea if the site works for her",
+  "hand this to @Writer". A session receives it as a message (marked **↩ the sending session**, a click opens it),
+  an agent as work handed over, a Team contact as a message in your name. Claude says in its answer what it sent.
+  Sessions that keep answering each other stop after 3 sends in a row.
 - **Attachments**: drag and drop files, paste an image, or use the paperclip. Files are saved in
   `<topic>/attachments/YYYY-MM/` and their paths are given to Claude. With many files, they sit in a small
   strip of two rows that scrolls (the newest in view), so the conversation keeps its room.
@@ -148,11 +176,18 @@ when the session is open and idle, counted in your Claude plan. Turn them off in
 **Steer while Claude works.** A message sent during a turn waits in the queue above the composer.
 Click **Steer** (in the waiting-messages card) to use it immediately: the current turn is interrupted, Claude keeps everything
 it has done so far (same conversation) and continues the task taking your new message into account. Commands and
-sub-agents it started in the background keep running. Once Claude has answered and only background work runs (a dev server, a watch), a new message no longer waits: it goes to Claude at once, the background work still running. Several queued messages are sent together. **Edit** puts the waiting messages back into the composer at once
+sub-agents it started in the background keep running. Once Claude has answered and only background work runs (a dev server, a watch), a new message no longer waits: it goes to Claude at once, the background work still running (it only stops when the message cannot go to the same Claude: the model, Plan mode or the permissions of the session changed meanwhile, or the message names an MCP server that was not loaded; a line in the conversation says so). Several queued messages are sent together. **Edit** puts the waiting messages back into the composer at once
 (attachments included) so you can change them before sending again; if one of them started meanwhile, only the
 others stay in the composer. The **×** of the card empties the queue at once too (it comes back if the server
 refuses). **Stop** still cancels the turn
 and the queue (background work included).
+
+**Add to the plan, without interrupting.** **Add to plan** (in the same card) hands the waiting messages to the
+task that runs, without stopping anything: Claude reads them at its next step, between two actions, and goes on
+with them in mind ("only the intro for now", "also update the README"). In the conversation the message is marked
+*added to the plan*. Where **Steer** cuts the current step short to make Claude read you now, **Add to plan** lets
+it finish what it is doing. A voice message or a plan approval cannot be added this way: it goes at the end of the
+task (or use **Steer**).
 
 **Ask without interrupting.** **Question** (in the same card) asks the waiting messages on the side:
 Claude answers about the session - where it is at, why it did something, what is left - without stopping
@@ -194,8 +229,8 @@ into another app, the content arrives as plain text (a file as its path).
 - **Agents and background commands**: when Claude hands work to a sub-agent, or runs a command in the background,
   its card keeps spinning, with the time it has been running, until that work really ends (✓ done, ✗ failed, ⊘
   stopped or interrupted). Expand it for where it is: its last action, the tools and tokens used so far, then the
-  agent's report once it is done. While some still run, a pill above the composer says so (**2 agents running**):
-  click it to list them, click one to jump to its card. All of it comes back as it was after a reload or a lost
+  agent's report once it is done. While some still run, the last line of the conversation says so (**2 subagents
+  running**, or **· 2 subagents** after what Claude is doing): click it to list them, click one to jump to its card. All of it comes back as it was after a reload or a lost
   connection.
 - **Diagrams**: to explain how something works, Claude can draw a small diagram (a flowchart, a sequence, the
   states of something...) right in the answer. Click it to open it in the file viewer like a picture (zoom,
@@ -212,6 +247,9 @@ into another app, the content arrives as plain text (a file as its path).
 - **Right click** a picture, a video, an attachment or a file path (long press on Android): **Open**, **Download**,
   **Quote** (adds the file to your next message as one line with its path - Claude reads it only if needed, the
   picture does not fill the context) and **Copy path**.
+- **Code changes**: when a turn changed files of a git repository, a button under the answer sums them up
+  (**app · 3 files · +12 −4**); click it to review the diff, undo a file, commit, push or open a pull request. Right
+  click one of your messages for **Revert to before this message**. See [Code in a session](35-code.md).
 - File paths are clickable and open the **file viewer**: ← / → go through every file of the conversation (see [Files](06-files.md#the-file-viewer)).
 - The header shows the **model that actually answered**, the **cost** and a **context gauge**
   (how full Claude's context window is, measured against the real window of the model in use - it
@@ -232,7 +270,7 @@ With plan mode on, Claude **changes nothing before you agree**. It reads and exp
 answers with a plan: goal, steps, files concerned, risks and open questions. It cannot write files or run
 commands that modify anything in this mode.
 
-- Turn it on with the **plan button** (checklist icon) in the session header, or tick **Plan mode** when
+- Turn it on in the session's **…** window, with `/plan` in the message box, or tick **Plan mode** when
   you start a new session. The composer shows a *Plan mode* chip (click it to leave).
 - Once the turn is over, a slim *Plan ready* line appears on top of the composer (waiting messages take
   its place while there are some):
@@ -273,14 +311,13 @@ the switch, the bar and the shortcut below only appear then (turning it off ther
 ## HUD mode
 
 A small floating bar to drive one session while you work in other apps. Turn it on in
-**Settings → Features → HUD mode**, then click the HUD button in a session header (or **Open the HUD**
-in its menu).
+**Settings → Features → HUD mode**, then pick **Open the HUD** in a session's **…** window.
 
 - While Claude works, it shows your prompt and Claude's **last three steps** (tools, thinking).
   When it is done, it shows **the answer** with its images - one at a time, ‹ › to go through them;
   a click opens the file in the app. The arrow next to the send button folds it into a slim bar
   (steps only) and back.
-- **Enter** sends; during a turn the message waits in the queue and **Steer** sends it right away.
+- **Enter** sends; during a turn the message waits in the queue: **Add to plan** hands it to the running task, **Steer** interrupts and sends it right away.
   The square button stops the turn.
 - **Share my screen** (the screen icon): pick a screen or a window once; from then on a capture is
   attached to every message you send from the HUD, so Claude sees what you see. When it helps, Claude
@@ -302,12 +339,13 @@ differs from your choice, a marker tells you. Each model has its own prompt cach
 context, switching asks first, because the new model reads the whole conversation once without cache (Compact first
 to make the switch cheap).
 
-The same menu holds the **effort** level of the next turns (Auto, Low, Medium, High, Extra, Max):
-how much the model thinks before answering — higher is slower and uses more tokens. It is stored
-on the session (`CLAUDE_CODE_EFFORT_LEVEL` for its `claude` processes) and **Auto** leaves the
-choice to the model, which is the default. Claude Code caps a level the model does not support at
-the highest one it does; models it does not recognise as effort-capable (most gateway models) may
-ignore it. A value set in the service environment still wins when the session is left on Auto.
+**Intelligence**: under the models, the same menu sets how much Claude thinks before answering - **Auto** (Claude
+Code's own default for the model), **Low**, **Medium**, **High**, **Extra high**, **Max**. More thinking gives better
+answers on hard work but is slower and uses more of your Claude plan; Low suits quick, simple tasks. The level stays
+on the session (a hand-off keeps it) and shows next to the model name; `/effort` in the composer does the same.
+A new session starts on Auto; the level can be chosen in the new-session form too. Claude Code caps a level the
+model does not support at the highest one it does; models it does not recognise as effort-capable (most gateway
+models) may ignore it.
 
 ## Compact vs hand off
 
@@ -343,6 +381,21 @@ thread, with the note "Back after 2 h: Harness summarized the session ... for yo
 returns: 38 to 67 % fewer tokens from 100k, and details kept better than with the plain summary. Below the threshold
 the full thread goes on. Off = the "Compact when you come back" rule alone.
 
+**Models with a smaller context window.** The three thresholds above are written for models with a 1M window. On a
+model with a smaller one (200k for some), a threshold above *the window minus 70k* counts as that value: 130k on a
+200k model, whatever the setting says. Without it the 300k threshold would never be met, and the session would only
+be compacted by Claude Code itself, in the middle of a turn, each time it reaches the end of the window (about a
+minute of waiting, many times a day on a long session). The note of an automatic compaction then adds "this model's
+window is 200k". Nothing changes on a 1M model, and Off stays off.
+
+## When a turn stops short
+
+When Claude stops before the end (usage limit reached, Claude's servers down, a crash), the conversation shows one
+card that says what happened in plain words. **Resume** sends "Continue where you stopped."; the model next to it
+is the one of the next turn, change it to resume with another one. A limit adds a link to your usage page, and
+**Details** shows the technical lines. Once you have resumed, the card stays as a trace, without its buttons. A turn
+you stopped yourself keeps its plain **Stopped.** line.
+
 ## Edit or delete a message that got no answer
 
 A message you stopped before Claude answered (it shows **Stopped.** under it) can be fixed or removed. Right-click
@@ -363,7 +416,12 @@ browser's own menu (and the **Quote** button), a file keeps its own menu (Open, 
 
 ## Notify, archive, delete
 
-- **Notify** (bell): when a turn that did not come from Telegram ends, a short message rings on Telegram - in the
+The **…** of a session (or a right-click on its header, a long press on a phone) opens its window: the
+*Plan mode* and *Notify me on Telegram* switches (they apply at once), then **Compact context**,
+**Summarise & restart**, **Open topic folder in Files**, the HUD, then on a computer the column actions (**Detach**, **Stack**,
+**Layout**), and **Archive** / **Delete** at the bottom.
+
+- **Notify me on Telegram** (in the session's **…** window; a small bell next to the topic while it is on): when a turn that did not come from Telegram ends, a short message rings on Telegram - in the
   session's thread, else in the main chat (reply to it to continue the session). See [Telegram](telegram).
 - **In the browser**: Settings -> **Notifications** -> *Notify me when a session finishes* shows a
   system notification when the tab is in the background (a small banner with **Open** otherwise),
@@ -380,7 +438,9 @@ browser's own menu (and the **Quote** button), a file keeps its own menu (Open, 
 
 ## Search
 
-**Ctrl/⌘+K** (or the search bar at the top of the sidebar, a search icon when it is folded) is the one search of the app. It finds:
+**Ctrl/⌘+K** (or the search bar at the top of the sidebar, a search icon when it is folded) is the one search of the app.
+Sessions come first: your last sessions before you type, then the sessions whose title holds what you type, then
+the pages, settings and commands. It finds:
 
 - **sessions**, by their title and by what you and Claude wrote;
 - with Agents on, every **agent** and **agent group** by its name (and its project, topic or members), and what
@@ -417,8 +477,9 @@ A Telegram session can be continued from the web UI and the other way round.
 | Ctrl/⌘+\ | show / hide the sidebar |
 | Shift+P | presentation mode (hides sensitive data on screen) |
 | G then D / S / F / T / C | go to Dashboard / Sessions / Files / Tasks / Crons |
-| Alt+T | tabs view on / off (Sessions page) |
+| Alt+T | switch between Tabs and Zones (Sessions page) |
 | Alt+M | Maxxing mode on / off (Sessions page, once enabled in Settings -> Features) |
+| Ctrl+J | terminal under the session on / off (once Code mode is on in Settings -> Features -> Sessions, see [Code in a session](35-code.md#terminal)) |
 
 ## Good to know
 

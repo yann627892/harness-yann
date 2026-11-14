@@ -16,13 +16,10 @@ export function PlaceName({ p }: { p: Place }) {
   return p.sensitive ? <Sensitive>{p.label}</Sensitive> : <>{p.label}</>
 }
 
-/** Small coloured tag of a place (this server, a VPS, Cloudflare…). */
+/** Small grey tag of a place (this server, a VPS, Cloudflare…): colours on this page only tell a state. */
 export function PlaceTag({ p, className }: { p: Place; className?: string }) {
   return (
-    <span
-      className={cn('inline-flex h-5 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11.5px] font-medium whitespace-nowrap', className)}
-      style={{ color: `color-mix(in oklch, ${p.color} 80%, var(--foreground))`, background: `color-mix(in oklch, ${p.color} 14%, transparent)` }}
-    >
+    <span className={cn('inline-flex h-5 shrink-0 items-center gap-1 rounded-md bg-muted px-1.5 text-[11.5px] font-medium whitespace-nowrap text-muted-foreground', className)}>
       <p.icon className="size-3" />
       <PlaceName p={p} />
     </span>
@@ -31,37 +28,8 @@ export function PlaceTag({ p, className }: { p: Place; className?: string }) {
 
 export function PlaceIcon({ p, className }: { p: Place; className?: string }) {
   return (
-    <span
-      className={cn('grid size-7 shrink-0 place-items-center rounded-lg border', className)}
-      style={{ color: p.color, background: `color-mix(in oklch, ${p.color} 14%, transparent)`, borderColor: `color-mix(in oklch, ${p.color} 30%, transparent)` }}
-    >
+    <span className={cn('grid size-7 shrink-0 place-items-center rounded-lg border bg-muted text-muted-foreground', className)}>
       <p.icon className="size-3.5" />
-    </span>
-  )
-}
-
-/** Thin bar split by place, in the place colours. */
-export function MixBar({ parts, className, onPick, current }: { parts: { p: Place; n: number }[]; className?: string; onPick?: (key: string) => void; current?: string | null }) {
-  const total = parts.reduce((a, x) => a + x.n, 0) || 1
-  const mask = useMask()
-  const name = (p: Place) => (p.sensitive ? mask(p.label) : p.label)
-  return (
-    <span className={cn('flex gap-px overflow-hidden rounded-full', className)} aria-hidden={!onPick}>
-      {parts.map(({ p, n }) =>
-        onPick ? (
-          <button
-            key={p.key}
-            type="button"
-            title={`${name(p)}: ${n}`}
-            aria-label={`${name(p)}: ${n}`}
-            onClick={() => onPick(p.key)}
-            className={cn('h-full transition-opacity hover:opacity-100', current && current !== p.key ? 'opacity-35' : 'opacity-85')}
-            style={{ flex: n / total, background: p.color }}
-          />
-        ) : (
-          <i key={p.key} className="block h-full" style={{ flex: n / total, background: p.color }} />
-        ),
-      )}
     </span>
   )
 }
@@ -80,7 +48,7 @@ export function ResourceRow({ r, byId, v, onOpen }: { r: InfraResource; byId: Ma
         onClick={onOpen}
         onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), onOpen())}
         className={cn(
-          'grid cursor-pointer grid-cols-[minmax(0,1fr)] items-center gap-x-4 gap-y-0.5 px-3.5 py-2 transition-colors hover:bg-accent/50 md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_13rem] pointer-coarse:py-2.5',
+          'grid cursor-pointer grid-cols-[minmax(0,1fr)] items-center gap-x-4 gap-y-0.5 px-3.5 py-2 transition-colors hover:bg-muted md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_13rem] pointer-coarse:py-2.5',
           r.hidden && 'opacity-60',
         )}
         data-testid="infra-row"
@@ -144,12 +112,8 @@ function PlaceGroup({ p, list, byId, v, onOpen, sub }: { p: Place; list: InfraRe
   const down = list.filter((r) => r.status === 'down').length
   const shown = all ? sorted : sorted.slice(0, SHOWN)
   return (
-    <section
-      className={cn('overflow-hidden rounded-xl border border-l-[3px]', p.tier === 'own' ? 'bg-card' : 'border-dashed [border-left-style:solid]')}
-      style={{ borderLeftColor: p.color }}
-      data-testid="infra-place"
-    >
-      <div className="flex items-center gap-3 px-3.5 py-2.5" style={{ background: `color-mix(in oklch, ${p.color} 6%, transparent)` }}>
+    <section className="overflow-hidden rounded-xl border bg-card" data-testid="infra-place">
+      <div className="flex items-center gap-3 px-3.5 py-2.5">
         <PlaceIcon p={p} />
         <div className="grid min-w-0 flex-1">
           <span className="truncate text-sm font-semibold">
@@ -166,7 +130,7 @@ function PlaceGroup({ p, list, byId, v, onOpen, sub }: { p: Place; list: InfraRe
         ))}
       </ul>
       {sorted.length > shown.length && (
-        <button type="button" onClick={() => setAll(true)} className="w-full border-t px-3.5 py-2 text-left text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground">
+        <button type="button" onClick={() => setAll(true)} className="w-full border-t px-3.5 py-2 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground">
           {t('infra.place.more', { count: sorted.length - shown.length })}
         </button>
       )}
@@ -178,7 +142,7 @@ function TierTitle({ tier }: { tier: 'own' | 'hosted' }) {
   const t = useT()
   const Icon = tier === 'own' ? Server : Cloud
   return (
-    <h2 className={cn('mt-2 flex items-center gap-2 text-[11.5px] font-semibold tracking-wider uppercase', tier === 'own' ? 'text-primary' : 'text-muted-foreground')}>
+    <h2 className="mt-2 flex items-center gap-2 text-[11.5px] font-semibold tracking-wider text-muted-foreground uppercase">
       <Icon className="size-3.5" /> {t(tier === 'own' ? 'infra.place.ownTitle' : 'infra.place.hostedTitle')}
       <span className="h-px flex-1 bg-border" />
     </h2>
@@ -215,10 +179,9 @@ export function TypeView({ items, v, byId, at, onAt, onOpen, intro }: { items: I
       type="button"
       onClick={() => onAt(cur === x.p.key ? null : x.p.key)}
       aria-pressed={cur === x.p.key}
-      className={cn('inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-full border px-2.5 text-xs whitespace-nowrap transition-colors hover:bg-accent pointer-coarse:h-10', cur === x.p.key ? 'text-foreground' : 'text-muted-foreground')}
-      style={cur === x.p.key ? { borderColor: x.p.color, background: `color-mix(in oklch, ${x.p.color} 14%, transparent)` } : undefined}
+      className={cn('inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-full border px-2.5 text-xs whitespace-nowrap transition-colors hover:bg-accent pointer-coarse:h-10', cur === x.p.key ? 'bg-secondary text-foreground' : 'text-muted-foreground')}
     >
-      <i className="size-2 shrink-0 rounded-[2px]" style={{ background: x.p.color }} />
+      <x.p.icon className="size-3 shrink-0" />
       <span className="min-w-0 truncate">
         <PlaceName p={x.p} />
       </span>
@@ -232,7 +195,6 @@ export function TypeView({ items, v, byId, at, onAt, onOpen, intro }: { items: I
     <div className="grid grid-cols-[minmax(0,1fr)] gap-3">
       {intro}
       <div className="grid grid-cols-[minmax(0,1fr)] gap-2.5">
-        <MixBar parts={parts} className="h-2 pointer-coarse:pointer-events-none" onPick={(k) => onAt(cur === k ? null : k)} current={cur} />
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"

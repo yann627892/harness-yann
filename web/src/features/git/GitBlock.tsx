@@ -60,7 +60,7 @@ export function GitBlock({ code, className }: { code: string; className?: string
   const repo = data?.repo
   return (
     <div className={cn('not-prose overflow-hidden rounded-xl border bg-card', className)} data-testid="git-block">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-muted/30 px-3 py-2 text-[13px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b bg-fill-1 px-3 py-2 text-[13px]">
         {repo?.kind === 'github' ? <Github className="size-4 text-muted-foreground" /> : <GitBranch className="size-4 text-muted-foreground" />}
         <span className="font-medium">{repo?.github && repo.kind === 'github' ? repo.github : repo?.name || spec.repo.split('/').pop()}</span>
         {repo?.branch && (
@@ -85,16 +85,16 @@ export function GitBlock({ code, className }: { code: string; className?: string
           </span>
         )}
         <span className="ml-auto flex items-center gap-2">
-          <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => setShowCode(true)}>
+          <button type="button" className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground pointer-coarse:min-h-10 pointer-coarse:px-2" onClick={() => setShowCode(true)}>
             {t('git.showCode')}
           </button>
           {page && repo && (
-            <Link to={`/git?repo=${encodeURIComponent(repo.id)}`} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+            <Link to={`/git?repo=${encodeURIComponent(repo.id)}`} className="inline-flex items-center gap-1 text-xs text-primary hover:underline pointer-coarse:min-h-10 pointer-coarse:px-2">
               <Maximize2 className="size-3" /> {t('git.openPage')}
             </Link>
           )}
           {repo?.url && (
-            <a href={repo.url} target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-foreground" aria-label="GitHub">
+            <a href={repo.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center text-muted-foreground hover:text-foreground pointer-coarse:min-h-10 pointer-coarse:min-w-10" aria-label="GitHub">
               <ExternalLink className="size-3.5" />
             </a>
           )}

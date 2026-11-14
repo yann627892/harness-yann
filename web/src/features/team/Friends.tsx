@@ -1,6 +1,7 @@
 // Team -> Friends: the people you are connected with (open a chat in one click), requests to answer, and the
 // "Add a friend" dialog (one-time invitation, server to server).
 import * as React from 'react'
+import { ListEntry } from '@/components/shell/PageList'
 import { Check, Copy, Fingerprint, Link2, LogIn, MessageCircle, MoreHorizontal, ShieldAlert, Trash2, UserPlus, X } from 'lucide-react'
 import { errorMessage } from '@/lib/api'
 import {
@@ -10,8 +11,9 @@ import { cn } from '@/lib/utils'
 import { useT } from '@/i18n'
 import {
   Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
-  DropdownMenuSeparator, DropdownMenuTrigger, EmptyState, Input, Skeleton, toast,
+  DropdownMenuSeparator, DropdownMenuTrigger, EmptyState, Input, Skeleton, toast, WithContextMenu,
 } from '@/components/ui'
+import { confirm } from '@/components/ui/alert-dialog'
 import { Callout } from '@/features/common'
 import { Avatar } from '@/features/profile/Avatar'
 import { friendsOf, PersonAvatar, usePresence } from './people'
@@ -26,12 +28,14 @@ export function useOpenDm(onOpen: (chatId: string) => void) {
 }
 
 /* ------------------------------------------------------------------------------------------------ friends tab */
-export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | undefined; onOpenChat: (id: string) => void; compact?: boolean }) {
+export function FriendsView({ team, onOpenChat, compact, query }: { team: TeamState | undefined; onOpenChat: (id: string) => void; compact?: boolean; /** the Team page: the search is the 🔍 of the list's head */ query?: string }) {
   const t = useT()
   const presence = usePresence()
   const { data: cx } = useTeamConnections()
   const [add, setAdd] = React.useState(false)
-  const [q, setQ] = React.useState('')
+  const [own, setQ] = React.useState('')
+  const page = query !== undefined
+  const q = page ? query : own
   const dm = useOpenDm(onOpenChat)
   const requests = cx?.contacts.filter((x) => x.status === 'request') || []
   const waiting = cx?.contacts.filter((x) => x.status === 'waiting') || []
@@ -42,12 +46,18 @@ export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | u
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className={cn('flex items-center gap-2 border-b', compact ? 'p-2' : 'p-3')}>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('team.friends.search')} className="h-8 flex-1 text-[13px]" />
-        <Button size="sm" onClick={() => setAdd(true)} className="shrink-0">
-          <UserPlus /> {t('team.friends.add')}
-        </Button>
-      </div>
+      {page ? (
+        <div className="px-2 pt-1">
+          <ListEntry icon={UserPlus} label={t('team.friends.add')} onClick={() => setAdd(true)} testid="team-add-friend" />
+        </div>
+      ) : (
+        <div className={cn('flex items-center gap-2 border-b', compact ? 'p-2' : 'p-3')}>
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('team.friends.search')} className="h-8 flex-1 text-[13px]" />
+          <Button size="sm" onClick={() => setAdd(true)} className="shrink-0">
+            <UserPlus /> {t('team.friends.add')}
+          </Button>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-2">
         {!team || !cx ? (
           [0, 1, 2].map((i) => <Skeleton key={i} className="m-1 h-12" />)
@@ -75,13 +85,13 @@ export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | u
             {friendsOf(team).length > 0 && (
               <Section title={t('team.friends.title')} hint={online ? t('team.online', { count: online }) : undefined}>
                 {friends.map(([id, p]) => (
+                  <WithContextMenu key={id} className="w-64" items={byId.get(id) && <FriendMenuItems contact={byId.get(id)!} name={p.name} />}>
                   <div
-                    key={id}
                     role="button"
                     tabIndex={0}
                     onClick={() => dm.open(id)}
                     onKeyDown={(e) => e.key === 'Enter' && dm.open(id)}
-                    className="group/f flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent/60"
+                    className="group/f flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 transition-colors hover:bg-muted"
                   >
                     <PersonAvatar person={p} status />
                     <span className="min-w-0 flex-1">
@@ -99,6 +109,7 @@ export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | u
                     </Button>
                     <FriendMenu contact={byId.get(id)} name={p.name} />
                   </div>
+                  </WithContextMenu>
                 ))}
                 {!friends.length && <p className="px-2 py-3 text-[12.5px] text-muted-foreground">{t('team.friends.noMatch')}</p>}
               </Section>
@@ -106,7 +117,8 @@ export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | u
             {waiting.length > 0 && (
               <Section title={t('team.cx.waiting')} count={waiting.length}>
                 {waiting.map((x) => (
-                  <div key={x.address} className="group/f flex items-center gap-3 rounded-lg px-2 py-1.5">
+                  <WithContextMenu key={x.address} className="w-64" items={<FriendMenuItems contact={x} name={x.name} />}>
+                  <div className="group/f flex items-center gap-3 rounded-lg px-2 py-1.5">
                     <Avatar profile={x} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13.5px] font-medium">{x.name || t('team.friends.someone')}</span>
@@ -114,6 +126,7 @@ export function FriendsView({ team, onOpenChat, compact }: { team: TeamState | u
                     </span>
                     <FriendMenu contact={x} name={x.name} />
                   </div>
+                  </WithContextMenu>
                 ))}
               </Section>
             )}
@@ -141,7 +154,6 @@ function Section({ title, count, hint, children }: { title: string; count?: numb
 /** The fingerprint (to check the link with the person) and Remove. */
 function FriendMenu({ contact, name }: { contact: TeamContact | undefined; name: string }) {
   const t = useT()
-  const remove = useTeamRemoveContact()
   if (!contact) return null
   return (
     <DropdownMenu>
@@ -151,20 +163,30 @@ function FriendMenu({ contact, name }: { contact: TeamContact | undefined; name:
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64" onClick={(e) => e.stopPropagation()}>
-        <DropdownMenuLabel className="flex items-center gap-2 font-normal text-muted-foreground">
-          <Fingerprint className="size-4" />
-          <span className="text-[12px]">{t('team.friends.fp')}</span>
-          <span className="ml-auto font-mono text-[12px] text-foreground">{contact.fingerprint}</span>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          destructive
-          onSelect={() => window.confirm(t('team.cx.removeConfirm', { name: name || t('team.friends.someone') })) && remove.mutate(contact.address)}
-        >
-          <Trash2 className="size-4" /> {contact.status === 'waiting' ? t('team.friends.cancel') : t('team.cx.remove')}
-        </DropdownMenuItem>
+        <FriendMenuItems contact={contact} name={name} />
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+function FriendMenuItems({ contact, name }: { contact: TeamContact; name: string }) {
+  const t = useT()
+  const remove = useTeamRemoveContact()
+  return (
+    <>
+      <DropdownMenuLabel className="flex items-center gap-2 font-normal text-muted-foreground">
+        <Fingerprint className="size-4" />
+        <span className="text-[12px]">{t('team.friends.fp')}</span>
+        <span className="ml-auto font-mono text-[12px] text-foreground">{contact.fingerprint}</span>
+      </DropdownMenuLabel>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem
+        destructive
+        onSelect={async () => (await confirm({ title: t('team.cx.remove'), description: t('team.cx.removeConfirm', { name: name || t('team.friends.someone') }), confirmText: t('common.remove') })) && remove.mutate(contact.address)}
+      >
+        <Trash2 className="size-4" /> {contact.status === 'waiting' ? t('team.friends.cancel') : t('team.cx.remove')}
+      </DropdownMenuItem>
+    </>
   )
 }
 

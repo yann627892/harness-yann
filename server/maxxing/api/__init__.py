@@ -14,6 +14,8 @@ ROUTERS = [
     "trash",
     "importer",
     "files",
+    "code",
+    "term",
     "filesite",
     "tasks",
     "crons",

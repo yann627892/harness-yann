@@ -1,20 +1,23 @@
 // Message composer: autosize textarea, drafts, attachments (button / drop / paste), queue stack, quotes,
 // send / stop. Enter sends, Shift+Enter = newline, Ctrl/⌘+Enter sends, Esc blurs.
 import * as React from 'react'
-import { ArrowUp, Clock, CornerDownRight, FileText, MessageCircleQuestion, Paperclip, Pencil, Quote, Square, X } from 'lucide-react'
+import { ArrowUp, Clock, CornerDownRight, FileText, ListPlus, MessageCircleQuestion, Paperclip, Pencil, Quote, Square, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { loadGroups, useT } from '@/i18n'
 import { Button, Sensitive, Spinner, Textarea, Tooltip, toast } from '@/components/ui'
-import { uploadAttachment } from '@/lib/queries'
+import { uploadAttachment, useMentionTargets } from '@/lib/queries'
 import { errorMessage } from '@/lib/api'
 import { DRAFT_EVENT, leftOutbox, loadAtts, loadDraft, loadQuotes, onSeed, outboxAdd, outboxDone, outboxMove, registerComposer, saveAtts, saveDraft, saveQuotes, takeSeed, type DraftAtt, type OutboxEntry, type Pending, type Seed } from './store'
 import { busyEnd, busyStart } from '@/lib/busy'
 import { fmtBytes } from '@/lib/format'
-import type { QueueItem } from '@/lib/types'
+import type { MentionTarget, QueueItem, SentMention } from '@/lib/types'
 import { baseName, isImage, quotedFile, quotesMarkdown, thumbUrl } from './util'
 import { QuotedFile } from './QuotedFile'
 import { pastedFile, pastedName } from './pasteAsFile'
 import { VoiceButton } from '@/features/voice/VoiceButton'
+import { SlashMenu, slashAction, slashItems, type MenuRow, type SlashCommand } from './SlashMenu'
+import { mentionAt, mentionRows, targetChip, usedMentions } from './mentions'
+import { ChipBackdrop, findCommand, findNames } from '@/features/chips/Chip'
 
 const NO_ITEMS: QueueItem[] = []
 
@@ -41,6 +44,9 @@ export const Composer = React.forwardRef<ComposerHandle, {
   steering?: boolean
   /** A steer was accepted: the current turn is ending, the queued messages start right after. */
   steerPending?: boolean
+  /** Add to plan: the queued messages go into the running turn without interrupting it (read at Claude's next step). */
+  onInject?: () => void
+  injecting?: boolean
   /** Edit: takes the queued messages back (server queue emptied) - they are put in the composer. */
   onTakeQueue?: () => Promise<{ text: string; attachments: string[] }[]>
   /** Side question: the waiting messages become a question Claude answers apart, without interrupting the turn. */
@@ -48,7 +54,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
   asking?: boolean
   clearingQueue?: boolean
   /** `clientId`: the outbox id, sent with the message so that a reload mid-send can tell whether it arrived. */
-  onSend: (text: string, attachments: string[], clientId?: string) => Promise<boolean>
+  onSend: (text: string, attachments: string[], clientId?: string, mentions?: SentMention[]) => Promise<boolean>
   /** Messages a previous page load was sending when it went away: resolves to those the server never got. */
   checkSent?: (left: OutboxEntry[]) => Promise<OutboxEntry[] | null>
   /** Voice message sent directly (setting on by default): the recording is sent as it is, the server transcribes it. */
@@ -64,8 +70,12 @@ export const Composer = React.forwardRef<ComposerHandle, {
   autoFocus?: boolean
   /** Lines the text grows to before it scrolls (fewer in a small grid pane, so the conversation stays visible). */
   maxRows?: number
+  /** The "/" menu: the session's commands and the topic's skills (none: "/" is plain text). */
+  commands?: SlashCommand[]
+  /** The "@" menu (mentions.tsx): the id of the session it writes to (none: "@" is plain text). */
+  mentionsFor?: string
 }>(function Composer(props, ref) {
-  const { colKey, draftKey, topicPath, running, disabledReason, queueCount = 0, queued = [], queueItems = NO_ITEMS, onClearQueue, clearingQueue, onSteer, steering, steerPending, onTakeQueue, onAsk, asking, onSend, onStop, stopping, toolbar, notice, suggestions, placeholder, autoFocus, maxRows = 12 } = props
+  const { colKey, draftKey, topicPath, running, disabledReason, queueCount = 0, queued = [], queueItems = NO_ITEMS, onClearQueue, clearingQueue, onSteer, steering, steerPending, onInject, injecting, onTakeQueue, onAsk, asking, onSend, onStop, stopping, toolbar, notice, suggestions, placeholder, autoFocus, maxRows = 12 } = props
   const t = useT()
   const [text, setText] = React.useState(() => loadDraft(draftKey))
   const [quotes, setQuotes] = React.useState<string[]>(() => loadQuotes(draftKey))
@@ -322,11 +332,23 @@ export const Composer = React.forwardRef<ComposerHandle, {
   const chain = React.useRef<Promise<unknown>>(Promise.resolve())
   const inflight = React.useRef(0)
   const send = (voiceText?: string) => {
+    const act = !voiceText && props.commands ? slashAction(text, props.commands) : null
+    if (act && !(atts.length || quotes.length)) {
+      if ((act.cmd.args?.length || act.cmd.freeArg) && !act.arg) setText(`/${act.cmd.name} `) // asks for its value
+      else {
+        setText('')
+        act.cmd.run!(act.arg)
+      }
+      return
+    }
     const typed = text.trim()
     const body = voiceText ? (typed ? `${typed}\n\n${voiceText}` : voiceText) : typed
     if (blocked || (!body && ready.length === 0 && quotes.length === 0)) return
     const paths = ready.map((a) => a.path!) as string[]
     const sent = [quotesMarkdown(quotes), body].filter(Boolean).join('\n\n')
+    const named = usedMentions(body, picked)
+    const keptPicked = picked
+    setPicked([])
     setText('')
     const keep = atts
     setAtts([])
@@ -339,7 +361,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
     const outId = outboxAdd(k0, { text: sent, body, quotes: kept, attachments: paths })
     busyStart()
     chain.current = chain.current.then(async () => {
-      const ok = await onSend(sent, paths, outId).catch(() => false)
+      const ok = await onSend(sent, paths, outId, named.length ? named : undefined).catch(() => false)
       if (--inflight.current === 0 && mounted.current) setSending(false)
       // Refused: it comes back in the box below. A failure can also be the page going away (its request is cut):
       // the entry is removed only if the page is still here a moment later, else the next load brings it back.
@@ -357,6 +379,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
         const back = (cur: string[]) => [...kept, ...cur.filter((q) => !kept.includes(q))]
         if (mounted.current) {
           setText(restore)
+          setPicked((cur) => [...keptPicked, ...cur])
           setAtts((cur) => [...keep, ...cur])
           setQuotes(back)
         } else {
@@ -408,8 +431,124 @@ export const Composer = React.forwardRef<ComposerHandle, {
 
   // Ctrl+Shift+V / ⌘⇧V just before the paste: keep it as text whatever it is.
   const plainPaste = React.useRef(0)
+  // The "/" menu: open while the text is "/name" (or "/name value" for a command with values), closed by Esc
+  // until the text changes.
+  const [slashOff, setSlashOff] = React.useState<string | null>(null)
+  const [expanded, setExpanded] = React.useState<string[]>([])
+  const menu = props.commands && slashOff !== text ? slashItems(text, props.commands, expanded) : null
+  // The "@" menu (when no "/" menu): open while an "@name" is typed just before the caret.
+  const [caret, setCaret] = React.useState(0)
+  const [picked, setPicked] = React.useState<MentionTarget[]>([])
+  const at = !menu && props.mentionsFor && slashOff !== text ? mentionAt(text, caret) : null
+  const { data: targets } = useMentionTargets(props.mentionsFor || '', !!props.mentionsFor && text.includes('@'))
+  const atRows = at && targets ? mentionRows(at.q, targets, t, expanded) : []
+  // What the text names, drawn as chips behind it: the "/" command it starts with, the @ picked from the menu.
+  const commands = props.commands
+  const chipSpans = React.useMemo(() => {
+    const cmd = commands ? findCommand(text, (n) => commands.some((c) => c.name === n)) : null
+    const names = findNames(text, picked.map((x) => ({ raw: `@${x.label}`, chip: targetChip(x) })))
+    return cmd ? [cmd, ...names.filter((n) => n.start >= cmd.end)] : names
+  }, [text, picked, commands])
+  const rows: MenuRow[] = menu ? menu.items : atRows
+  const [slashAt, setSlashAt] = React.useState(0)
+  const menuKey = menu ? `${menu.stage}:${menu.items.map((i) => i.key).join('|')}` : atRows.length ? `@${atRows.map((i) => i.key).join('|')}` : ''
+  React.useEffect(() => {
+    if (!menu && !at && expanded.length) setExpanded([]) // folded again the next time a menu opens
+  }, [!!menu, !!at]) // eslint-disable-line react-hooks/exhaustive-deps
+  const keepAt = React.useRef<number | null>(null)
+  React.useEffect(() => {
+    setSlashAt(keepAt.current ?? 0)
+    keepAt.current = null
+  }, [menuKey])
+  const active = rows.length ? Math.min(slashAt, rows.length - 1) : 0
+  const pickMention = (i: number) => {
+    const row = atRows[i]
+    if (!row || !at) return
+    if (row.expand) {
+      const g = row.expand
+      keepAt.current = i
+      setExpanded((cur) => [...cur, g])
+      return
+    }
+    const target = row.target
+    if (!target) return
+    const name = `@${target.label} `
+    const next = text.slice(0, at.start) + name + text.slice(caret).replace(/^\S* ?/, '')
+    const pos = at.start + name.length
+    setText(next)
+    setCaret(pos)
+    setPicked((cur) => [...cur.filter((x) => x.kind !== target.kind || x.ref !== target.ref), target])
+    requestAnimationFrame(() => {
+      ta.current?.focus({ preventScroll: true })
+      ta.current?.setSelectionRange(pos, pos)
+    })
+  }
+  const pickSlash = (i: number, complete = false) => {
+    const it = menu?.items[i]
+    if (!it) return
+    const c = it.cmd
+    if (it.expand) {
+      const g = it.expand
+      keepAt.current = i
+      setExpanded((cur) => [...cur, g]) // "+ N more": the group unfolds, the selection stays on the same place
+      return
+    }
+    if (menu!.stage === 'arg') {
+      setText('')
+      c.run?.(it.arg ?? '')
+    } else if (!complete && c.kind === 'action' && c.run && !c.args?.length && !c.freeArg) {
+      setText('')
+      c.run('')
+    } else setText(`/${c.name} `)
+    requestAnimationFrame(() => focusAtEnd(ta.current))
+  }
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return
+    if (atRows.length) {
+      const n = atRows.length
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashAt((active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n)
+        return
+      }
+      if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
+        e.preventDefault()
+        pickMention(active)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashOff(text)
+        return
+      }
+    }
+    if (menu) {
+      const n = menu.items.length
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashAt((active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n)
+        return
+      }
+      if (e.key === 'Tab' && !e.shiftKey) {
+        e.preventDefault()
+        pickSlash(active, true)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+        // the name typed in full with nothing to choose: Enter sends it as usual ("/skill" goes to Claude)
+        const exact = menu.stage === 'name' && menu.items[active].label === text.trim() && menu.items[active].cmd.kind === 'skill'
+        if (!exact) {
+          e.preventDefault()
+          pickSlash(active)
+          return
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashOff(text)
+        return
+      }
+    }
     if ((e.key === 'v' || e.key === 'V') && e.shiftKey && (e.metaKey || e.ctrlKey)) plainPaste.current = Date.now()
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
       // On touch keyboards Enter inserts a newline (no Shift key); the send button sends.
@@ -449,9 +588,11 @@ export const Composer = React.forwardRef<ComposerHandle, {
     )
   }
 
+  const [taEl, setTaEl] = React.useState<HTMLTextAreaElement | null>(null)
   const setRef = React.useCallback(
     (el: HTMLTextAreaElement | null) => {
       ta.current = el
+      setTaEl(el)
       registerComposer(colKey, el)
     },
     [colKey],
@@ -588,6 +729,13 @@ export const Composer = React.forwardRef<ComposerHandle, {
                     </Button>
                   </Tooltip>
                 )}
+                {onInject && running && (
+                  <Tooltip content={t('sessions.queue.injectTip')}>
+                    <Button size="sm" variant="ghost" className="h-7 px-2 text-xs max-md:h-8 pointer-coarse:h-10 max-md:pointer-coarse:h-10 pointer-coarse:min-w-10" onClick={onInject} loading={injecting} disabled={steerPending}>
+                      <ListPlus className="size-3.5" /> <span className="max-sm:sr-only">{t('sessions.queue.inject')}</span>
+                    </Button>
+                  </Tooltip>
+                )}
                 {onSteer && running && (
                   <Tooltip content={t('sessions.queue.steerTip')}>
                     <Button size="sm" className="h-7 px-2.5 text-xs max-md:h-8 pointer-coarse:h-10 max-md:pointer-coarse:h-10" onClick={onSteer} loading={steering || steerPending} disabled={steerPending}>
@@ -660,11 +808,16 @@ export const Composer = React.forwardRef<ComposerHandle, {
         </div>
         <div
           data-tour="composer"
+          data-kbd-box=""
           className={cn(
-            'relative z-10 rounded-xl border bg-card shadow-xs transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20',
+            'mx-lg relative z-10 rounded-xl border bg-card shadow-xs transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20',
             disabledReason && 'opacity-80',
           )}
         >
+          {menu && <SlashMenu items={menu.items} active={active} stage={menu.stage} onPick={(i) => pickSlash(i)} onHover={setSlashAt} />}
+          {!menu && atRows.length > 0 && (
+            <SlashMenu items={atRows} active={active} stage="arg" label={t('mention.label')} keys={t('mention.keys')} onPick={pickMention} onHover={setSlashAt} />
+          )}
           {atts.length > 0 && (
             // Many files: a small scrolling strip (two rows) instead of a composer that eats the conversation.
             <div ref={attBox} data-testid="composer-attachments" className="flex max-h-[6.75rem] flex-wrap gap-1.5 overflow-y-auto overscroll-contain px-2.5 pt-2.5 [scrollbar-width:thin]">
@@ -683,17 +836,22 @@ export const Composer = React.forwardRef<ComposerHandle, {
                     setUsedSuggestions(suggestions || null)
                     send(s)
                   }}
-                  className="max-w-full truncate rounded-full border bg-muted/40 px-2.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none pointer-coarse:py-1.5"
+                  className="max-w-full truncate rounded-full border bg-fill-1 px-2.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none pointer-coarse:py-1.5"
                 >
                   {s}
                 </button>
               ))}
             </div>
           )}
+          <ChipBackdrop text={text} spans={chipSpans} target={taEl} />
           <Textarea
             ref={setRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value)
+              setCaret(e.target.selectionStart)
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             minRows={1}
@@ -701,7 +859,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
             placeholder={placeholder || t('sessions.composer.placeholder')}
             aria-label={t('sessions.composer.label')}
             data-kbd-cap=""
-            className="border-0 bg-transparent px-3.5 pt-3 pb-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
+            className="relative border-0 bg-transparent px-3.5 pt-3 pb-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
           />
           <div className="@container flex min-w-0 items-center gap-1 px-1.5 pb-1.5">
             <input

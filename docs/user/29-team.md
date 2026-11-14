@@ -11,14 +11,15 @@ Turn it on in **Settings -> Features -> Team**. The **Team** entry appears in th
 chats; a chat opens in a small window docked at the bottom of the page (up to three side by side), like Messenger.
 **–** minimizes it into a round head above the bubble (with its unread count; hover it for the name, **×** to close
 it), and a new message brings its chat's head up. **Open in Team** (⤢, next to **–**) opens that chat in the Team
-page and closes its window; the same icon in the list of chats opens the Team page.
-The **×** of the Team bubble (on hover) hides all the bubbles; the chat icon next to **Team** in the sidebar, or
-opening a chat, brings them back. To do without bubbles, turn off **Settings -> Features -> Team bubbles**, under
+page and closes its window; the same icon in the list of chats opens the Team page. The other way round, **Open in a
+bubble** at the top of a chat in the Team page puts that chat in a bubble and takes you back where you were.
+The **×** of the Team bubble (on hover) hides all the bubbles; **Open in a bubble** in the Team page, or a chat opened
+from a notification, brings them back. To do without bubbles, turn off **Settings -> Features -> Team bubbles**, under
 Team (per browser): Team then opens its own page.
 
 On the Team page, on a computer, the chats sit in the second bar next to the sidebar (see
-[Sessions](04-sessions.md#layout)); on a phone, **☰** at the top left opens them and the page shows the first chat
-(with nothing to show, **Open the list**). The list has two tabs: **Chats** and **Friends** (your contacts, who is online, pending requests, **Add a friend**).
+[Sessions](04-sessions.md#layout)); on a phone, the page is the list of chats: tap one to open it, **←** (or the back gesture)
+returns to the chats, and **☰** at the top left shows them over the chat open. The list has two tabs: **Chats** and **Friends** (your contacts, who is online, pending requests, **Add a friend**).
 
 ## Connecting with someone
 
@@ -54,8 +55,10 @@ new invitation: an invitation never replaces an existing contact.
   (Up arrow in an empty message box edits your last one).
 - **Seen** under your last message, **writing…** while someone types, and each friend's presence (online, or seen
   5 min ago): it shows while their Harness is open in a browser.
-- **Notifications** for new messages of the chats you are not looking at: Settings -> Notifications -> Team
-  messages. **Mute** a chat (its menu) to silence it.
+- **New messages** of the chats you are not looking at pop up as messages: who wrote, what they wrote, and a box to
+  answer on the spot (tap the message to open its chat); several chats share one popup, and it leaves by itself
+  unless you are writing. With Harness in the background, a system notification instead. Settings -> Notifications
+  -> Team messages turns it off. **Mute** a chat (its menu) to silence it.
 - **Groups**: their creator renames them, adds friends and removes members; anyone can **leave** (final). The
   thread says who joined, was removed or left.
 - A small clock on a message: not delivered yet to someone (their server is off); Harness retries for 7 days.
@@ -78,3 +81,25 @@ ever sent to a session without that click.
 Right click (a long press on a phone) on any message of a session, yours or Claude's: **Send to** lists your friends
 and groups. The text is shown first and you can edit it; a private chat is created if you had none. Only the text
 goes, not the message's attachments.
+
+## From a session, by asking Claude
+
+In any session, ask Claude: "send FEU the summary above on Team", "tell the Side project group the site is online",
+"send Léa the PDF". Claude runs the command:
+
+```
+maxxing team send Lea "The site is online: https://shop.example.com"
+maxxing team send "Side project" "Here is the report" --file /root/maxxing/projects/acme/topics/blog/report.pdf
+maxxing team list
+```
+
+- **Who**: the name of a contact or a group, as shown in Team. Case and accents do not matter and a unique beginning
+  is enough (`lea`, `side`); a contact's address works too. A private chat is created if you had none. If two names
+  match, the command lists them and sends nothing.
+- **What**: the message goes out in your name, exactly like one you typed in Team (Claude is not shown as the author).
+  `--file` attaches a file of the server (repeat it for several, 10 at most); `-` as the message reads it from the
+  standard input (a long text from a script). A text over 8,000 characters is refused, not cut.
+- `maxxing team list` shows the contacts and groups you can write to.
+- It only sends: no command reads your chats, so what people write still never reaches Claude unless you send it to a
+  session yourself. Agents in the sandbox cannot use it; a free agent can, like a session.
+

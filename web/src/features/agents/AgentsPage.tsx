@@ -29,6 +29,9 @@ import {
   DropdownMenuTrigger,
   EmptyState,
   NamedIcon,
+  Sheet,
+  SheetContent,
+  SheetTitle,
   Sensitive,
   Skeleton,
   StatusDot,
@@ -40,9 +43,12 @@ import { Page } from '@/components/shell/Page'
 import { AgentAvatarIcon, DEFAULT_AVATAR, OUTFIT } from './Avatar'
 import { statusOf, useAgentsOn, useRunNow, type Status } from './parts'
 import { WaitingBubble } from './approvals'
-import { QuickCreate, type CreateStart } from './CreateAgent'
+import { NewAgentForm, type CreateStart } from './CreateAgent'
 import { OfficeFuture } from './OfficeFuture'
 import { OfficeCustom } from './OfficeCustom'
+import { OfficeChat } from './office'
+import { AgentChatPanel } from './AgentPage'
+import { useMediaQuery } from '@/stores/media'
 import { draftUrl } from './EditWithClaude'
 import { DropBar, ProjectMenu, useAgentsLayout, useReorder, type AgentsLayoutApi } from './layout'
 import { SilentMark, useAgentMenu } from './AgentMenu'
@@ -95,17 +101,30 @@ export function NewButtons({ onNew }: { onNew: () => void }) {
   const t = useT()
   const [params] = useSearchParams()
   const project = (params.get('topic') || '').split('/')[0] || undefined
+  // one primary button (New agent), the group in its ▾ menu: one creation button per page header
   return (
-    <>
-      <Button asChild size="sm" variant="outline" data-testid="group-new" data-tour="group-new">
-        <Link to={newGroupRoute(project)}>
-          <UsersRound /> <span className="max-[429px]:sr-only">{t('groups.new')}</span>
-        </Link>
-      </Button>
-      <Button size="sm" onClick={onNew} data-testid="agent-new">
+    <div className="flex items-center">
+      <Button size="sm" onClick={onNew} className="rounded-r-none" data-testid="agent-new">
         <Plus /> <span className="max-[429px]:sr-only">{t('agents.new')}</span>
       </Button>
-    </>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="sm" className="rounded-l-none border-l border-primary-foreground/20 px-1.5" aria-label={t('groups.new')} data-testid="group-new" data-tour="group-new">
+            <ChevronDown />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={onNew}>
+            <Plus /> {t('agents.new')}
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link to={newGroupRoute(project)} data-testid="group-new-item">
+              <UsersRound /> {t('groups.new')}
+            </Link>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   )
 }
 
@@ -122,11 +141,31 @@ export function AgentsOverview({ onNew, onStart }: { onNew: () => void; onStart:
   // Projects and agents in the order of the layout (picked by hand, else workspace order / topic then name).
   const layout = useAgentsLayout()
   const groups = React.useMemo(() => layout.group(agents), [agents, layout])
+  // ?chat=<agent path>: its conversation next to the Office (a sheet on a narrow screen); a desk opens it, the same
+  // desk again closes it. Back (the browser's) closes it too.
+  const [search, setSearch] = useSearchParams()
+  const chat = search.get('chat')
+  const setChat = React.useCallback(
+    (path: string | null) =>
+      setSearch((p) => {
+        const n = new URLSearchParams(p)
+        if (path) n.set('chat', path)
+        else n.delete('chat')
+        return n
+      }),
+    [setSearch],
+  )
+  // an agent deleted (its menu) while its conversation is open: the panel closes
+  React.useEffect(() => {
+    if (chat && data && !data.agents.some((a) => a.path === chat)) setChat(null)
+  }, [chat, data, setChat])
+  const office = React.useMemo(() => ({ open: (path: string) => setChat(path === chat ? null : path), current: chat }), [chat, setChat])
+  const docked = useMediaQuery('(min-width: 1024px)')
 
-  return (
+  const page = (
     <Page
       title={t('agents.side.office')}
-      description={t('agents.desc')}
+      description={t('agents.overviewDesc')}
       width={view === 'classic' ? 'default' : 'wide'}
       actions={
         <>
@@ -174,6 +213,26 @@ export function AgentsOverview({ onNew, onStart }: { onNew: () => void; onStart:
         </div>
       )}
     </Page>
+  )
+  return (
+    <OfficeChat.Provider value={office}>
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">{page}</div>
+        {chat && docked && (
+          <aside className="flex w-[440px] shrink-0 flex-col border-l bg-background" data-testid="office-chat-panel">
+            <AgentChatPanel key={chat} path={chat} onClose={() => setChat(null)} />
+          </aside>
+        )}
+      </div>
+      {!docked && (
+        <Sheet open={!!chat} onOpenChange={(o) => !o && setChat(null)}>
+          <SheetContent side="right" hideClose className="h-[calc(var(--vvh,100dvh)*0.92)]" data-testid="office-chat-panel">
+            <SheetTitle className="sr-only">{t('agents.office.chat')}</SheetTitle>
+            {chat && <AgentChatPanel key={chat} path={chat} onClose={() => setChat(null)} />}
+          </SheetContent>
+        </Sheet>
+      )}
+    </OfficeChat.Provider>
   )
 }
 
@@ -249,7 +308,9 @@ function AgentTile({ agent: a, index, layout }: { agent: Agent; index: number; l
   const patch = usePatchAgent()
   const run = useRunNow()
   const s = statusOf(a, t, lang)
-  const open = () => navigate(agentRoute(a))
+  const chat = React.useContext(OfficeChat)
+  const open = () => (chat ? chat.open(a.path) : navigate(agentRoute(a)))
+  const current = chat?.current === a.path
   const stop = (e: React.SyntheticEvent) => e.stopPropagation()
   const ctx = useAgentMenu(a)
   return (
@@ -262,10 +323,12 @@ function AgentTile({ agent: a, index, layout }: { agent: Agent; index: number; l
       {...dnd.props}
       {...ctx.props}
       className={cn(
-        'group/tile relative grid cursor-pointer justify-items-center gap-3 rounded-xl border bg-card px-3 pt-5 pb-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/30 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+        'group/tile relative grid cursor-pointer justify-items-center gap-3 rounded-xl border bg-card px-3 pt-5 pb-4 text-center transition-colors hover:border-primary/40 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
         dnd.dragging && 'opacity-50',
         dnd.side && 'border-primary',
+        current && 'border-primary bg-muted',
       )}
+      aria-current={current || undefined}
       data-testid="agent-card"
       data-state={s.id}
       data-path={a.path}
@@ -348,10 +411,11 @@ function Bubble({ agent: a, status: s }: { agent: Agent; status: Status }) {
   return null
 }
 
-/** No agent yet: one character waiting at its desk, what an agent is in a sentence, then the same ways in as the
- *  creation sheet - where, then With Claude (a session in Sessions prepares it), by hand, a ready-made agent or a file. */
+/** No agent yet: one character waiting at its desk, what an agent is in a sentence, then the form of the creation
+ *  sheet - where and a name, then its conversation (or a Claude Code agent file). */
 export function AgentsEmpty({ onStart }: { onStart: (s: CreateStart) => void }) {
   const t = useT()
+  const navigate = useNavigate()
   return (
     <div className="mx-auto grid w-full max-w-2xl gap-6 px-3 py-10 max-md:py-6" data-testid="agents-empty">
       <div className="grid justify-items-center gap-4 text-center">
@@ -361,12 +425,7 @@ export function AgentsEmpty({ onStart }: { onStart: (s: CreateStart) => void }) 
           <p className="text-sm text-muted-foreground">{t('agents.emptyDesc')}</p>
         </div>
       </div>
-      <QuickCreate
-        onManual={(topic) => onStart({ manual: true, topic })}
-        onImport={(topic) => onStart({ importing: true, topic })}
-        onTemplate={(template, topic) => onStart({ template, topic })}
-        onDone={() => {}}
-      />
+      <NewAgentForm onImport={(topic) => onStart({ importing: true, topic })} onDone={(a) => navigate(agentRoute(a))} />
     </div>
   )
 }

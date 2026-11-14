@@ -10,23 +10,28 @@ import { ChevronLeft, ChevronRight, Code2, Download, Eye, FileQuestion, Folder, 
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Segmented, Sensitive, Tooltip } from '@/components/ui'
 import { isApiError } from '@/lib/api'
 import { api } from '@/lib/api'
-import { filePreviewUrl, fileStamp, fileThumbUrl, prefetchImage, PREVIEW_W, useFileContent, useFileKind, useFileStamp } from '@/lib/queries/files'
+import { fileDocQuery, filePdfQuery, filePreviewUrl, fileStamp, fileThumbUrl, prefetchImage, PREVIEW_W, useFileContent, useFileKind, useFileStamp } from '@/lib/queries/files'
 import { qk } from '@/lib/queries/keys'
 import type { FileContent, FileEntry, FileList } from '@/lib/types'
 import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useT } from '@/i18n'
-import { useIsMobile } from '@/stores/media'
-import { basename, dirname, iconFor, isRendered, isTextual, kindOf } from './kinds'
+import { useIsMobile, useMediaQuery } from '@/stores/media'
+import { basename, dirname, iconFor, isRendered, isTextDoc, isTextual, kindOf, type FileKind } from './kinds'
 import { PreviewBody } from './FilePreview'
 import { TextZoomControl, zoomsText } from './textZoom'
 import { FolderView } from './rich'
-import { CodeSkeleton, DiagramView, MediaSkeleton } from './viewers'
+import { DiagramView, warmCodeEditor, warmMarkdown } from './viewers'
+import { FileSkeleton } from './skeletons'
 import { videoInfoQuery } from './videoQuality'
 import { CodeBlock, CopyButton } from '@/components/ui/code-block'
 import { DIAGRAM_PREFIX, diagramCode } from '@/components/ui/diagram'
 import { useFileViewer } from './viewerStore'
 import { downloadProps, useDownloadZip } from './download'
+import { ChangesPane } from '@/features/code/ChangesPane'
+import { isChangesPath } from '@/features/code/api'
+import { PrPane } from '@/features/code/PrPane'
+import { isPrPath } from '@/features/code/prApi'
 
 export default function FileViewerHost() {
   const t = useT()
@@ -51,6 +56,7 @@ export default function FileViewerHost() {
   }, [open, multi, go])
 
   usePrefetchNeighbours(open ? list : [], index)
+  const swipe = useSwipe((d) => go(d), multi)
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && close()}>
@@ -67,9 +73,14 @@ export default function FileViewerHost() {
               : 'inset-y-0 right-0 w-[min(860px,94vw)] border-l shadow-pop data-[state=open]:animate-sheet-right',
           )}
         >
-          <DialogPrimitive.Title className="sr-only">{path ? (isDiagram(path) ? t('diagram.title') : basename(path)) : t('viewer.title')}</DialogPrimitive.Title>
+          <DialogPrimitive.Title className="sr-only">{path ? (isChangesPath(path) ? t('code.title') : isPrPath(path) ? t('pr.title') : isDiagram(path) ? t('diagram.title') : basename(path)) : t('viewer.title')}</DialogPrimitive.Title>
           {path &&
-            (isDiagram(path) ? (
+            (isPrPath(path) ? (
+              // one pane per pull request (not per tab or file): what is typed in its bar survives
+              <PrPane key={path.split('|').slice(0, 2).join('|')} path={path} index={index} count={list.length} fullscreen={fullscreen} canFull={!mobile} onFull={() => setFull(!full)} swipe={swipe} />
+            ) : isChangesPath(path) ? (
+              <ChangesPane key={path} path={path} index={index} count={list.length} fullscreen={fullscreen} canFull={!mobile} onFull={() => setFull(!full)} swipe={swipe} />
+            ) : isDiagram(path) ? (
               <DiagramPane key={path} id={path} index={index} count={list.length} fullscreen={fullscreen} canFull={!mobile} onFull={() => setFull(!full)} />
             ) : (
               <ViewerPane key={path} path={path} index={index} count={list.length} fullscreen={fullscreen} canFull={!mobile} onFull={() => setFull(!full)} />
@@ -89,9 +100,16 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
   const name = basename(path) || '/'
   const kind = kindOf(name)
   const [view, setView] = React.useState<'preview' | 'source'>('preview')
-  const content = useFileContent(path, probe.data === 'file' && isTextual(kind) && !(kind === 'html' && view === 'preview'))
+  // The probe (the parent folder's listing) tells a file from a folder or a missing path. A name with a known
+  // extension does not wait for it: its text and its stamp are asked at the same time, and the first to answer
+  // shows the file; the probe still decides when it says otherwise.
+  const eager = kind !== 'binary' && probe.isPending
+  const maybeFile = probe.data === 'file' || eager
+  const content = useFileContent(path, maybeFile && isTextual(kind) && !(kind === 'html' && view === 'preview'))
   // Media: the file's current mtime goes in the URLs (a file rewritten under the same name shows its new version).
-  const stamp = useFileStamp(probe.data === 'file' && STAMPED.has(kind) ? path : null)
+  const stamp = useFileStamp(maybeFile && (STAMPED.has(kind) || eager) ? path : null)
+  const isFile = probe.data === 'file' || (eager && (stamp.version != null || content.data !== undefined))
+  useWarmKind(path, kind, eager)
   const Icon = isDir ? Folder : iconFor('file', name)
   const multi = count > 1
   const parent = dirname(path)
@@ -106,7 +124,7 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
   }
   const up = () => setList([parent], 0)
   /** Text files: "Edit" opens the Files page in edit mode - a new tab on desktop, in place on a phone (PWA). */
-  const editable = !isDir && probe.data === 'file' && isTextual(kind) && kind !== 'binary' && content.data?.editable !== false
+  const editable = isFile && isTextual(kind) && kind !== 'binary' && content.data?.editable !== false
   const editUrl = `/files?path=${encodeURIComponent(path)}&edit=1`
   const root = qc.getQueryData<FileList>(qk.files.list(''))?.root
   /** The file in its folder's listing, when the page has it: size and version for the download. */
@@ -131,7 +149,7 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
             {[multi ? `${index + 1} / ${count}` : null, content.data ? fmtBytes(content.data.size) : null].filter(Boolean).join(' · ') || <Sensitive length={14}>{parent}</Sensitive>}
           </span>
         </div>
-        {!isDir && isTextual(kind) && content.data && zoomsText(kind, view === 'preview') && <TextZoomControl />}
+        {!isDir && (isTextDoc(name) || (isTextual(kind) && content.data && zoomsText(kind, view === 'preview'))) && <TextZoomControl />}
         {!isDir && isRendered(kind) && (
           <Segmented
             size="sm"
@@ -265,8 +283,14 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
         </DialogPrimitive.Close>
       </div>
       <div className="relative flex min-h-0 flex-1 flex-col" {...swipe}>
-        {probe.isPending ? (
-          <CodeSkeleton />
+        {isFile ? (
+          STAMPED.has(kind) && !stamp.ready ? (
+            <FileSkeleton kind={kind} preview={view === 'preview'} name={name} />
+          ) : (
+            <PreviewBody path={path} kind={kind} view={view} content={content} version={STAMPED.has(kind) ? stamp.version : undefined} />
+          )
+        ) : probe.isPending ? (
+          <FileSkeleton kind={kind} preview={view === 'preview'} name={name} />
         ) : probe.isError || probe.data === 'missing' ? (
           // Never a skeleton forever: a path that does not exist (or is outside the files root) says so.
           <EmptyState
@@ -275,7 +299,7 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
             description={isApiError(probe.error) && probe.error.status === 403 ? t('viewer.outsideDesc') : t('files.notFoundDesc')}
             className="flex-1"
           />
-        ) : isDir ? (
+        ) : (
           <FolderView
             path={path}
             onOpen={openEntry}
@@ -284,10 +308,6 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
               navigate(`/files?path=${encodeURIComponent(e.path)}`)
             }}
           />
-        ) : !stamp.ready ? (
-          kind === 'video' || kind === 'audio' ? <MediaSkeleton kind={kind} /> : <CodeSkeleton />
-        ) : (
-          <PreviewBody path={path} kind={kind} view={view} content={content} version={stamp.version} />
         )}
       </div>
     </>
@@ -295,6 +315,21 @@ function ViewerPane({ path, index, count, fullscreen, canFull, onFull }: { path:
 }
 
 const STAMPED = new Set(['image', 'video', 'audio', 'font'])
+
+/** What a file needs besides its bytes, asked while the probe is still out: the document as the server reads it,
+ *  the pages of a PDF, the chunk that draws it (code editor, Markdown). */
+function useWarmKind(path: string, kind: FileKind, eager: boolean) {
+  const qc = useQueryClient()
+  const paged = useMediaQuery('(pointer: coarse)') || !navigator.pdfViewerEnabled
+  React.useEffect(() => {
+    if (kind === 'markdown') warmMarkdown()
+    else if (isTextual(kind)) warmCodeEditor()
+    if (!eager) return
+    if (kind === 'document') void qc.prefetchQuery(fileDocQuery(path))
+    else if (kind === 'pdf' && paged) void qc.prefetchQuery(filePdfQuery(path))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per file opened
+  }, [path])
+}
 
 const isDiagram = (p: string) => p.startsWith(DIAGRAM_PREFIX)
 
@@ -389,7 +424,7 @@ function usePrefetchNeighbours(list: string[], index: number) {
     const id = setTimeout(() => {
       for (const d of [1, -1]) {
         const p = list[(index + d + list.length) % list.length]
-        if (isDiagram(p)) continue
+        if (isDiagram(p) || isChangesPath(p) || isPrPath(p)) continue
         const k = kindOf(basename(p))
         if (k === 'image') void fileStamp(p).then((v) => prefetchImage(filePreviewUrl(p, PREVIEW_W, v)))
         else if (k === 'video') {
@@ -397,6 +432,7 @@ function usePrefetchNeighbours(list: string[], index: number) {
           void qc.prefetchQuery(videoInfoQuery(p)) // the player's box gets the video's shape at once
         }
         else if (k === 'pdf') prefetchImage(fileThumbUrl(p, 240, null))
+        else if (k === 'document') void qc.prefetchQuery(fileDocQuery(p))
         else if (k === 'markdown' || k === 'csv' || k === 'code' || k === 'text')
           void qc.prefetchQuery({ queryKey: qk.files.read(p), queryFn: () => api.get<FileContent>('/api/files/read', { path: p }), staleTime: 30_000 })
       }

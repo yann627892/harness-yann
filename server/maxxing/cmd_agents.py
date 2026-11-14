@@ -7,7 +7,10 @@
   maxxing agents on <agent> | off <agent>    switch an agent on or off
   maxxing agents create <p>/<t>/<a> --role … create an agent (what a session runs when the user asks for one)
   maxxing agents show <agent>                its agent.json, role, triggers, cron jobs, webhook URLs (JSON)
-  maxxing agents cron <agent> --schedule …   add a schedule (a Claude cron job in the agent folder)
+  maxxing agents set <agent> FIELD=VALUE …   change its settings (in its own conversation, a safety setting waits for
+                                             the owner's OK)
+  maxxing agents cron <agent> --schedule …   add a schedule (a Claude cron job in the agent folder); --job ID changes
+                                             or removes (--remove) one of its schedules
   maxxing agents webhook <agent> [--kind …]  add a webhook (a feed hook + a feed trigger on it); prints its URL
   maxxing agents watch <agent> --source …    add a feed trigger on existing events (a source, levels, words)
   maxxing agents export <agent> [-o FILE]    the agent as a Claude Code agent file (.claude/agents/<name>.md)
@@ -71,7 +74,10 @@ def _configure(p) -> None:
                                                   "separated (. = the whole topic)")
     s.add_argument("--mail", default="", metavar="MAILBOX", help="a mailbox of the E-mail page it may use (id or "
                    "address): read + drafts, or what a mail template says (`maxxing mail accounts`)")
-    s.add_argument("--no-sandbox", action="store_true", help="no sandbox: its commands reach the whole server")
+    s.add_argument("--sandbox", action="store_true", help="protected: its commands run in a sandbox (its --domains, "
+                   "no secrets); the default for an agent with a mailbox, a feed trigger or a template that reads "
+                   "outside text (webhook, mail, web pages)")
+    s.add_argument("--no-sandbox", action="store_true", help="free (the default): its commands reach the whole server")
     s.add_argument("--trust-outside", action="store_true",
                    help="runs started by outside events (webhooks, feed, other agents) do not ask first: risky")
     s.add_argument("--usd-per-day", type=float, help="daily budget in $ (default 2, 0 = none)")
@@ -120,11 +126,21 @@ def _configure(p) -> None:
     g = gs.add_parser("say", help="write to the group as the owner (the members answer in turn)")
     g.add_argument("group", help="<project>/<group>")
     g.add_argument("text", nargs="+")
-    s = sub.add_parser("cron", help="add a schedule to an agent")
+    s = sub.add_parser("set", help="change an agent's settings (its manager: a safety setting waits for the owner's OK)")
     s.add_argument("agent")
-    s.add_argument("--schedule", required=True, help='5-field cron, server time zone, e.g. "0 8 * * 1"')
+    s.add_argument("values", nargs="*", help='FIELD=VALUE (JSON values: approvals=true, domains=\'["example.com"]\', '
+                                            'limits.usd_per_day=3, model=sonnet)')
+    s.add_argument("--json", dest="fields", default="", help="the fields as one JSON object")
+    s = sub.add_parser("cron", help="add a schedule to an agent, or change / remove one of its schedules (--job)")
+    s.add_argument("agent")
+    s.add_argument("--schedule", default="", help='5-field cron in the time zone of Settings -> General, e.g. "0 8 * * 1"')
     s.add_argument("--prompt", default="", help='what to do each time (default "Run your routine.")')
     s.add_argument("--name", default="", help="name of the cron job")
+    s.add_argument("--job", default="", help="change this cron job of the agent (its id: `maxxing agents show`)")
+    s.add_argument("--remove", action="store_true", help="with --job: remove it")
+    onoff = s.add_mutually_exclusive_group()
+    onoff.add_argument("--on", dest="enabled", action="store_const", const=True, default=None)
+    onoff.add_argument("--off", dest="enabled", action="store_const", const=False)
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("webhook", help="add a webhook to an agent and print its URL")
     s.add_argument("agent")
@@ -284,7 +300,8 @@ def _create(a) -> int:
                            "approve_send": tm.get("approve_send") or "always", "senders": tm.get("senders") or [],
                            "trigger": tm.get("trigger") or {"enabled": True, "folder": "INBOX", "prompt": ""}}]
         if not tpl:
-            fields.setdefault("allowed_tools", [])
+            # a role-only agent: the mailbox comes with the tool to use it (a template lists its own tools)
+            fields["allowed_tools"] = ["Bash(maxxing mail:*)"]
     elif tpl and tpl.get("mail"):
         print("This template is made for a mailbox: add --mail MAILBOX (`maxxing mail accounts`)", file=sys.stderr)
         return 2
@@ -302,8 +319,8 @@ def _create(a) -> int:
         v = [x.strip() for x in getattr(a, k).split(",") if x.strip()]
         if v:
             fields[k] = v
-    if a.no_sandbox:
-        fields["sandbox"] = False
+    if a.sandbox or a.no_sandbox:
+        fields["sandbox"] = bool(a.sandbox)
     try:
         r = agents.create(f"projects/{project}/topics/{topic}", name, fields)
     except agents.AgentError as e:
@@ -317,7 +334,8 @@ def _create(a) -> int:
             print(f"schedule not added: {e}", file=sys.stderr)
     if tpl and tpl.get("webhook"):
         try:
-            hook = agents.add_webhook(r["path"], tpl["webhook"]["kind"], tpl["webhook"]["prompt"], [], "")["hook"]
+            hook = agents.add_webhook(r["path"], tpl["webhook"]["kind"], tpl["webhook"]["prompt"], [], "",
+                                      box=not a.no_sandbox)["hook"]
             extra["webhook"] = hook.get("url")
         except Exception as e:  # noqa: BLE001
             print(f"webhook not added: {e}", file=sys.stderr)
@@ -454,6 +472,114 @@ def _group(a) -> int:
     return 2
 
 
+def _values(a) -> dict:
+    """`set` FIELD=VALUE words (+ --json) -> agent.json fields; a.b=VALUE goes in the object a (limits.usd_per_day)."""
+    out: dict = {}
+    if a.fields:
+        try:
+            d = json.loads(a.fields)
+        except RecursionError:
+            raise ValueError("--json: nested too deeply") from None
+        if not isinstance(d, dict):
+            raise ValueError("--json: a JSON object")
+        out.update(d)
+    for w in a.values:
+        k, sep, v = w.partition("=")
+        if not sep or not k.strip():
+            raise ValueError(f"{w!r}: FIELD=VALUE")
+        try:
+            val = json.loads(v)
+        except ValueError:
+            val = v
+        except RecursionError:
+            raise ValueError(f"{k.strip()}: nested too deeply") from None
+        k = k.strip()
+        if "." in k:
+            top, sub = k.split(".", 1)
+            out.setdefault(top, {})
+            if not isinstance(out[top], dict):
+                raise ValueError(f"{top}: an object")
+            out[top][sub] = val
+        else:
+            out[k] = val
+    if not out:
+        raise ValueError("Nothing to change: FIELD=VALUE ... or --json '{...}'")
+    return out
+
+
+def _set(path: str, a) -> int:
+    from . import agents
+    try:
+        fields = _values(a)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    turn = _turn()
+    if turn.get("manager") and turn["path"] == path:
+        r = agents.request_change(path, fields, session=turn["session"])
+    else:                                              # the owner (shell, session): everything at once
+        before = agents.load(path)
+        u = agents.update(path, fields)
+        after = agents.load(path)
+        taken = {k for k, v in fields.items() if _taken(before, after, k, v)}
+        r = {"applied": sorted({*taken, *(["sandbox"] if u.get("sandbox_auto") else [])}), "asked": [], "request": "",
+             "sandbox_auto": u.get("sandbox_auto"), "ignored": sorted(set(fields) - taken)}
+    if r["applied"]:
+        print("changed: " + ", ".join(r["applied"]))
+    if r["asked"]:
+        print("waiting for the owner's OK (safety settings, applied once allowed): " + ", ".join(r["asked"]))
+    if r.get("ignored"):
+        print("ignored (unknown field or wrong type): " + ", ".join(r["ignored"]), file=sys.stderr)
+    if r.get("sandbox_auto"):
+        print(agents.SANDBOX_AUTO_NOTE)
+    return 0 if r["applied"] or r["asked"] else 2
+
+
+def _taken(before: dict, after: dict, key: str, value) -> bool:
+    """Did `set` really apply this field? Changed by the update, or already at the value asked."""
+    if key == "description":                           # kept in CLAUDE.md, not in agent.json
+        return isinstance(value, str)
+    if key not in after:
+        return False
+    if after[key] != before.get(key):
+        return True
+    if isinstance(value, dict) and isinstance(after[key], dict):
+        return all(after[key].get(k) == v for k, v in value.items())
+    return after[key] == value
+
+
+def _zone() -> str:
+    from . import config
+    return config.load_config().get("timezone") or "UTC"
+
+
+def _cron_job(path: str, a) -> int:
+    from . import bus, crons
+    job = crons.get_job(a.job)
+    if not job or job.get("topic_path") != path:
+        print(f"{a.job}: not a cron job of this agent (see `maxxing agents show`)", file=sys.stderr)
+        return 2
+    if a.remove:
+        crons.delete_job(a.job)
+        bus.invalidate("crons", "agents")
+        print(f"schedule removed: {a.job}")
+        return 0
+    fields = {k: v for k, v in (("schedule", a.schedule), ("prompt", a.prompt), ("name", a.name)) if v}
+    if a.enabled is not None:
+        fields["enabled"] = a.enabled
+    if not fields:
+        print("Nothing to change: --schedule, --prompt, --name, --on / --off or --remove", file=sys.stderr)
+        return 2
+    try:
+        crons.update_job(a.job, fields)
+    except crons.CronError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    bus.invalidate("crons", "agents")
+    print(f"schedule changed: {a.job} ({', '.join(sorted(fields))}; times in {_zone()})")
+    return 0
+
+
 def _handler(a) -> int:
     from . import agents
     if a.agents_cmd == "list":
@@ -473,12 +599,19 @@ def _handler(a) -> int:
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
-    if a.agents_cmd in ("on", "off"):
-        agents.update(path, {"enabled": a.agents_cmd == "on"})
-        print(f"{path}: {a.agents_cmd}")
-        return 0
-    if a.agents_cmd in ("silent", "loud"):
-        agents.update(path, {"silent": a.agents_cmd == "silent"})
+    from . import agent_guard
+    turn = _turn()
+    if turn.get("manager") and turn["path"] and turn["path"] != path and a.agents_cmd in agent_guard.AGENT_OWNER_ONLY:
+        print("Refused: the conversation with an agent changes that agent only.", file=sys.stderr)
+        return 2
+    if a.agents_cmd in ("on", "off", "silent", "loud"):
+        change = ({"enabled": a.agents_cmd == "on"} if a.agents_cmd in ("on", "off")
+                  else {"silent": a.agents_cmd == "silent"})
+        try:
+            agents.update(path, change)
+        except agents.AgentError as e:                  # a broken agent.json: a plain error, not a traceback
+            print(e.message, file=sys.stderr)
+            return 2
         print(f"{path}: {a.agents_cmd}")
         return 0
     if a.agents_cmd == "export":
@@ -504,36 +637,51 @@ def _handler(a) -> int:
             return 2
         d = agents.get(path)
         try:
-            role = (agents.folder(path) / "CLAUDE.md").read_text(encoding="utf-8")
+            role = (agents.folder(path) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
         except OSError:
             role = ""
         print(json.dumps({**{k: d.get(k) for k in ("path", "display_name", "enabled", "model", "permission_mode",
                                                     "approvals", "trust_outside", "keys", "telegram", "silent", "sandbox", "domains",
-                                                    "writable", "rules", "subagent", "limits", "triggers")},
+                                                    "writable", "rules", "subagent", "chat_model", "limits", "triggers")},
                           "claude_md": role, "crons": [{k: j.get(k) for k in ("id", "name", "schedule", "prompt", "enabled")}
                                                        for j in agents.cron_jobs(path)],
                           "webhooks": [{k: v for k, v in h.items() if not own or k != "url"}
                                        for h in agents.hooks(path)]}, indent=2, ensure_ascii=False))
         return 0
     try:
+        if a.agents_cmd == "set":
+            return _set(path, a)
+        if a.agents_cmd == "cron" and a.job:
+            return _cron_job(path, a)
         if a.agents_cmd == "cron":
-            job = agents.add_cron(path, a.schedule, a.prompt, a.name)
-            print(json.dumps({"cron": job.get("id")}) if a.json else f"schedule added: {job.get('id')} ({a.schedule})")
+            if not a.schedule:
+                print("--schedule is needed to add a schedule (or --job ID to change one)", file=sys.stderr)
+                return 2
+            job = agents.add_cron(path, a.schedule, a.prompt, a.name, enabled=a.enabled is not False)
+            print(json.dumps({"cron": job.get("id")}) if a.json else f"schedule added: {job.get('id')} ({a.schedule}, {_zone()})")
             return 0
         if a.agents_cmd == "webhook":
-            hook = agents.add_webhook(path, a.kind, a.prompt, _levels(a.levels), a.match)["hook"]
+            w = agents.add_webhook(path, a.kind, a.prompt, _levels(a.levels), a.match)
+            hook, boxed = w["hook"], bool(w["agent"].get("sandbox_auto"))
             if a.json:
-                print(json.dumps({k: hook.get(k) for k in ("id", "name", "kind", "url")}))
+                print(json.dumps({**{k: hook.get(k) for k in ("id", "name", "kind", "url")},
+                                  **({"sandbox_auto": True} if boxed else {})}))
             else:
                 print(f"webhook added: source {hook['name']}\nURL: {hook.get('url')}")
+                if boxed:
+                    print(agents.SANDBOX_AUTO_NOTE)
                 if a.kind != "generic":
                     print(f"Set its signing secret in the agent page -> Triggers (a {a.kind} webhook refuses "
                           "deliveries until then).", file=sys.stderr)
             return 0
         if a.agents_cmd == "watch":
-            agents.add_trigger(path, {"kind": "feed", "source": a.source.strip(), "levels": _levels(a.levels),
-                                      "match": a.match, "prompt": a.prompt})
-            print(json.dumps({"agent": path}) if a.json else f"{path} now watches the feed source {a.source.strip()}")
+            u = agents.add_trigger(path, {"kind": "feed", "source": a.source.strip(), "levels": _levels(a.levels),
+                                          "match": a.match, "prompt": a.prompt})
+            boxed = bool(u.get("sandbox_auto"))
+            print(json.dumps({"agent": path, **({"sandbox_auto": True} if boxed else {})}) if a.json
+                  else f"{path} now watches the feed source {a.source.strip()}")
+            if boxed and not a.json:
+                print(agents.SANDBOX_AUTO_NOTE)
             return 0
     except agents.AgentError as e:
         print(e.message, file=sys.stderr)
@@ -544,6 +692,12 @@ def _handler(a) -> int:
     if a.agents_cmd == "run" and not sender:
         r = agents.fire(path, trigger="manual", source="command line",
                         **({"text": text} if a.data else {"prompt": text}))
+        return _print_fire(path, r, a.json)
+    if a.agents_cmd == "run" and sender == path and turn.get("manager"):
+        # the owner asked its conversation to run the automation now: a run of its own (a new session, shown as an
+        # automation in the flow), not the work done inside the conversation
+        agents.hand_over(path, turn.get("session") or "")
+        r = agents.fire(path, trigger="manual", source="conversation", prompt=text)
         return _print_fire(path, r, a.json)
     # send (or run from an agent's turn): from one agent's turn to another agent - the text is the sender's output,
     # framed as data, one hop more

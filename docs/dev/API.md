@@ -92,7 +92,7 @@ Session = {
   created, updated, turns, cost_usd,
   model: string,                      // chosen ("" = default)
   provider: "anthropic"|"gateway:<id>"|null,  // credential its turns run on (null = the default provider)
-  effort: "low"|"medium"|"high"|"xhigh"|"max"|"",  // reasoning effort of its turns ("" = the model's default)
+  effort: string,                     // `claude --effort` of the next turns: low|medium|high|xhigh|max, "" = Claude Code's default
   real_model: string|null,            // model that actually answered last turn (from the log)
   context_tokens: int|null,           // last turn input+cache tokens
   context_window: int|null,           // context window of the model of the last turn (Claude Code `modelUsage[..].contextWindow`, e.g. 1000000); null = unknown
@@ -105,21 +105,24 @@ Session = {
   plan_mode: bool,                    // turns run read-only (`--permission-mode plan`) and end with a plan
   permission_mode: string,            // set by its cron ("" = the topic's, else the global mode)
   plan_ready: bool,                   // a plan-mode turn finished OK: its plan waits for POST /plan/approve
-  approvals: int                      // tool calls waiting for the user's Allow / Deny (agent with `approvals`)
+  approvals: int,                     // tool calls waiting for the user's Allow / Deny (agent with `approvals`)
+  code_repos: [str]                   // git repositories its turns changed (Changes view, terminal tabs), at most 8
 }
 ```
 | GET | `/api/sessions?path=&archived=0\|1` | – | `[Session]` sorted by `updated` desc (no path = all) |
-| POST | `/api/sessions` | `{path, message?, title?, model?, provider?, effort?, attachments?:[filepath], plan_mode?:bool, voice?:filepath, client_id?}` (`client_id`: as for `/messages`, for the first message; `provider`: `"anthropic"` \| `"gateway:<id>"` - the credential its turns run on, omitted = the default one; `effort`: `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` - the reasoning effort, `""`/omitted = the model's default) | `Session` (starts the first turn if message or voice) |
+| POST | `/api/sessions` | `{path, message?, title?, model?, provider?, effort?, attachments?:[filepath], plan_mode?:bool, voice?:filepath, client_id?, worktree?:{repo, base?, prepare?, copy_env?, pr?, remember?}}` (`client_id`: as for `/messages`, for the first message; `provider`: `"anthropic"` \| `"gateway:<id>"` - the credential its turns run on, omitted = the default one; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`; `worktree`: work on a separate copy, `remember` saves the choices for that repo) | `Session` (starts the first turn if message or voice) |
 | GET | `/api/sessions/{id}` | – | `Session` |
 | GET | `/api/sessions/{id}/suggestions` | – | `{suggestions:[string]}` — 2-3 short follow-up messages for the composer: a small model on the session's provider reads the end of the conversation, one call per turn at most (cached by turn count + log size, 30 min). `[]` while a turn runs, before the first turn, while messages wait, for an archived session, or when config `suggestions` is off (INTERNALS.md `maxxing.sessions.suggest`) |
-| PATCH | `/api/sessions/{id}` | `{title?, model?, provider?, effort?, archived?, notify?, plan_mode?, favorite?, path?}` | `Session` (`plan_mode:false` also clears `plan_ready`; `favorite` is carried over by a hand-off; `path` moves the session to another topic and its Claude transcript with it - `400 bad_path`, `409 busy` while a turn runs or messages wait; `model`: an id of letters, digits and `._:@/[]-`, 100 characters at most, not starting with `-`, else `400 bad_model`, also on create; `provider`: `"anthropic"` \| `"gateway:<id>"` (bare `"gateway"` = the default gateway) - the credential its turns run on, `""` back to the default one, else `400 bad_provider`; `effort`: `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`, `""`/`"auto"` = the model's default, else `400 bad_effort`) |
+| PATCH | `/api/sessions/{id}` | `{title?, model?, provider?, effort?, archived?, notify?, plan_mode?, favorite?, path?}` | `Session` (`plan_mode:false` also clears `plan_ready`; `favorite` is carried over by a hand-off; `path` moves the session to another topic and its Claude transcript with it - `400 bad_path`, `409 busy` while a turn runs or messages wait; `model`: an id of letters, digits and `._:@/[]-`, 100 characters at most, not starting with `-`, else `400 bad_model`, also on create; `provider`: `"anthropic"` \| `"gateway:<id>"` (bare `"gateway"` = the default gateway) - the credential its turns run on, `""` back to the default one, else `400 bad_provider`; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`, else `400 bad_effort`, kept by a hand-off) |
 | POST | `/api/sessions/{id}/plan/approve` | `{text?}` (shown in the thread as the user's message) | `{queued:bool, session:Session}` — plan mode off, then a turn that tells Claude to implement its latest plan (queue item flag `plan_approved`, kept by steer like `hud`) |
 | DELETE | `/api/sessions/{id}` | – | `{ok}` (stops a running turn, moves the session to the trash) |
-| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], hud?:bool, voice?:filepath, client_id?}` (`client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `hud`: sent from the HUD - the prompt gets a short preface: answer short, annotate the screen capture if useful; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
+| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], hud?:bool, voice?:filepath, client_id?, mentions?:[{kind: session|agent|team, ref}]}` (`mentions`: the @ of the composer, refs from `/mentions` below; the server resolves them (unknown ones and the session itself dropped, at most 8) and adds to the prompt, not to the displayed message, the command that writes to each (`maxxing sessions send` / `agents send` / `team send`); its `user` event keeps `mentions: [{kind, ref, label, group?, avatar?}]` (never the command), drawn as chips; `client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `hud`: sent from the HUD - the prompt gets a short preface: answer short, annotate the screen capture if useful; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
+| GET | `/api/sessions/{id}/mentions` | - | `{items:[{kind: session|agent|team, ref, label, hint, state?, avatar?, group?}]}`: who the composer's @ can name - the other sessions (running first, then the most recent 60, not archived, no agent chats), the agents (Agents page on), the Team contacts and groups (Team page on) |
 | DELETE | `/api/sessions/{id}/queue` | – | clears queued messages |
 | POST | `/api/sessions/{id}/ask` | `{question}` | `{answer, cost_usd, duration_ms}` — side question: Claude answers from a throwaway copy of the session's thread (read-only, nothing saved: the running turn, queue and log are untouched). 409 `no_thread` (never answered yet) / `busy` (one already running for this session), 429 (2 running), 504 (240 s) |
 | POST | `/api/sessions/{id}/queue/take` | – | `{messages:[{text, attachments}], session}` — removes the queued user messages and returns them (the composer's **Edit**: they come back in the composer and are sent again as a normal message) |
 | POST | `/api/sessions/{id}/hide` | `{at, hidden=true}` | `{ok}` — hides (or shows again) the user message whose `at` is given: appends `{type:"mx_hide", ref, hidden}` to the raw log (nothing is erased; Claude's own thread is untouched), streamed as a `hide` event; 404 when no user message has that `at`, nothing written when it is already in that state. The UI offers it for a message whose turn ended without any answer (stopped) and drops that turn's rows |
+| POST | `/api/sessions/{id}/inject` | – | `{injected:bool, reason, session}` — **Add to plan**, without interrupting: the queued user messages become ONE message written into the running turn (SIGUSR2: the runner writes it to Claude's stream-json stdin), read by Claude at its next step, between two tool calls. When the runner cannot write it (the turn just ended), the message stays queued and runs after the turn - never lost, never sent twice. `injected: false` with `reason`: `idle` (no turn running / nothing queued), `unsupported` (a runner from before this route), `summary` (a compact / hand-off summary runs), `voice` / `plan` (voice messages and plan approvals run as their own turn: steer or wait) |
 | POST | `/api/sessions/{id}/steer` | – | `{steered:bool, interrupted:bool, session}` — while a turn runs: the queued user messages become ONE message (`steer: true`) at the head of the queue and the runner gets SIGUSR1: it ends the current turn (only that one: meta `steer_turn` = `turn_id`) and runs that message next in the same Claude thread, prefaced so Claude continues the task with it. A compact / handoff turn is not interrupted (`interrupted:false`, the message runs right after it). `steered:false` when idle or nothing is queued |
 | POST | `/api/sessions/{id}/stop` | – | `{ok}` (clears the queue, aborts the running turn; returns once settled, ≤ ~10 s). During an idle-compaction summary only the summary is aborted: the message waiting behind it (queue item `held`) stays and runs |
 | POST | `/api/sessions/{id}/compact` | – | `{ok}` summary → fresh Claude context, same session · `409 busy` while running · `400 empty_session` |
@@ -130,6 +133,7 @@ Session = {
 | GET | `/api/sessions/{id}/events?from=0` | – | forward reading `{events:[Event], next:int, state, more:bool}` (≤ 4 MB of log per call; `more` = call again from `next`) · `reset:true` when `from` is beyond the end / not a line boundary |
 | GET | `/api/sessions/{id}/stream?from=0` | – | **SSE**. `event: events` `data: {events, next}` · `event: state` `data: Session` · `event: reset` `data: {}` then end of stream when the log was rewritten or shrank (or `from` is stale): reload with `?tail=` · heartbeat comment every 15 s. New lines and state changes are pushed ~0.05-0.15 s after they are written (inotify on the sessions folder; without it the stream polls every 0.1 s while the session runs) |
 | GET | `/api/sessions/search?q=` | – | `[{id, title, path, snippet, at}]` (served by the full-text index, see Search; max 50) |
+| GET / POST | `/api/sessions/open` | POST `{open?:[id], close?:[id], order?:[id]}` | `{ids:[id]\|null, rev}` — the sessions open on screen, shared by every browser of the user (a column on a computer, a tab on a phone): ids in the order they were opened, `null` while no browser has shared its own; `rev` grows with each change (a browser ignores an answer older than the one it applied). POST opens, closes, then sorts by `order` (ids it does not name stay after); bus topic `open_sessions`. A deleted session leaves the list |
 | POST | `/api/uploads?path=<topic path>` | multipart `file` (multi) | `{files:[{path, name, size, mime}]}` saved in `<topic>/attachments/YYYY-MM/` · each file `413 too_large` over `upload_max_mb`, `507 disk_full` when it would leave less than `upload_min_free_mb` free on the destination disk (all or nothing: the files saved before it in the same request are removed); the whole request, all its files together, is capped too (see Conventions) |
 
 `from`/`next`/`start`/`before` = byte offsets in the raw log (always line boundaries). Backward reads scan at
@@ -152,7 +156,7 @@ previous night — open streams then receive `reset`. **Event** (normalised):
 {type:"tool_use", id, name, input, input_lines?, summary, at}     // summary = one-line human string ("Read src/app.py", "Bash: ls -la")
                                                     // input text fields over 20,000 chars are clipped; input_lines = {field: real line count} of the clipped top-level ones
 {type:"tool_result", tool_use_id, text, is_error, at}   // text truncated to 20 kB
-{type:"init", model, cwd, at}
+{type:"init", model, cwd, at, same?}        // same: a turn of a Claude process that already ran one (its background tasks run on)
 {type:"result", ok, cost_usd, duration_ms, model, usage:{input,output,cache_read,cache_write}, at}   // cost_usd = this turn only (the raw total_cost_usd is the thread's running total)
 {type:"note", text, level:"info"|"warn"|"error", at}   // compact, handoff, resume fallback, stop…
 {type:"hide", ref, hidden, at}                      // ref = `at` of a user event: hidden (true) or shown again{type:"task", id, tool_use_id?, at, state?, kind?, background?, description?, agent_type?, activity?, last_tool?, tokens?, tools?, duration_ms?, summary?}
@@ -175,6 +179,12 @@ Every `path` is absolute and inside `files_root` (else `400 bad_path` / `403 for
 | POST | `/api/files/zip` | `{paths: [abs path]}` (1-1000) | several files and folders in one zip, checked: each path confined like every other (symlinks followed, `403` outside, `404` missing, `400` relative), duplicates and entries inside another selected folder left out, a name already taken gets ` (2)`; the 2 GB / 100,000 caps apply to the whole set (`413 too_large`) → `{count, size, name, token, expires_in}` (`name`: `<their folder>.zip`, or `files.zip` when they come from several folders) |
 | GET | `/api/files/zip?token=` | – | the zip of that POST (same session cookie only, valid `expires_in` = 120 s), planned again from the paths as they are now (`413` if it grew past a cap) · unknown / expired / another session `404`. A link download cannot POST: the browser follows this URL |
 | GET | `/api/files/thumb?path=&w=320&v=&anim=0` | – | webp thumbnail for images, videos and PDFs (ffmpeg, video: frame at 1 s; PDF: first page through `pdftoppm`), cached server side; without ffmpeg images fall back to the original · other types `415`. `w` ≤ 4096. `anim=1` (chat): a `.gif` of at most 8 MB (`GIF_ANIM_MAX`) is served as it is (`image/gif`, it moves), a bigger one gets the still. Cache: `no-cache` (revalidated), or for good with `v`. Same CSP rule as `/raw` (an SVG fallback is sandboxed) |
+| GET | `/api/files/preview?path=&w=2048&v=` | – | the image for the viewer: a WebP at most `w` px wide (64-4096, default 2048) when the original is heavy (over 300 kB, or a format the browser cannot show: then converted), else the original (`.gif` and `.svg` always as they are; no ffmpeg: the original). `v`: as on `/raw` · `404 not_found` · `415 unsupported` (not an image, or a format this server cannot convert) |
+| GET | `/api/files/archive?path=` | – | lists a zip, tar (gz/bz2/xz) or single `.gz` without extracting it: `{path, format:"zip"\|"tar"\|"gzip", entries:[{name, size, dir, mtime}], count, total_size, truncated, size}` (at most 5,000 entries, 256 MB read and 3 s: then `truncated`; cached per file version) · `404 not_found` · `415 unsupported` (another format, or unreadable) |
+| GET | `/api/files/pdf?path=` | – | `{pages, ratio, mtime}` for the page-by-page PDF reader (browsers that show no PDF in the page: most phones): number of pages, height / width of the first one (`pdfinfo`) · `404 not_found` · `415 unsupported` (unreadable or protected PDF, or `pdfinfo` / `pdftoppm` / `ffmpeg` missing: the UI keeps the browser's own viewer) |
+| GET | `/api/files/pdf/page?path=&n=1&w=1280&v=` | – | page `n` as a WebP, `w` rounded up to 640, 1280 or 2048 px wide (`pdftoppm` + ffmpeg, kept with the thumbnails, one render per page at a time). Cache as `/thumb` · `404 not_found` (not a PDF) · `415 unsupported` (no such page, or not rendered) · `422` (`n` < 1) |
+| GET | `/api/files/doc?path=` | – | an office document read without any converter installed (`documents.py`, zip + XML only): `{path, mtime, size, type, truncated, …}`; `type: "text"` (`.docx` `.docm` `.odt`) and `"slides"` (`.pptx` `.pptm` `.ppsx` `.odp`) carry `markdown` (headings, bold / italic, lists, tables, links, pictures as `![](<name>)` for `/doc/media`, one `## N. Title` per slide with its notes as a quote); `type: "sheets"` (`.xlsx` `.xlsm` `.ods`) carries `sheets: [{name, rows: [[text]], truncated}]` (visible sheets, values as displayed: dates, times, percents; at most 5,000 rows × 200 columns a sheet, 300,000 cells, 40 sheets). Limits: 16 MB an XML part, 8 s, 1.5 M characters: then `truncated`. A DTD is refused · `404 not_found` · `413 too_large` · `415 unsupported` (another format, old `.doc` / `.xls` / `.ppt`, damaged, password) |
+| GET | `/api/files/doc/media?path=&name=&v=` | – | a picture stored in the document (`name` as given by the Markdown of `/doc`; png, jpeg, gif, webp, bmp, ≤ 24 MB), same headers as `/raw` · `404` anything else |
 | POST | `/api/files/stat` | `{paths: [str]}` (≤ 500) | `{mtimes: {path: float \| null}}` - current mtime of each file (null = missing, outside the files root, not absolute; a path with a lone surrogate is left out). The UI puts it in preview URLs (`v`) so a file rewritten under the same name shows its new version |
 | – | `within=<abs folder>` on `/raw`, `/preview`, `/thumb` (repeatable, ≤ 20), `within: [str]` in `/stat` | – | the automatic previews of agent answers: the file's real path (links followed) must also be in the real path of one of these folders (each itself inside the files root), and the path may hold no `.` / `..` part, else `403` (`/stat`: null). Without it, unchanged |
 | GET | `/api/files/video?path=` | – | `{width, height, codec, bitrate, duration, fps, has_audio, rotation, qualities: [{q, state: none\|queued\|running\|ready\|error, progress 0-1, error?}], auto}`: `width`/`height` as coded (`rotation` 90 / 270 = shown sideways), `has_audio` false = no audio stream (the UI plays a clip of ≤ 15 s without sound like a GIF); the lighter copies offered (1080 / 720 / 480 below the original's height) and `auto`, the copy the UI falls back on when the browser cannot decode the original (it checks `canPlayType` with `codec`) or it struggles: 1080 above 1080p, 720 for a heavy original ≤ 1080p (not H.264 / VP8 / VP9, or > 6 Mbit/s), `null` = none (light original, or nothing lighter) · not a video `415` · no ffprobe / no video stream `422 video_unavailable` |
@@ -193,8 +203,8 @@ Every `path` is absolute and inside `files_root` (else `400 bad_path` / `403 for
 Everything deleted (files, folders, topics and projects with their sessions, single sessions) lands in
 `state_dir("trash")`; items older than 30 days are hidden from the list and purged when the trash is listed (at most once an hour); `.sessions` / `.agents` folders and sidecars left without their item (a restore cut short) go with that purge and when the trash is emptied.
 | GET | `/api/trash` | – | `{items:[{id, kind:"file"\|"folder"\|"topic"\|"project"\|"session"\|"previous_versions", name, original, at, size, sessions:int, restorable}], keep_days}` newest first (`original` workspace-relative; for a session: its topic path) |
-| POST | `/api/trash/{id}/restore` | – | back where it was - a free name next to it if the place is taken (`<name> (restored).ext`, topics/projects `<name>-restored`, `<name>-restored-2`…, the name cut so the result stays a valid name of at most 48 characters); sessions come back with their topic (a session whose topic is gone comes back at the workspace root) → `{ok, kind, restored_to, sessions}` · `404 not_found` · `409 not_restorable` (backup "previous versions", or a recorded place outside the workspace and the files root) · `409 project_in_trash` (a topic or an agent whose project waits in the trash) · `409 topic_in_trash` (an agent whose topic waits in the trash): restore that one first |
-| DELETE | `/api/trash/{id}` | – | deletes one item forever → `{ok}` |
+| POST | `/api/trash/{id}/restore` | – | back where it was - a free name next to it if the place is taken (`<name> (restored).ext`, topics/projects `<name>-restored`, `<name>-restored-2`…, the name cut so the result stays a valid name of at most 48 characters); sessions come back with their topic (a session whose topic is gone comes back at the workspace root) → `{ok, kind, restored_to, sessions}` · `404 not_found` · `409 not_restorable` (backup "previous versions", or a recorded place outside the workspace and the files root) · `409 project_in_trash` (a topic or an agent whose project waits in the trash) · `409 topic_in_trash` (an agent whose topic waits in the trash): restore that one first · `400 bad_id` (a `/`, a leading `.`, or longer than a file name: 255 bytes) |
+| DELETE | `/api/trash/{id}` | – | deletes one item forever → `{ok}` · `400 bad_id` (as for restore) · `404 not_found` |
 | DELETE | `/api/trash` | – | empties the trash → `{ok, deleted}` |
 
 ## Tasks (`<workspace>/tasks.json`)
@@ -291,7 +301,8 @@ health problems itself every 60 s (not `cron_failed` nor
 | GET / PUT | `/api/settings/profile` | `{name ≤32, color: "clay"\|"blue"\|"violet"\|"green"\|"amber"\|"rose"\|"teal"\|"zinc", emoji}` | `Profile` `{name, color, emoji, photo, photo_url}` (bus `profile`; PUT keeps the photo; `photo` = 16 hex of the photo's SHA-256, `""` = none) · `400 invalid_color\|invalid_emoji\|invalid_name` (a lone surrogate in `name` or `emoji` is refused) |
 | GET / PUT / DELETE | `/api/settings/profile/photo` | PUT: the image bytes (JPEG, PNG or WebP by their first bytes, ≤ 512 KB; the UI sends a 256 px square) | GET the photo (`?v=` = version, cached for good); PUT / DELETE `Profile` · `400` `too_large` / `not_an_image` / `empty` (`maxxing/profile_photo.py`; Team contacts get the new version) |
 | GET / PUT | `/api/settings/register` | `{count?, email?, news?, asked?}` (email: valid or `""`) | `RegisterState` `{count, count_blocked, email, news, asked, registered, error, synced_at}` (bus `register`). Optional hello to the authors (`maxxing/register.py`): `count` (default `true`) = anonymous daily signal (cloud id + version + `os`, `arch`, `health` codes), `count_blocked` = `MAXXING_NO_TELEMETRY` / `DO_NOT_TRACK` set in the service environment (counter off whatever `count`); `email` (+ `news`) adds pseudo and language; neither = cloud row archived (kept, never contacted again). An update never turns on the email or the news; 2.0.0a94 turned `count` on once where `asked` was false. |
-| GET / POST | `/api/settings/feedback` | POST `{email, type: bug\|idea\|other, message}` | GET `{email, version}` (prefill); POST `{ok}`. Feedback to the authors (`maxxing/feedback.py` -> cloud `/v1/feedback`). Errors: 400 `invalid_email` / `message_required` / `too_long` / cloud codes, 429 `rate`, 502 `unreachable`, 503 `offline`. |
+| GET / POST | `/api/settings/feedback` | POST `{email, type: bug\|idea\|other, message, image?, forced?}` | GET `{email, version}` (prefill); POST `{ok}`. Feedback to the authors (`maxxing/feedback.py` -> cloud `/v1/feedback`). `forced: true` = sent although the check below had answered it (a note is added at the end of the message). Errors: 400 `invalid_email` / `message_required` / `too_long` / cloud codes, 429 `rate`, 502 `unreachable`, 503 `offline`. |
+| POST | `/api/settings/feedback/check` | `{type: bug\|idea\|other, message}` | `{verdict: send\|answer\|self, answer, prompt, topic, checked}`. What this server's Claude makes of a message before it is sent (one read-only `claude -p` call over `docs/user`, `feedback.check`): `send` = a bug or a general idea, to send; `answer` = answered here (`answer`, markdown); `self` = specific to this installation: `prompt` is the request for a new session in `topic` (a topic of the project `system`, else the inbox). Never blocks: Claude missing, signed out, slow (90 s), busy with another check or unclear = `send` with `checked: false`. Nothing is sent to the cloud. Errors: 400 `message_required` / `too_long`. |
 | GET / PUT / DELETE | `/api/settings/license` | PUT `{key}` (`HM-XXXX-XXXX-XXXX-XXXX`) | `{has_key, key_hint, kind, email, max_servers, expires_at, activated_at, enabled, moved_to_git}` (bus `license`, never the key). Optional Enterprise key: PUT = `license.activate` (cloud `/v1/activate`: checks it, counts this server; 400 `invalid_key` / `limit` / `revoked` / `expired` with the cloud message), DELETE = `remove_key` (frees the seat). Changes nothing else: code and updates stay on git. |
 | GET | `/api/secrets` | – | `[{name, note, expose, updated, preview}]` (preview = first 4 chars + …, only `…` for values < 8 chars) |
 | PUT | `/api/secrets/{name}` | `{value?, note?, expose?, create?}` | `{ok}` · `409 exists` with `create: true` when the name is taken · `400 invalid_name\|reserved_name\|value_required\|invalid_value\|invalid_note` (PATH, HOME…, MAXXING_* are reserved; a value has 1 to 16384 characters, no null byte, no lone surrogate) — `expose` = exported as env var to Claude sessions |
@@ -386,6 +397,7 @@ Telegram: voice notes and video notes in a session thread (not audio files: atta
 | GET | `/api/system/update/report` | – | `{report}` = last verification `{at, version, ok, problems, extensions:[{id, name, type, ok, error, skipped?}], checks:[{id, title, check, ok, output}]}` or null |
 | POST | `/api/system/update/verify` | – | `{report}`: verify now |
 | POST | `/api/system/update/fix` | – | `{session}`: a session that fixes what the last report found · `409 nothing_to_fix` |
+| PUT | `/api/system/auto-update` | `{enabled: bool}` | `{ok, enabled}` (config `auto_update`: Settings -> Updates, update by itself while nobody is on the interface and nothing runs) |
 | GET | `/api/system/changelog?limit=10` | – | `{version, entries:[{version, label, current:bool, body:markdown}]}` newest first, parsed from the public `CHANGELOG.md` (`2.0.0-alpha.6` matches `2.0.0a6`); `limit` 1-500 (Settings -> Updates asks 500) |
 | GET | `/api/usage` | – | experimental Claude plan usage `{available, five_hour:{pct (0-100 or null), resets_at (Unix s, null when missing or out of range)}\|null, seven_day:{…}\|null, reason?, stale?, retry_at?}` (off unless settings `usage_widget`; 60 s cache, `?force=1`). Token: the stored long-lived `claude_oauth_token` first, else the `claude login` credentials file. `reason`: `disabled`, `no_oauth_credentials`, `api_key` (no plan usage with an API key), `rate_limited` (429: no call before `retry_at` = now + Retry-After, even forced; the last good values are returned with `stale`), `http_<status>`, or an exception name |
 
@@ -406,7 +418,7 @@ INTERNALS.md#agents); its path is a session path. Every trigger goes through `ag
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/agents` | – | `{agents: [Agent & Status], avatar: {color: [..], skin: [..], hair: [..], hair_color: [..], face: [..], accessory: [..]}}` (the pixel-art character's parts; `color` = an accent colour of the UI, unknown or missing values = a stable pick from the agent's name) |
-| GET | `/api/agents/templates?lang=` | – | `{templates: [AgentTemplate]}`: the gallery of ready-made agents (`maxxing/agent_templates.py`), texts in `lang` (default: UI language; English when missing). `AgentTemplate = {id, name, summary, role, needs, avatar, permission_mode, approvals, allowed_tools, keys, keys_present, limits, cron?: {schedule, prompt}, webhook?: {kind, prompt}}`; nothing is created (the UI fills its form, `maxxing agents create --template`) |
+| GET | `/api/agents/templates?lang=` | – | `{templates: [AgentTemplate]}`: the gallery of ready-made agents (`maxxing/agent_templates.py`), texts in `lang` (default: UI language; English when missing). `AgentTemplate = {id, name, summary, role, needs, brief (the four-line message an idea puts in a new agent's box), first (one of the six ideas shown first), avatar, permission_mode, approvals, allowed_tools, keys, keys_present, limits, cron?: {schedule, prompt}, webhook?: {kind, prompt}}`; nothing is created (the UI fills its form, `maxxing agents create --template`) |
 | POST | `/api/agents` | `{topic_path, name, display_name?, description?, template?, ...AgentFields}` (`template`: a ready-made agent id, its settings under the fields) | `Agent & Status` · `400 bad_template` / `bad_path` / `invalid_name` / `bad_trigger` / `bad_model` / `bad_permission_mode` · `404 not_found` (topic) · `409 exists` / `too_many` (20 per topic) |
 | GET | `/api/agents/{p}/{t}/{a}` | – | `Agent & Status & {crons: [CronJob], webhooks: [{id, name, kind, url, has_secret}], trigger_stats: {<trigger id>: {events, last_event_at}}}` (cron jobs whose `topic_path` is the agent path; the feed hooks behind its webhook triggers, never their secret; events of each feed trigger's source over the feed retention) · `404` |
 | PATCH | `/api/agents/{p}/{t}/{a}` | `{display_name?, description?, ...AgentFields}` | `Agent & Status` (`limits` and `avatar` are merged; `description` rewrites the role in CLAUDE.md) |
@@ -436,7 +448,7 @@ AgentFields = {avatar?: Avatar, enabled?: bool, model?: string, permission_mode?
                keys: the only vault entries its runs get as env vars (none by default, exposed or not).
 Agent  = {path, project, topic, name (folder slug), display_name, description, avatar: Avatar, enabled, model,
           permission_mode, allowed_tools, disallowed_tools, telegram, approvals, trust_outside, keys, limits: Limits,
-          triggers: [Trigger], sandbox: bool (false when missing: agents made before the sandbox; true for new ones),
+          triggers: [Trigger], sandbox: bool (false when missing: agents made before the sandbox; new ones: false, true with a mailbox or a feed trigger),
           domains: [host] (sandbox network allow list, "*.x" ok), writable: [folder of the topic, "." = all],
           rules: [{tool: "Bash"|"Write"|"Edit"|"WebFetch"|"*", match, reason}], subagent: bool,
           created, session_count, archived_count, running, unread}
@@ -453,6 +465,7 @@ Trigger = {id: "t_<hex>", kind: "feed", enabled, source (feed source), levels: [
 AgentMessage = {id, at, kind: "note"|"run"|"skip"|"result", text,
                 trigger?: "manual"|"cron:<job>"|"feed:<trigger>"|"telegram"|"agent:<path>", source?,
                 session?: sid, reason? (skip), ok?: bool (result), cost?: number|null (result), status? (note),
+                outside?: true (result of a run started by outside text: left out of the owner's new conversation; another start that gets it as context asks first),
                 reply_to?: message id (run that continued a session), attachments?: [filepath] (run)}
 ```
 Bus topic `agents` on every change of an agent or of its thread (and `workspace` for the tree). CLI:
@@ -563,6 +576,114 @@ bad_repo|git_failed`, `403 outside_root`, `404 not_a_repo|not_found|no_branch`, 
 | GET | `/api/git/commit?repo=&sha=` | – | `{sha, parents, author, email, date, message, files:[{path, additions, deletions}], files_total, url?}` (a merge: diff against its first parent; message cut at 50 000 characters (`…`); ≤ 300 files; an annotated tag shows its commit; `sha` is an object id, never a branch or tag of that name; 404 `no_commit` for a tree or blob id) |
 | GET | `/api/git/pulls?repo=github:owner/name` | – | `[{number, title, author, head, base, draft, url, updated}]` (open, 30) · `400 not_github` |
 
+## Code (Changes view)
+
+`maxxing/codediff.py` + `maxxing/api/code.py`. Before and after every turn (not plan mode, compact or hand-off) the
+runner photographs the session's repositories (its folder's, the ones it changed before, the ones of the files Claude
+wrote): working tree incl. untracked files (`.gitignore` respected) written through a throwaway index, kept as a
+commit under `refs/maxxing/<sid8>/<n>/{pre,post}` (never pushed; deleted after 30 days or with the session by the
+nightly maintenance). The user's index, HEAD and files are never touched. A turn that changed something appends
+`mx_changes` `{n, repos:[{root, name, branch, pre, post, approx, files:[{path, old, status A|M|D|R|C|T, add, del,
+binary}], more, add, del}]}` to the log, shown as the event `changes`. Session meta: `code_turn`, `code_repos` (≤ 8,
+most recent first), `code_base` (`{root: first photo}`). `repo` = a repository's top folder inside the files root;
+revisions = 7-40 hex digits, `HEAD` or `now` (a fresh photo). Reads run without the repository's hooks / filters /
+fsmonitor (as `/api/git`); commit and push keep the repository's hooks. Errors as `/api/git` plus `404
+repo_not_found|no_photo`, `400 bad_rev|bad_path|bad_scope|no_message|nothing|detached|bad_branch|same_branch|
+not_github|no_base`, `403 no_write`, `409 running`.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/sessions/{id}/changes?scope=turn&n=&base=` | – | `{scope, n, repos:[...]}` — `turn` (default: the last turn that changed something, or `n`): the `mx_changes` entry + live `branch, upstream, ahead, behind, remote`; `session` (first photo → now), `uncommitted` (HEAD → now), `branch` (merge-base with `base` or origin's default → now): one entry per known repository with changes (`error` when git failed) |
+| GET | `/api/code/diff?repo=&a=&b=&path=&old=&full=` | – | `{path, hunks:[{head, o, n, lines:[{t: ' '\|'+'\|'-', o, n, s}]}], binary, cut, lines}` (≤ 2 000 lines unless `full`) |
+| GET | `/api/code/commits?repo=&base=` | – | `[{sha, short, subject, author, at}]` (HEAD not in base, 100) |
+| GET | `/api/code/status?repo=` | – | `{root, name, branch, upstream, ahead, behind, remote, dirty (files a commit would take), github, pr:{number, url, title, draft, base}\|null (open), merged_pr:{number, url, title, merged_at, head_sha, base}\|null (no open one: the last merged PR of the branch), checks:{total, ok, failed, pending}\|null, github_error?}`; `remote` = `remote.origin.url` as configured (no `insteadOf` rewrite) |
+| POST | `/api/code/restore` | `{repo, source, paths?}` | `{undo, restored, removed}` — files back as in `source` (all that differ when no `paths`); `undo` = photo taken first |
+| POST | `/api/code/undo` | `{repos:[{root, undo}]}` | `{repos:[...]}` — puts back what a restore / revert replaced |
+| POST | `/api/sessions/{id}/revert` | `{n}` | `{n, repos:[{root, name, undo, restored, removed, commits_kept}]}` — every repository changed by turn `n` or later back to its photo from before (files only; `409 running` during a turn) |
+| POST | `/api/code/commit` | `{repo, message, paths?, push}` | `{sha, branch, upstream, ahead, behind, ..., pushed?}` (`git add -A` of `paths` or everything) |
+| POST | `/api/code/push` | `{repo}` | head info (sets the upstream `origin/<branch>` the first time) |
+| POST | `/api/code/branch` | `{repo, name}` | head info (`git switch -c`) |
+| POST | `/api/code/pr` | `{repo, title?, body?, base?, draft}` | `{number, url, title, state, draft}` — pushes first if needed; title = the only commit's subject (else the newest), body = the commits; a token that can write to the repository |
+| POST | `/api/code/pr-text` | `{repo, session?, base?}` | `{title, body}` — written by the same small call from the session's conversation (what the user asked and the final answer of each turn, 24 kB, the newest kept), the branch's commits, the diff against `origin/<base>` (40 kB) and the repository's PR template; `502 no_message` when Claude fails |
+| POST | `/api/code/message` | `{repo, a=HEAD, b=now}` | `{message}` — proposed by a small `claude -p` call (Haiku) from the diff (40 kB) and the 10 last subjects; `Co-Authored-By` lines dropped |
+
+### Separate copies (worktrees)
+
+`maxxing/worktrees.py`. Code mode only (`403 code_mode_off`). A session created with `worktree` gets a `git worktree`
+of a clone of its topic in `<topic>/worktrees/<slug>` (`.worktrees/` when the topic folder is inside the repository;
+then added to `.git/info/exclude`) on a new branch `<prefix>/<slug of the title>` (prefix `session` by default, per
+repository) from `base` (default: origin's default branch). Its turns run there (`runner._cwd`), with a line of
+`--append-system-prompt` naming the copy. The branch is renamed after the session's (short) title until it has an
+upstream. Session meta `worktree = {path, repo, branch, base, base_ref, created, named, pr?, prepare?, env_copied?,
+port, included?, removed?, kept_branch?}`; `Session.worktree` = `{path, repo, branch, base, pr, kept_branch, port, removed, preparing}`.
+Per-repository preferences `{prefix, prepare, copy_env}` in `<state>/worktrees.json`; the preparation runs once in a
+thread (15 min max), log `<state>/worktrees/<sid8>.log`. Errors: `400 not_here|bad_base|bad_prefix|is_pr|
+no_local_base`, `404 no_copy`, `409 uncommitted|conflict|base_busy|branch_in_use|running|has_copy` (moving the
+session). Deleting a session removes its copy when it is clean and its commits are in its base or pushed
+(`worktrees.on_delete`). A pull request's local branch is only moved forward to `origin/<branch>`, never reset.
+A `.worktreeinclude` at the root of the clone (gitignore syntax) names ignored files copied into every new copy
+(`included` = how many; only files git ignores, no links, 500 files / 200 MB at most). Each copy owns ports
+`port`..`port+9` (from 4100, blocks of 10 nothing listens on and no live copy owns): its turns and its preparation get
+`MAXXING_PORT` (first port) and `MAXXING_COPY_PATH`, and Claude is told to use them.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/code/copy-repos?path=` | – | `{enabled, repos:[{root, name, branch, branches, default_base, github, prefs:{prefix, prepare, copy_env}}]}` — the clones of the topic (or the repository holding it) |
+| PUT | `/api/code/copy-prefs` | `{repo, prefix?, prepare?, copy_env?}` | the preferences |
+| POST | `/api/sessions` | `{…, worktree:{repo, base?, prepare?, copy_env?, remember?}}` | Session (the copy is made before the first turn) |
+| GET | `/api/sessions/{id}/copy` | – | `{path, repo, branch, base, pr, prepare, env_copied, included, port, exists, removed, ahead, behind (against the base), dirty, upstream, pushed_ahead, github, fork, watch}` |
+| PUT | `/api/sessions/{id}/copy/watch` | `{on}` | `{watch}` — Claude watches the copy's PR (on by default; never a fork's or an outsider's PR) |
+| POST | `/api/sessions/{id}/copy/merge` | `{message?}` | `{merged, base, sha, removed, kept_branch}` — commits first with `message`; merges the base into the branch in the copy (aborted on a conflict: `409 conflict`), then moves the base forward (fast-forward only) and removes the copy |
+| POST | `/api/sessions/{id}/copy/remove` | `{force, merged_pr?}` | `{removed, kept_branch}` — `force` = discard (uncommitted files and the branch go); else refused with uncommitted files, and the branch is kept unless merged; `merged_pr`: its PR was merged on GitHub (looked up again: `409 not_merged` otherwise) - the branch goes when its tip is in the PR's head (squash / rebase merges too) |
+| GET | `/api/sessions/{id}/copy/prepare-log` | – | `{log}` |
+| GET | `/api/code/copies` | – | the copies still on disk: `[{sid, title, path, archived, …status}]` |
+| POST | `/api/code/pr-session` | `{repo: "github:owner/name", number, review, message?, clone?}` | Session — in the topic of a local clone, on a copy of the PR's branch (a fork: `pr/<n>` from `refs/pull/<n>/head`); plan mode when `review` or when the author is outside (`author_association` not OWNER / MEMBER / COLLABORATOR). `400 no_clone` |
+
+**The PR watch** (`maxxing/prwatch.py`, a loop of `api/code.py`, every 3 min; `MAXXING_PRWATCH_LOOP=0` turns it off):
+for each session on a copy whose branch has an open PR (and `watch`), the new events - every check of the head ended
+with a failure, a conflict with the base, a comment / review / line comment from OWNER / MEMBER / COLLABORATOR (never a
+bot nor the server's own GitHub logins) - are sent to the session in one message, `source: "github"`, comments quoted
+as data. Once per event (keys in `<state>/prwatch.json`), never while a turn runs, at most 4 messages per session in
+24 h; what is there when the watch first sees the PR (or when it is turned back on) never wakes it. Comments are read
+only when the PR's `updated_at` moves.
+
+### Pull requests (GitHub)
+
+`gitview.github_pull` and the actions. `repo` = `github:owner/name`; the token used is the first of the vault that
+GitHub accepts (writes: one that can write, else `403 no_write`; GitHub refusing a merge: `409 refused`).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/git/pulls?repo=&state=open` | – | `[{number, title, author, head, base, draft, url, updated, state: open\|closed\|merged, outside, review_me}]` (`state` open \| closed \| all, 30 most recently updated) |
+| GET | `/api/git/pull?repo=&number=` | – | `{full, number, title, body, author:{login, avatar}, association, outside, state, draft, mergeable, mergeable_state, head, head_sha, head_repo, fork, base, url, created, updated, commits, add, del, files:[{path, old, status, add, del, hunks, binary, cut, lines}] (≤ 300), files_total, conversation:[{kind: comment\|review, id, author, body, state?, at, url}], line_comments:[{id, path, line, side, author, body, at, reply_to, outdated}], checks:[{name, status, conclusion, url}], methods, can_write, local_paths}` |
+| POST | `/api/git/pull/comment` | `{repo, number, body}` | `{id, url}` |
+| POST | `/api/git/pull/review` | `{repo, number, event: APPROVE\|REQUEST_CHANGES\|COMMENT, body, comments:[{path, line, side, body}]}` | `{id, state, url}` |
+| POST | `/api/git/pull/merge` | `{repo, number, method: squash\|merge\|rebase, sha?}` | `{merged, sha, message}` |
+| POST | `/api/git/pull/close` | `{repo, number}` | `{state}` |
+
+A ` ```pr-review ` block in a message (`{"repo", "number", "event", "summary", "comments":[{path, line, body}]}`) is
+drawn as a review card with **Publish on GitHub** (the review `POST` above, on the user's click). Text from GitHub
+shown in the PR view never turns into such a card.
+
+## Terminal
+
+`maxxing/terminal.py` + `maxxing/api/term.py`. Config `code_mode` (default false; shown read-only by
+`/api/settings`). A terminal = a login shell (`setsid -c $SHELL -l`) on a pseudo-terminal, child of the server: it
+ends when closed, after 30 min without input or output, or when the service stops. 4 at most; the folder must be
+inside the files root. Its output since the start (last 256 KB) is replayed to every new connection. Never for agents
+(the web app only offers it in normal sessions). Errors: `403 term_off|bad_token`, `400 bad_cwd`, `404 not_found`,
+`409 too_many`, `401 bad_password` / `429 throttled` (enable).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/term` | – | `{enabled, terms:[{id, cwd, title, started, last, alive, clients}], max}` |
+| POST | `/api/term/enable` | `{password}` | `{enabled:true}` — the current password again (same throttle as a password change) |
+| POST | `/api/term/disable` | – | `{enabled:false, closed}` — closes every terminal |
+| POST | `/api/term` | `{cwd, cols?, rows?}` | `{…term, token}` — opens one; `token` = one-time websocket token (30 s) |
+| POST | `/api/term/{tid}/token` | – | `{token}` — a new one-time token (reconnection, page reload) |
+| DELETE | `/api/term/{tid}` | – | `{ok}` |
+| WS | `/api/term/{tid}/ws?token=` | session cookie, same `Origin` as `Host` | server → browser: binary output frames; browser → server: text JSON `{"i": input}` or `{"r": [cols, rows]}` · close `4401` (cookie / origin), `4403` (token), `4000` (the shell ended) |
+
 ## Infra
 
 Inventory (`maxxing/infra/`, Settings -> Features -> `infra_page`, off by default). One snapshot
@@ -574,6 +695,7 @@ demand. Every route: `409 disabled` when the page is off (except `GET`).
 | GET | `/api/infra` | – | `{enabled, refreshing, error, refresh_min, generated_at, took_ms, harness_host, sources:{servers:{<name>:{ok, error, took_ms}}, cloudflare:{connected, key, error, sections:{zones, workers, worker_domains, pages, r2, d1, registrar, dns: "ok"\|"missing_permission"\|…}}, hostinger:{connected, key, sections:{domains, vps}}, vercel|netlify|supabase|github:{connected, key, error, label, beta, token_url, keys, sections:{sites, databases, buckets, functions, domains}}}, resources:[Resource], servers:[{name, label, host, user, port, note}]}` |
 | POST | `/api/infra/refresh` | – | `{started, refreshing}` (`started:false` when one is already running) |
 | POST | `/api/infra/annotate` | `{id, project?, note?, hidden?}` | the registry entry (`project:""` clears it) |
+| POST | `/api/infra/exec` | `{target?, command, timeout_s?}` | `{stdout, stderr, exit_code, duration_ms}`: Run command of the Infra page, on this server (`target:"local"`, default) or over SSH on a registered one (`target:"server:<name>"`); `timeout_s` 5-120 (default 30), `124` on timeout, `400 bad_command`/`bad_target`, `404 not_found`, `409 disabled` when the Infra page is off |
 | GET | `/api/infra/reserved` | – | `{names}`: names a path site cannot take |
 | POST | `/api/infra/servers/connect` | `{id: "server:hostinger:<n>", label?}` or `{host, user?, port?, label?}` | `{connected:true, name, label, host, user, port, via: existing_key\|added_key\|harness_key}`; `{connected:false, message, public_key, command}` when no key works on a non-Hostinger server; `409 exists`, `422 <code>` (`not_found`, `no_key`, `missing_permission`, `ssh_refused`…). A Hostinger VPS may get the Harness key in its root `authorized_keys` (the only provider write) and takes up to a minute |
 | POST | `/api/infra/servers/rename` | `{name, label}` | `{name, label}` (the label shown; the name never changes) |
@@ -585,7 +707,7 @@ demand. Every route: `409 disabled` when the page is off (except `GET`).
 Resource: `{id, kind: server|site|worker|pages|database|bucket|domain, name, location: local|<server>|cloudflare|hostinger|other,
 provider, urls, status: ok|warn|down|unknown, status_detail (http_<code>, unreachable, timeout, tls_invalid, cert_expiring,
 cert_expired, dns_elsewhere, domain_expiring, domain_expired, missing, disk_low, backup_failed, deploy_failed,
-list_failed, file_missing), details, links:[id], project, note, hidden, declared, missing}`. Ids: `server:<name>`,
+list_failed, file_missing, bad_probe), details, links:[id], project, note, hidden, declared, missing}`. Ids: `server:<name>`,
 `site:<server>:<host><path>`, `db:<server>:<engine>:<container|native>:<db>`, `db:<server>:sqlite:<path>`,
 `db:cloudflare:d1:<name>`, `bucket:<server>:garage:<name>`, `bucket:cloudflare:r2:<name>`, `worker:cloudflare:<name>`,
 `pages:cloudflare:<name>`, `domain:<name>`, `server:hostinger:<id>` (a Hostinger VPS not registered for SSH).
@@ -700,11 +822,12 @@ Block =
 | PUT | `/api/dashboard/layout` | `{order:[id], hidden:[id]}` | `{ok}` |
 | GET | `/api/extensions` | – | `[{id, name, type:"widget"\|"page"\|"view", icon, version, enabled, error, has_api, pinned, page_v, agents_view}]` (pinned: page shown in the sidebar; page_v: page.js mtime in ms, the UI imports `page.js?v=<page_v>` so the module is reused until the file changes; agents_view: `{name, icon}` in the UI language when the extension brings an Office view of the Agents page and is not in error, else null) |
 | PATCH | `/api/extensions/{id}` | `{enabled?, pinned?}` | `{ok}` (`pinned` on a widget -> 400 `not_a_page`) |
+| PUT | `/api/extensions/pins` | `{order: [id]}` (≤ 200) | `{pinned: [id]}`: the pinned pages in their new sidebar order (the given ids first, then the pins it does not mention; an id that is not pinned is ignored: this never pins anything) |
 | POST | `/api/extensions/reload` | – | rescans `<workspace>/extensions` |
-| ANY | `/api/ext/{id}/{path}` | – | forwarded to the extension's `api.py` `handle()`: return value → JSON, `(status, body)` tuple sets the status, `ValueError` → 400, `LookupError` → 404, other → 500 `extension_error`, 30 s timeout (504 `extension_timeout`), 503 `extension_busy` at once while an earlier timed-out `handle()` of the same extension has not returned, or when the 4 extension threads are all still running earlier calls. A `.` / `..` segment in `path` → `400 bad_path` |
+| ANY | `/api/ext/{id}[/{path}]` | – | forwarded to the extension's `api.py` `handle()`: return value → JSON, `(status, body)` tuple sets the status, `ValueError` → 400, `LookupError` → 404, other → 500 `extension_error`, 30 s timeout (504 `extension_timeout`), 503 `extension_busy` at once while an earlier timed-out `handle()` of the same extension has not returned, or when the 4 extension threads are all still running earlier calls. A `.` / `..` segment in `path` → `400 bad_path` |
 | GET | `/ext/{id}/page.js` | – | page module (ES module) |
 | GET | `/ext/ui-kit.css` | – | the UI kit of extensions (`server/maxxing/assets/ui-kit.css`): `ui-*` classes scoped to `.mx-ext` (page host) and `[data-mx-kit]` (widget frame), built on the theme variables; the app adds it once when a page extension opens; `ETag` (content hash), `If-None-Match` -> `304` |
-| GET | `/ext/{id}/widget-frame` | – | HTML widget document: the bridge (`maxxing.api / resize / theme`, theme from the URL fragment) + the UI kit inlined (`<html data-mx-kit>`) + `widget.html`, `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock` (the UI frames it with the same sandbox; an srcdoc frame would inherit the app's script policy). `/ext/{id}/widget.html` stays the raw file (text/plain) |
+| GET | `/ext/{id}/widget-frame` | – | HTML widget document: the bridge (`maxxing.api / resize / theme`, theme, material and variables from the URL fragment, then by message; `<html data-theme data-material>`) + the UI kit inlined (`<html data-mx-kit>`) + `widget.html`, `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock` (the UI frames it with the same sandbox; an srcdoc frame would inherit the app's script policy). `/ext/{id}/widget.html` stays the raw file (text/plain) |
 | GET | `/ext/{id}/agents-view-frame` | – | an Office view of the Agents page: the same document as `widget-frame` (bridge, UI kit, CSP sandbox) with `agents-view.html`; 404 when the extension declares no `agents_view`, is off or in error. `/ext/{id}/agents-view.html` (GET, HEAD) = the raw file. The bridge also has `maxxing.data / onData / app / navigate`, answered only by the page that frames a view (web `HtmlWidget` `host`): pushed Office data, GET of `/api/agents/layout` only, routes under `/agents` only (checked on the resolved pathname) |
 
 The app page (`index.html`) is served with `script-src 'self'` plus the hashes of its inline boot scripts
@@ -729,8 +852,8 @@ Built-in card links are SPA routes: `/sessions/<id>`, `/sessions`, `/tasks?task=
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/memory` | – | `{max_lines, files:[{path (workspace-relative), level:"global"\|"project"\|"topic", lines, bytes, over:bool}]}` |
-| POST | `/api/memory/compact` | – | `{session: Session}` — a session at the workspace root runs the memory-compaction skill now with the line limit |
+| GET | `/api/memory` | – | `{max_lines, max_bytes (the weight that goes with the line limit: 1 KB for 10 lines, 0 = no limit), files:[{path (workspace-relative), level:"global"\|"project"\|"topic"\|"agent", lines, bytes, over:bool (above the limit, in lines or in weight), heavy:bool (in weight)}]}` |
+| POST | `/api/memory/compact` | – | `{session: Session}` — a session at the workspace root runs the memory-compaction skill now with the limit (lines and weight) |
 
 ## Stats
 
@@ -786,6 +909,7 @@ and `topic`); `name` falls back to the folder; `hidden` = `disable-model-invocat
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/skills` | - | `{skills: Skill[]}` (product and user first, then workspace, then project by project, its topics after it) |
+| GET | `/api/skills?path=projects/<p>/topics/<t>` | - | `{skills: Skill[]}`: only those a session of that topic sees (product, user, workspace, its project, the topic itself): the composer's `/` menu |
 
 ## Search
 

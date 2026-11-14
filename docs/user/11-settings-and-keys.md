@@ -11,7 +11,7 @@ two blocks):
 | Block | Section | What you find |
 |---|---|---|
 | **General** | **General** | language (English/French), time zone, **App** (install it on this computer or phone, below), the guided tour and the tutorial |
-| | **Appearance** | saved in this browser, in three cards. **Theme and colors**: dark/light, accent color (the logo takes it too), background (neutral or tinted with the accent) - the last theme, accent and background you pick also color the sign-in page and any browser that never chose one (new phone, private window). **Layout**: density, **layout** of this device (*Auto*: the touch layout on phones and tablets, the sidebar on computers; *Touch*; *Desktop* when the screen is wide enough), the first screen of the touch layout (*Last session* or *Dashboard*). **Fonts**: interface font (23, grouped by style: modern, with character, rounded, serif, easy to read, monospace) and code font (11; a font other than the default loads the first time you pick it) |
+| | **Appearance** | saved in this browser, in three cards. **Theme and colors**: dark/light, accent color (the logo takes it too), background (neutral or tinted with the accent), **material** (*Solid*: plain colors; *Glass*: the bars, menus and dialogs become see-through over a soft backdrop in your accent color; off when your system asks for less transparency, saved in this browser only) - the last theme, accent and background you pick also color the sign-in page and any browser that never chose one (new phone, private window). **Layout**: density, **layout** of this device (*Auto*: the touch layout on phones and tablets, the sidebar on computers; *Touch*; *Desktop* when the screen is wide enough), the first screen of the touch layout (*Last session* or *Dashboard*). **Fonts**: interface font (23, grouped by style: modern, with character, rounded, serif, easy to read, monospace) and code font (11; a font other than the default loads the first time you pick it) |
 | | **Profile** | your pseudo, a **photo** (kept on this server, shown instead of the color and emoji, also to your Team contacts), color and emoji (picked from a searchable list) for messages, notifications and Team, with a preview; **Stay in touch**: the optional e-mail, news and anonymous counter (see [License](license)) |
 | | **Security** | change the password, two-step sign-in with Telegram (see [Telegram](telegram#two-step-sign-in)), **Privacy**: the presentation mode by default (new browsers start with your data masked), sign out everywhere |
 | | **Features** | every page of the sidebar: the ones always there, the optional ones with their switch, the options of the sessions under Sessions (below) |
@@ -26,7 +26,7 @@ two blocks):
 | | **Telegram** | bot wizard, linking, mode (simple chat, threads, web mirror), notification options, two-step sign-in (also in Security) – see [Telegram](telegram) |
 | | **Voice** | how voice messages and dictation are transcribed (on the server, Groq, OpenAI, or off) |
 | **Extensions** | **Widgets** | the widget extensions of `<workspace>/extensions`: switch on/off, **Rescan**, **Customize the dashboard** (opens the dashboard in edit mode) – see [Dashboard widgets](dashboard-widgets) |
-| | **Pages** | the page extensions and the Office views of the Agents page: switch on/off, **Open page**, **In the sidebar** (pin), **Rescan** – see [Page extensions](page-extensions) |
+| | **Pages** | the page extensions and the Overview views of the Agents page: every page pinned or not, switch on/off, **Open page**, **In the sidebar** (pin: the sidebar's Extensions folder), **Rescan** – see [Page extensions](page-extensions) |
 | **Workspace** | **Templates** | add a ready-made project (**starter pack**) for your kind of work; an existing project is never overwritten - see [Starter projects](starter-projects) |
 | | **Import** | the memory of another agent (Hermes, OpenClaw, Claude Code, a zip) - see [Import](import); and the way to the other imports: a memory backup (**Backup**), an agent file (Agents page) |
 | | **Backup** | repository, schedule, whitelist, history, restore – see [Backup](backup) |
@@ -61,7 +61,7 @@ The first-run wizard asks the same question (**What will you use?**), and Settin
 soon as a GitHub key is in the vault. An install made before 2.0.0a132 keeps the pages it had.
 
 Under **Sessions**, indented: **Maxxing mode (beta)** and the **line under the answers** (cost, tokens, duration, model: tick what
-it shows) for everyone, and, saved in this browser only (marked **This browser**): the **Tabs view** (Alt+T) and
+it shows) for everyone, and, saved in this browser only (marked **This browser**): the **Tabs mode** (Alt+T; off = Zones) and
 the **HUD**. Under **Team**, while Team is on: **Team bubbles** (the chat bubbles at the bottom right of every page,
 saved in this browser). The notification when a session finishes is in **Settings -> Notifications**, the Claude plan usage
 widget in **Settings -> Usage**, the presentation mode by default in **Settings -> Security**, the Telegram mode in

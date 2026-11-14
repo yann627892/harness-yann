@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import subprocess
 import sys
 import time
 import types
@@ -77,6 +78,20 @@ def test_a_failed_save_puts_the_crontab_back(monkeypatch):
     with pytest.raises(OSError):
         crons.create_job({"name": "New", "schedule": "@hourly", "command": "true"})
     assert crons.read_crontab() == before
+
+
+def test_a_failed_save_of_a_restore_puts_the_crontab_back(monkeypatch):
+    gone = crons.create_job({"name": "Gone", "schedule": "@hourly", "command": "true"})
+    crons.delete_job(gone["id"])
+    before = crons.read_crontab()
+    assert f"cron run {gone['id']}" not in before
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(crons, "_save_raw", full)
+    with pytest.raises(OSError):
+        crons.restore_job(gone["id"])
+    assert crons.read_crontab() == before                           # no line for a job that jobs.json does not hold
 
 
 @pytest.mark.parametrize("field", ["name", "command"])
@@ -758,3 +773,57 @@ def test_lock_watcher_rests_while_no_browser_is_connected(org, monkeypatch):
     idle = asyncio.run(run())
     assert idle == 1                                         # the baseline only
     assert sent and sent[0] == ("crons", "health")
+
+
+def _detach_args(org, monkeypatch):
+    from maxxing import cmd_cron
+    monkeypatch.delenv("MAXXING_SPAWN")
+    monkeypatch.setattr(crons, "units_available", lambda: True)
+    j = crons.create_job({"name": "x", "command": "true"})
+    ran = []
+    monkeypatch.setattr(crons, "run_job", lambda cid, trigger, attempt: ran.append(cid) or {"ok": True})
+    return cmd_cron, j, ran, types.SimpleNamespace(cron_cmd="run", id=j["id"], if_due=False, detach=True)
+
+
+def test_cron_run_detach_runs_here_when_systemd_run_cannot_be_executed(org, monkeypatch, capsys):
+    cmd_cron, j, ran, a = _detach_args(org, monkeypatch)
+
+    def boom(cmd, **kw):
+        raise FileNotFoundError("systemd-run")
+    monkeypatch.setattr(crons.subprocess, "run", boom)       # same module object as subprocess: patched globally
+    assert cmd_cron._handler(a) == 0 and ran == [j["id"]]
+    assert "systemd-run failed" in capsys.readouterr().err
+    monkeypatch.setattr(crons, "units_available", lambda: False)
+    monkeypatch.setattr(crons.subprocess, "Popen", lambda *a, **kw: (_ for _ in ()).throw(OSError("no fork")))
+    with pytest.raises(crons.CronError) as e:
+        crons.spawn_run(j["id"])
+    assert e.value.code == "spawn_failed"
+
+
+def test_cron_run_detach_does_not_run_twice_when_systemd_run_times_out(org, monkeypatch, capsys):
+    cmd_cron, j, ran, a = _detach_args(org, monkeypatch)
+
+    def slow(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 15)
+    monkeypatch.setattr(crons.subprocess, "run", slow)
+    assert cmd_cron._handler(a) == 1 and ran == []           # the unit may still start: no inline run
+    assert "did not answer" in capsys.readouterr().err
+
+
+def test_cron_run_if_due_with_a_broken_schedule_is_an_error(org, capsys):
+    from maxxing import cmd_cron
+    j = crons.create_job({"name": "x", "schedule": "0 0 29 2 *", "command": "true"})
+    data = json.loads(crons.jobs_path().read_text())
+    data["jobs"][0]["schedule"] = "not a schedule"
+    crons.jobs_path().write_text(json.dumps(data))
+    assert cmd_cron._handler(types.SimpleNamespace(cron_cmd="run", id=j["id"], if_due=True)) == 2
+    assert j["id"] in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("at", [1e20, "yesterday", None])
+def test_cron_list_survives_a_bad_time_in_the_run_history(org, capsys, at):
+    from maxxing import cmd_cron
+    j = crons.create_job({"name": "x", "command": "true"})
+    crons.runs_path().write_text(json.dumps({"cron_id": j["id"], "ok": True, "at": at}) + "\n")
+    assert cmd_cron._handler(types.SimpleNamespace(cron_cmd="list")) == 0
+    assert "????" in capsys.readouterr().out

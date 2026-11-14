@@ -97,6 +97,13 @@ def normalize(ev: dict) -> list[dict]:
             out["voice"] = [str(v) for v in ev["voice"] if v]
         if isinstance(ev.get("client_ids"), list):  # the web page's ids for this message (a reload checks them)
             out["client_ids"] = [str(c) for c in ev["client_ids"]]
+        if ev.get("injected"):                # added to a running turn (POST /inject): not the start of a turn
+            out["injected"] = True
+        if isinstance(ev.get("mentions"), list):   # the @ of the composer (runner._mentions_shown): drawn as chips
+            out["mentions"] = [m for m in ev["mentions"] if isinstance(m, dict) and m.get("label")]
+        f = ev.get("from")
+        if isinstance(f, dict) and f.get("session"):   # sent by another session's turn (maxxing sessions send)
+            out["from"] = {"session": str(f["session"]), "title": str(f.get("title") or "")}
         return [out]
     if t == "mx_voice":
         return [{"type": "voice_text", "text": ev.get("text") or "", "error": ev.get("error") or None,
@@ -106,13 +113,17 @@ def normalize(ev: dict) -> list[dict]:
         if not isinstance(ref, (int, float)):
             return []
         return [{"type": "hide", "ref": ref, "hidden": ev.get("hidden") is not False, "at": at}]
+    if t == "mx_changes":                 # what the turn changed in git repositories (Changes view)
+        repos = [{k: r.get(k) for k in ("root", "name", "branch", "approx", "add", "del", "files", "more")}
+                 for r in ev.get("repos") or [] if isinstance(r, dict) and r.get("root")]
+        return [{"type": "changes", "n": ev.get("n"), "repos": repos, "at": at}] if repos else []
     if t == "mx_note":
         return [{"type": "note", "text": ev.get("text") or "", "level": ev.get("level") or "info", "at": at}]
     if t == "mx_done":
         if ev.get("code") not in (0, None) and not ev.get("stopped") and not ev.get("timed_out"):
             tail = (ev.get("stderr") or "").strip()
             text = f"Turn failed: {tail[-500:]}" if tail else f"Turn failed (exit code {ev.get('code')})."
-            return [{"type": "note", "text": text, "level": "error", "at": at}]
+            return [{"type": "note", "text": text, "level": "error", "failed": True, "at": at}]   # the turn's end
         return []
     if ev.get("parent_tool_use_id"):
         return []
@@ -131,7 +142,9 @@ def normalize(ev: dict) -> list[dict]:
 def _system(ev: dict, at: float | None) -> list[dict]:
     sub = ev.get("subtype")
     if sub == "init":
-        return [{"type": "init", "model": ev.get("model") or "", "cwd": ev.get("cwd") or "", "at": at}]
+        # `same`: a turn of a process that already ran one (runner.py): its background tasks were not cut
+        return [{"type": "init", "model": ev.get("model") or "", "cwd": ev.get("cwd") or "", "at": at,
+                 **({"same": True} if ev.get("mx_same_proc") else {})}]
     if sub == "compact_boundary":
         return [{"type": "note", "text": "Harness compacted its context automatically.", "level": "info", "at": at}]
     if isinstance(sub, str) and sub.startswith("task_"):
@@ -193,12 +206,15 @@ def _task(ev: dict, sub: str, at: float | None) -> list[dict]:
 
 def _assistant(ev: dict, at: float | None) -> list[dict]:
     out = []
+    # Written by Claude Code in place of an answer when the API refused the call: `error` says why
+    # (rate_limit, server_error, authentication_failed...). The page shows it as the end of the turn.
+    refused = {"error": str(ev["error"])[:60]} if ev.get("error") else {}
     for b in (ev.get("message") or {}).get("content") or []:
         if not isinstance(b, dict):
             continue
         bt = b.get("type")
         if bt == "text" and (b.get("text") or "").strip():
-            out.append({"type": "assistant", "text": b["text"], "at": at})
+            out.append({"type": "assistant", "text": b["text"], "at": at, **refused})
         elif bt == "thinking" and (b.get("thinking") or "").strip():
             out.append({"type": "thinking", "text": b["thinking"], "at": at})
         elif bt == "tool_use":

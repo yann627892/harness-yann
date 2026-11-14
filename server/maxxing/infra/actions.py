@@ -87,7 +87,9 @@ def pg_install() -> dict:
         code, out, err = _run(["apt-get", "install", "-y", "-q", "postgresql"], timeout=900)
     if code != 0:
         raise ActionError("apt-get install postgresql failed: " + _err(out, err), "install_failed")
-    _run(["systemctl", "enable", "--now", "postgresql"], timeout=60)
+    code, out, err = _run(["systemctl", "enable", "--now", "postgresql"], timeout=60)
+    if code != 0:                                    # a stopped server answers nothing below: that is no success
+        raise ActionError("PostgreSQL is installed but did not start: " + _err(out, err), "start_failed")
     code, out, _ = _psql("show listen_addresses;")
     listen = out.strip()
     if listen not in ("localhost", "127.0.0.1", "", "localhost,127.0.0.1"):
@@ -100,7 +102,7 @@ def pg_databases() -> list[str]:
     code, out, err = _psql("select datname from pg_database where not datistemplate order by 1;")
     if code != 0:
         raise ActionError("cannot list the databases: " + _err(out, err), "psql_failed")
-    return [x for x in out.split() if x]
+    return [x for x in out.splitlines() if x.strip()]        # one per line: a name may hold a space
 
 
 def pg_create(name: str, project: str | None = None) -> dict:
@@ -380,9 +382,18 @@ def bucket_create(name: str, public: bool = False, project: str | None = None) -
                 raise ActionError("garage bucket website failed: " + _err(out, err), "garage_failed")
             site = caddy.add_site(name, port=3902, upstream_host=f"{name}.web.garage.localhost", project=project,
                                   kind="bucket")
+            done.append("site")
             urls.append(site["url"])
+        rid = f"bucket:local:garage:{name}"
+        registry.declare(rid, kind="bucket", name=name, server="local", project=project, urls=urls,
+                         vault_keys=sorted(keys), recipe={"engine": "garage", "public": public})
     except Exception:
         # a half-made bucket blocked the next try ("bucket already exists") and left keys in the vault
+        if "site" in done:
+            try:
+                caddy.remove_site(name)
+            except Exception:
+                pass
         if "vault" in done:
             for k in keys:
                 vault.delete(k)
@@ -391,9 +402,6 @@ def bucket_create(name: str, public: bool = False, project: str | None = None) -
         if "bucket" in done:
             _garage("bucket", "delete", "--yes", name)
         raise
-    rid = f"bucket:local:garage:{name}"
-    registry.declare(rid, kind="bucket", name=name, server="local", project=project, urls=urls, vault_keys=sorted(keys),
-                     recipe={"engine": "garage", "public": public})
     return {"id": rid, "name": name, "vault_keys": sorted(keys), "endpoint": "http://127.0.0.1:3900", "public_url": urls[0] if urls else None}
 
 

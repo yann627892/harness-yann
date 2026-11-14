@@ -28,6 +28,13 @@ kill anything: an `interrupt` control request stops the current step, and the st
 written to the SAME process, so background commands and sub-agents keep running. Otherwise (stdin
 already closed, no answer to the interrupt) the process group is killed as before. `timeout_s` (meta)
 caps a turn.
+
+SIGUSR2 (inject, POST /inject) ends nothing: the message at the head of the queue (`inject`: the id of the turn it
+targets) is written to the stdin of the claude process running that turn, and Claude Code reads it at its next step
+(between tool calls) - or, if the turn was already ending, answers it right after in the same process. It leaves
+the queue only once written, under the session lock, from the reading loop that also closes stdin: never lost,
+never sent twice. When it cannot be written (no stream-json input, the turn over), it stays queued and runs after
+the turn as before.
 """
 from __future__ import annotations
 
@@ -50,7 +57,7 @@ from typing import Callable, Iterator
 if __package__ in (None, ""):                       # path invocation
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from maxxing import approval_mcp, claude_auth, config, mcp_auto   # noqa: E402  (stdlib-only modules)
+from maxxing import approval_mcp, claude_auth, codediff, config, mcp_auto   # noqa: E402  (stdlib-only modules)
 from maxxing.sessions import clip, resume, spawn, store      # noqa: E402
 
 RESUME_LOST = re.compile(r"no conversation found|session .{0,80}not found|no such session|"
@@ -76,6 +83,10 @@ BUDGET_ERROR = "Daily budget of the agent reached: turn stopped (Agent settings 
 LATENCY_KEPT = 20                                     # per session: seconds to the first event / answer
 
 
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+MAX_CODE_REPOS = 8                                     # repositories a session keeps photographing (most recent)
+
+
 @dataclass
 class Attempt:
     """Outcome of one `claude` process."""
@@ -92,6 +103,7 @@ class Attempt:
     thread_total: float | None = None
     csid: str = ""
     prev_total: float = 0.0
+    prev_est: float = 0.0                     # cost of lost turns of the thread already estimated (agent_cost)
     stopped: bool = False
     timed_out: bool = False
     held: list[str] = field(default_factory=list)   # lines held back while a resume may fail
@@ -102,6 +114,7 @@ class Attempt:
     mcp_used: set[str] = field(default_factory=set)    # MCP servers (tool form) whose tools were called
     connectors: list[str] | None = None                # claude.ai connectors listed by the init event
     handover: bool = False                             # ended by a steer: the process lives on for the next item
+    touched: set[str] = field(default_factory=set)     # files written by Edit / Write / NotebookEdit (Changes view)
 
 
 class _Stdin:
@@ -157,6 +170,7 @@ class _Proc:
     turn_done: bool = False                            # a `result` came since Claude last started working
     tasks: set[str] = field(default_factory=set)       # background tasks still running (Bash, agents, Monitor...)
     interrupt_at: float | None = None                  # monotonic time the interrupt request was sent
+    inits: int = 0                                     # turns this process started (`init` lines)
 
     def track(self, ev: dict) -> None:
         t, st = ev.get("type"), ev.get("subtype")
@@ -166,6 +180,7 @@ class _Proc:
             return
         elif st == "init":                             # Claude starts a turn (also by itself, when a task ends)
             self.turn_done = False
+            self.inits += 1
         elif st == "background_tasks_changed" and isinstance(ev.get("tasks"), list):
             self.tasks = {str(x.get("task_id")) for x in ev["tasks"] if isinstance(x, dict)}
         elif st == "task_started" and ev.get("is_backgrounded") and ev.get("task_id"):
@@ -186,12 +201,19 @@ class Runner:
         self.lock = threading.RLock()                  # re-entrant: signal handlers run on the main thread
         self.turn_id = ""                              # id of the turn in progress (meta turn_id)
         self.provider: str | None = None              # the credential side of the turn in progress
+        self.turn_at = 0.0
         self.current: dict | None = None               # queue item of the turn in progress
         self.voice_wait = False                        # waiting for the transcript of a voice message (_voice)
         self.interrupted = False                       # the current turn was cut short by a steer
         self.proc: _Proc | None = None                 # the claude process (kept across a steer)
         self.steer_pending = False                     # a steer the reading loop has to carry out
+        self.inject_pending = False                    # an inject (SIGUSR2) the reading loop has to carry out
+        self.injected_refs: list = []                  # refs (Telegram) of the messages injected into this turn
+        self.asks: dict | None = None                  # the turn's approvals (_can_use_tool), None = none
         self.keep_proc = False                         # the last turn handed its process over to the next item
+        self.proc_launch: tuple | None = None          # what self.proc was started with (args, cwd, env)
+        self.proc_core: tuple | None = None            # the same, without what mcp_auto chose
+        self.proc_plan: mcp_auto.Plan | None = None    # the MCP servers it was given
 
     # ---- signals -------------------------------------------------------------------------
     def on_sigterm(self, *_: object) -> None:
@@ -217,6 +239,11 @@ class Runner:
             return                                     # process (its background tasks) keeps running
         self.stop_flag.set()
         self._kill_child()
+
+    def on_inject(self, *_: object) -> None:
+        """SIGUSR2 (POST /inject): the reading loop writes the head of the queue into the running turn. Only a
+        flag here: the checks and the write happen in the reading loop (_inject_step)."""
+        self.inject_pending = True
 
     def _kill_child(self) -> None:
         with self.lock:
@@ -251,6 +278,7 @@ class Runner:
         signal.signal(signal.SIGTERM, self.on_sigterm)
         signal.signal(signal.SIGINT, self.on_sigterm)
         signal.signal(signal.SIGUSR1, self.on_steer)
+        signal.signal(signal.SIGUSR2, self.on_inject)
         failed: str | None = None
         try:
             while True:
@@ -314,29 +342,35 @@ class Runner:
 
     def _take(self, m: dict, q: list, cfg: dict, now: float) -> dict:
         """Pop the queue head (under the session lock), with the summary turn first when the return is worth it."""
-        smart = resume.candidate(m, q[0], cfg, now)
+        window = store.window_for(m, cfg)              # thresholds follow the model: 300k is out of reach on 200k
+        smart = resume.candidate(m, q[0], cfg, now, window)
         item = q.pop(0)
         item.pop("held", None)
+        item.pop("inject", None)                       # an inject that missed its turn: a normal message
         if smart:                                      # a summary written for this message (smart resume)
             idle = (resume.away_text(smart[0]), smart[1] // 1000)
             prompt = resume.summary_prompt(item.get("text") or "")
         else:                                          # the idle rule: a plain summary
-            idle = _idle_compact(m, item, cfg, now)
+            idle = _idle_compact(m, item, cfg, now, window)
             prompt = SUMMARY_PROMPT
         if idle:                                       # the summary runs first, the message waits at the head
             q.insert(0, {**item, "held": True})        # a Stop cancels the summary, never the user's message
             item = {"text": prompt, "attachments": [], "source": "system", "kind": "compact",
                     "auto": True, "idle": True, "at": time.time()}
         m["queue"], m["state"], m["pid"] = q, "running", os.getpid()
-        m["runner_caps"] = ["steer"]                   # the server may send SIGUSR1 (steer) to this runner
+        m["runner_caps"] = ["steer", "inject"]         # the server may send SIGUSR1 (steer) / SIGUSR2 (inject)
         # Before releasing the lock: a steer can only target this turn once its id is known.
         self.turn_id = m["turn_id"] = uuid.uuid4().hex[:12]
         # Still under the lock: a Stop / steer for THIS turn can only be sent once the item is popped, so it is
         # never wiped here (one that targeted the previous turn arrived before and is dropped).
         self.stop_flag.clear()
         self.interrupted = False
+        self.inject_pending = False                    # one meant for the previous turn: its item runs now anyway
+        self.injected_refs = []
         m["turn_kind"] = item.get("kind") or "user"
         m["turn_refs"] = list(item.get("refs") or [])  # the caller's ids of this message (Telegram)
+        # sends in a row that led to this message (maxxing sessions send): the turn's own sends are one more
+        m["turn_hops"] = int((item.get("relay") or {}).get("hops") or 0)
         self.current = item
         if idle:
             hours, tokens = idle
@@ -369,12 +403,13 @@ class Runner:
         cfg = config.load_config()
         kind = item.get("kind") or "user"
         voices = [v for v in item.get("voice") or [] if isinstance(v, dict) and v.get("path")]
+        self.turn_at = time.time()                     # its message's time: on_turn_end finds this turn by it
         store.append_log(self.sid, {"type": "mx_user", "text": item.get("text") or "",
                                     "attachments": item.get("attachments") or [],
                                     "source": item.get("source") or "web", "kind": kind,
                                     **({"voice": [str(v["path"]) for v in voices]} if voices else {}),
                                     **({"client_ids": item["client_ids"]} if item.get("client_ids") else {}),
-                                    "at": time.time()})
+                                    **_relay_from(item), **_mentions_shown(item), "at": self.turn_at})
         if voices:
             heard, err = self._voice(item, voices)
             if heard is None:                          # stopped, or nothing to send: no Claude call
@@ -394,10 +429,12 @@ class Runner:
             mode = "plan"
         if meta.get("plan_ready"):
             store.update(self.sid, plan_ready=False)
+        code = None if plan or kind in ("compact", "handoff") else self._code_start(meta, cwd)
         from maxxing import agents                      # an agent folder: its model and tool lists
         env = meta.get("env") or {}
         agent = agents.run_settings(meta.get("path") or "", env.get("MAXXING_AGENT_OUTSIDE") == "1",
-                                    session=self.sid, group=str(env.get("MAXXING_AGENT_GROUP") or ""))
+                                    session=self.sid, group=str(env.get("MAXXING_AGENT_GROUP") or ""),
+                                    manager=agents.manager_turn(meta))
         from maxxing import gateway                     # which side this session's turns run on
         self.provider = gateway.provider_of(meta)
         model = (meta.get("model") or agent.get("model") or cfg.get("default_model") or "").strip()
@@ -419,22 +456,36 @@ class Runner:
             mode = "default"
             approval = approval_args(self.sid, str(meta.get("path") or "") if agent else "",
                                      agent.get("approval_timeout_s") or cfg.get("approval_timeout_s"))
+        self.asks = None if not approval else {          # Claude Code's own questions (can_use_tool): asked too
+            "folder": str(approvals_dir()), "session": self.sid,
+            "agent_path": str(meta.get("path") or "") if agent else "",
+            "timeout": _approval_timeout(agent.get("approval_timeout_s") or cfg.get("approval_timeout_s"))}
         mcp_plan = mcp_auto.plan(self.sid, cfg, meta, cwd, item.get("text") or "")   # MCP servers this turn needs
-        hint = "\n\n".join(x for x in (mcp_plan.hint, spawn.CRON_SILENT if item.get("silent_ok") else "") if x)
-        base = [spawn.claude_bin(), "-p", "--output-format", "stream-json", "--verbose"]
+        copy = _copy_note(meta, cwd)
         allow = [] if agent or mode != "default" else workspace_allowed(meta.get("path") or "")
-        base += spawn.permission_args(mode)[0] + spawn.settings_args(cfg, agent.get("settings"), allow)
-        base += spawn.agents_args(cfg, "\n\n".join(x for x in (agent.get("system_note"), hint) if x))
-        if not agent:                                   # a topic's agents with `subagent` on: callable from its sessions
-            from maxxing import agent_format
-            base += agent_format.subagents_args(meta.get("path") or "")
-        base += ["--model", model] if model else []
-        base += agent.get("args") or []
+        effort = str(meta.get("effort") or "").strip()
         from maxxing import pcbridge                    # not at import: the runner starts with stdlib-only modules
-        base += pcbridge.mcp_config_args() + mcp_plan.args + approval
-        env = spawn.claude_env({**(meta.get("env") or {}), **spawn.effort_env(meta)}, mode,
-                               agent.get("keys") if agent else None, self.provider)
+
+        def argv(mcp: mcp_auto.Plan) -> list[str]:
+            hint = "\n\n".join(x for x in (mcp.hint, spawn.CRON_SILENT if item.get("silent_ok") else "", copy) if x)
+            b = [spawn.claude_bin(), "-p", "--output-format", "stream-json", "--verbose"]
+            b += spawn.permission_args(mode)[0] + spawn.settings_args(cfg, agent.get("settings"), allow)
+            b += spawn.agents_args(cfg, "\n\n".join(x for x in (agent.get("system_note"), hint) if x))
+            if not agent:                               # a topic's agents with `subagent` on: callable from its sessions
+                from maxxing import agent_format
+                b += agent_format.subagents_args(meta.get("path") or "")
+            b += ["--model", model] if model else []
+            b += ["--effort", effort] if effort in spawn.EFFORTS else []
+            b += agent.get("args") or []
+            return b + pcbridge.mcp_config_args() + mcp.args + approval
+        base = argv(mcp_plan)
+        env = spawn.claude_env(meta.get("env") or {}, mode, agent.get("keys") if agent else None, self.provider)
         env["MAXXING_SESSION"] = self.sid               # `maxxing mcp load` run by the turn finds its session
+        if copy:                                        # a separate copy: its folder and its own ports
+            wt = meta["worktree"]
+            env["MAXXING_COPY_PATH"] = str(wt.get("path") or "")
+            if wt.get("port"):
+                env["MAXXING_PORT"] = str(wt["port"])
         text = (PLAN_PREFACE if plan else "") + build_prompt(item)
         root = Path(cfg.get("workspace") or "/").resolve()
         prompt, json_in = stdin_payload(text, item, root)
@@ -446,14 +497,32 @@ class Runner:
 
         csid, fresh = meta.get("csid") or self.sid, bool(meta.get("fresh", True))
         live = self.proc
+        launch = (tuple(base), cwd, tuple(sorted(env.items())))
+        core = (tuple(argv(mcp_auto.NO_PLAN)), bool(cfg.get("mcp_auto")), cwd, launch[2])
+        if handed and live is not None and self.proc_launch != launch and not item.get("steer"):
+            lacks = mcp_auto.missing(self.proc_plan or mcp_plan, mcp_plan)
+            if self.proc_core == core and not lacks:
+                pass                                   # only mcp_auto's choice moved and the message names no server
+                                                       # the process lacks: it stays, its background tasks too
+            else:
+                handed = False                         # Plan mode, model, permissions or MCP changed: a new process
+                if live.alive() and self.proc_core == core:
+                    self.note(f"This message needs the MCP server {', '.join(lacks)}, which was not loaded: Claude "
+                              "was started again and its background tasks were stopped.", "warn")
+                elif live.alive():
+                    self.note("The settings of this session changed: its background tasks were stopped.", "warn")
         if live is not None and (item.get("steer") or handed) and live.stream and not live.stdin.closed \
                 and live.alive() and not fresh:        # the steered (or next) message joins the running process
+            mcp_plan = self.proc_plan or mcp_plan      # what that process was given, not what a new one would get
             a = self._attempt_in(live, prompt, timeout_s, csid, store.thread_prev_cost(meta, csid))
+            a.prev_est = store.thread_estimated(meta, csid)
         else:
             self._end_proc()
+            self.proc_launch, self.proc_core, self.proc_plan = launch, core, mcp_plan
             a = self.attempt(base + (["--session-id", csid] if fresh else ["--resume", csid]),
                              prompt, cwd, env, timeout_s, hold=not fresh, csid=csid,
-                             prev_total=0.0 if fresh else store.thread_prev_cost(meta, csid))
+                             prev_total=0.0 if fresh else store.thread_prev_cost(meta, csid),
+                             prev_est=0.0 if fresh else store.thread_estimated(meta, csid))
         a.fresh = fresh
         if a.handover:
             self.keep_proc = True
@@ -477,6 +546,8 @@ class Runner:
         elif a.stopped:
             self.note("Stopped." if not a.timed_out else f"Turn stopped after {timeout_s} s (timeout).",
                       "warn")
+        if code is not None:
+            self._code_end(code, a.touched, cwd)
         store.append_log(self.sid, {"type": "mx_done", "code": a.rc, "stderr": a.stderr[-STDERR_TAIL:],
                                     "stopped": a.stopped and not a.timed_out,
                                     "timed_out": a.timed_out, "at": time.time()})
@@ -490,6 +561,40 @@ class Runner:
         if not plan:
             self._auto_compact(item, a, err, cfg)
         return err
+
+    # ---- Changes view: photos of the session's repositories before / after the turn ---------------------------
+    def _code_start(self, meta: dict, cwd: str) -> tuple[int, dict[str, str]] | None:
+        """Photograph the repositories this session works in (its folder's, and the ones it changed before).
+        Never fails the turn: a repository git cannot read is skipped."""
+        try:
+            repos = list(meta.get("code_repos") or [])
+            here = codediff.repo_of(cwd)
+            if here is not None:
+                repos.insert(0, str(here))
+            n = int(meta.get("code_turn") or 0) + 1
+            store.update(self.sid, code_turn=n)
+            return n, codediff.turn_start(self.sid, n, [r for r in repos if os.path.isdir(r)])
+        except Exception as e:                         # noqa: BLE001 - the Changes view is never worth a failed turn
+            self.note(f"Changes view: no photo before this turn ({e})"[:300], "warn")
+            return None
+
+    def _code_end(self, code: tuple[int, dict[str, str]], touched: set[str], cwd: str) -> None:
+        n, pre = code
+        try:
+            entry = codediff.turn_end(self.sid, n, pre, touched, cwd)
+        except Exception as e:                         # noqa: BLE001
+            self.note(f"Changes view: no photo after this turn ({e})"[:300], "warn")
+            return
+        if not entry:
+            return
+        store.append_log(self.sid, {"type": "mx_changes", **entry, "at": time.time()})
+        with store.edit(self.sid) as m:
+            roots = [r["root"] for r in entry["repos"]] + list(m.get("code_repos") or [])
+            m["code_repos"] = list(dict.fromkeys(roots))[:MAX_CODE_REPOS]
+            base = dict(m.get("code_base") or {})
+            for r in entry["repos"]:
+                base.setdefault(r["root"], r["pre"])   # the session's first photo of each repository
+            m["code_base"] = base
 
     def _mcp_after(self, item: dict, a: Attempt, err: str | None, cfg: dict, meta: dict,
                    mcp_plan: mcp_auto.Plan, plan: bool) -> None:
@@ -578,21 +683,35 @@ class Runner:
         limit = config.int_setting(cfg, "auto_compact_tokens")
         if limit <= 0 or err is not None or a.stopped or not a.context_tokens:
             return
-        limit = max(limit, AUTO_COMPACT_MIN)
+        asked = max(limit, AUTO_COMPACT_MIN)
+        window = store.context_window_of(a.result or {}, a.real_model) or store.known_windows().get(a.real_model or "")
+        limit = resume.fit(asked, window)              # a model with a small window: summarized well before its end
         if a.context_tokens < limit or (item.get("kind") or "user") not in ("user", "seed"):
             return
         with store.edit(self.sid) as m:
             q = m.get("queue") or []
             if m.get("cron") or m.get("plan_ready") or any(x.get("kind") in ("compact", "handoff") for x in q):
                 return
+            try:
+                base = int(m.get("base_tokens") or 0)  # what a fresh thread costs anyway (CLAUDE.md, memory...)
+            except (TypeError, ValueError, OverflowError):
+                base = 0
+            if base and a.context_tokens - base < limit // 2:
+                return                                 # mostly fixed context: a summary would save nothing
             m["queue"] = [{"text": SUMMARY_PROMPT, "attachments": [], "source": "system", "kind": "compact",
                            "auto": True, "at": time.time()}] + q
+        small = f" - this model's window is {window // 1000}k" if window and limit < asked else ""
         self.note(f"The context reached {a.context_tokens // 1000}k tokens: Harness summarizes this session and "
-                  "continues in a fresh thread (automatic compaction, Settings -> Claude). The history stays "
+                  f"continues in a fresh thread (automatic compaction, Settings -> Claude{small}). The history stays "
                   "displayed here.")
 
     @staticmethod
     def _cwd(cfg: dict, meta: dict) -> str | None:
+        if meta.get("worktree"):                       # a separate copy of the topic's repository (worktrees.py)
+            from .. import worktrees
+            copy = worktrees.cwd_of(meta)
+            if copy:
+                return copy
         root = Path(cfg.get("workspace") or "/").resolve()
         cwd = (root / (meta.get("path") or "")).resolve()
         if cwd != root and root not in cwd.parents:
@@ -600,16 +719,17 @@ class Runner:
         return str(cwd) if cwd.is_dir() else None
 
     def attempt(self, args: list[str], prompt: str, cwd: str, env: dict, timeout_s: object,
-                hold: bool, csid: str = "", prev_total: float = 0.0) -> Attempt:
+                hold: bool, csid: str = "", prev_total: float = 0.0, prev_est: float = 0.0) -> Attempt:
         """Run one claude process, streaming its stdout into the raw log. `prev_total`: the running cost Claude
         last reported for thread `csid` (to tell this turn's own cost). Holds the Claude Code update lock (shared)
         while the process runs: an automatic update never replaces the files of a running Claude, and waits for it."""
         fd = _claude_in_use(self.note)                 # released with the process (_release), even after a steer
-        return self._attempt(args, prompt, cwd, env, timeout_s, hold, csid, prev_total, fd)
+        return self._attempt(args, prompt, cwd, env, timeout_s, hold, csid, prev_total, fd, prev_est)
 
     def _attempt(self, args: list[str], prompt: str, cwd: str, env: dict, timeout_s: object,
-                 hold: bool, csid: str = "", prev_total: float = 0.0, lock_fd: int | None = None) -> Attempt:
-        a = Attempt(csid=csid, prev_total=prev_total, t0=time.time())
+                 hold: bool, csid: str = "", prev_total: float = 0.0, lock_fd: int | None = None,
+                 prev_est: float = 0.0) -> Attempt:
+        a = Attempt(csid=csid, prev_total=prev_total, prev_est=prev_est, t0=time.time())
         oom_before = _oom_kills()
         try:
             p = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -661,13 +781,25 @@ class Runner:
                 line = raw.strip()
                 if line:
                     ev = _parse(line)
+                    if ev is not None and ev.get("type") == "stream_event":   # partial text: never logged
+                        ev, line = None, ""
+                    if ev is not None and ev.get("type") == "control_request" and pr.stream:
+                        self._can_use_tool(pr, ev)
                     if ev is not None:
                         self._observe(ev, a)
                         pr.track(ev)
                         if ev.get("type") == "result" and a.thread_total is not None:
+                            # a lost turn's estimate may be written after this turn started (on_turn_end): read now
+                            est = store.thread_estimated(store.read(self.sid) or {}, a.csid)
+                            if est > a.prev_est:
+                                a.prev_est = est
+                                a.turn_cost = store.turn_cost(a.thread_total, a.prev_total, est)
                             ev["mx_turn_cost"] = a.turn_cost   # shown per turn in the thread (normalize.py)
                         if clip.keep_event(ev):            # not progress-only lines (thinking_tokens)
                             clip.clip_event(ev)            # huge tool outputs / the init lists never reach the log
+                            if ev.get("type") == "system" and ev.get("subtype") == "init" and pr.inits > 1:
+                                ev["mx_same_proc"] = True  # not a new process: what its earlier turns left
+                                                           # running in the background still runs
                             ev.setdefault("mx_at", time.time())
                             line = json.dumps(ev, ensure_ascii=False)
                         else:
@@ -688,6 +820,8 @@ class Runner:
                     a.handover, a.rc = True, 0
                     a.stopped = pr.interrupt_at is not None    # a step was cut short (else: only background tasks ran)
                     return a                       # (stderr: reported once, when the process ends)
+                if self.inject_pending and (a.saw_init or not hold):   # (a resume that may still fail: wait)
+                    self._inject_step(pr)
                 if pr.stream and pr.turn_done and not pr.tasks and not pr.stdin.closed:
                     pr.stdin.close()                   # the turn is over: Claude exits (as with a text prompt)
                 elif pr.stream and pr.turn_done and pr.tasks and not pr.stdin.closed and pr.alive() \
@@ -721,6 +855,44 @@ class Runner:
         q = (store.read(self.sid) or {}).get("queue") or []
         return bool(q) and isinstance(q[0], dict) and not q[0].get("held")
 
+    def _inject_step(self, pr: _Proc) -> None:
+        """One pending inject: the head of the queue, when it is an `inject` item for this turn, is written to the
+        running claude process and leaves the queue (with its `mx_user` line) - atomically, under the session lock,
+        and in the thread that closes stdin: written before the close or not at all. Otherwise the item loses its
+        `inject` mark and stays queued: it runs after the turn, like any queued message."""
+        self.inject_pending = False
+        with store.edit(self.sid) as m:
+            q = m.get("queue") or []
+            head = q[0] if q and isinstance(q[0], dict) else None
+            if head is None or not head.get("inject"):
+                return
+            ok = (head.get("inject") == self.turn_id and pr.stream and not pr.stdin.closed and pr.alive()
+                  and not pr.turn_done and not self.steer_pending and not self.stop_flag.is_set()
+                  and (self.current or {}).get("kind") not in ("compact", "handoff"))
+            if ok:
+                root = Path(config.load_config().get("workspace") or "/").resolve()
+                ok = pr.stdin.send(user_message(build_prompt(head), head, root))
+            if not ok:
+                head.pop("inject", None)               # runs after the turn instead
+                m["queue"] = q
+                if not pr.turn_done:                   # (turn over: it runs right away anyway)
+                    self.note("Your message could not be added to the running turn: it will be sent when the turn "
+                              "ends.")
+                return
+            q.pop(0)
+            m["queue"], m["updated"] = q, time.time()
+            # a relayed message now part of this turn: the turn's own sends count from its hops (MAX_HOPS holds)
+            m["turn_hops"] = max(int(m.get("turn_hops") or 0), int((head.get("relay") or {}).get("hops") or 0))
+            refs = list(head.get("refs") or [])
+            if refs:                                   # Telegram: answered by this turn
+                self.injected_refs += refs
+                m["turn_refs"] = list(m.get("turn_refs") or []) + refs
+            store.append_log(self.sid, {"type": "mx_user", "text": head.get("text") or "",
+                                        "attachments": head.get("attachments") or [],
+                                        "source": head.get("source") or "web", "kind": "user", "injected": True,
+                                        **({"client_ids": head["client_ids"]} if head.get("client_ids") else {}),
+                                        **_relay_from(head), **_mentions_shown(head), "at": time.time()})
+
     def _steer_step(self, pr: _Proc) -> bool:
         """One pass of a pending steer: True when the process can take the steered message now (the step it was
         on has ended). Interrupts the running step first; falls back to killing the turn when Claude's input is
@@ -743,6 +915,34 @@ class Runner:
             self._kill_child()
         return False
 
+    def _can_use_tool(self, pr: _Proc, ev: dict) -> None:
+        """Claude Code's own permission question on the control channel (stream-json input), e.g. the sandbox asking
+        to reach a host that is not in the agent's domains (`SandboxNetworkAccess`): asked like any approval when
+        the turn has approvals (Allow / Deny, in a thread: the reading goes on), else denied at once - unanswered,
+        the turn would wait until its timeout."""
+        req = ev.get("request") if isinstance(ev.get("request"), dict) else {}
+        rid = ev.get("request_id")
+        if req.get("subtype") != "can_use_tool" or not isinstance(rid, str):
+            return
+        inp = req.get("input") if isinstance(req.get("input"), dict) else {}
+        ctx = getattr(self, "asks", None)
+
+        def answer() -> None:
+            if ctx:
+                try:
+                    r = approval_mcp.ask({"tool_name": req.get("tool_name"), "input": inp,
+                                          "tool_use_id": req.get("tool_use_id")}, ctx=ctx)
+                except Exception as e:  # noqa: BLE001 - never leaves Claude waiting
+                    r = {"behavior": "deny", "message": f"The request could not be asked: {e}"}
+            else:
+                r = {"behavior": "deny", "message": "Not allowed in this run (the owner was not asked)."}
+            if r.get("behavior") == "allow":
+                r = {"behavior": "allow", "updatedInput": inp}
+            pr.stdin.send(json.dumps({"type": "control_response", "response": {
+                "subtype": "success", "request_id": rid, "response": r}}) + "\n")
+
+        threading.Thread(target=answer, daemon=True).start()
+
     def _write_line(self, line: str) -> None:
         with open(store.log_path(self.sid), "a") as f:
             f.write(line + "\n")
@@ -758,6 +958,11 @@ class Runner:
                     srv = mcp_auto.tool_server(b.get("name"))
                     if srv:
                         a.mcp_used.add(srv)
+                    if b.get("name") in WRITE_TOOLS:
+                        inp = b.get("input") or {}
+                        target = inp.get("file_path") or inp.get("notebook_path")
+                        if isinstance(target, str) and target and len(a.touched) < 500:
+                            a.touched.add(target)
         if t == "system" and ev.get("subtype") == "init":
             a.saw_init = True
             a.connectors = mcp_auto.connectors_of_init(ev)
@@ -782,7 +987,7 @@ class Runner:
             a.result = ev
             if ev.get("total_cost_usd") is not None:
                 a.thread_total = float(ev.get("total_cost_usd") or 0)
-                a.turn_cost = store.turn_cost(a.thread_total, a.prev_total)
+                a.turn_cost = store.turn_cost(a.thread_total, a.prev_total, a.prev_est)
             if isinstance(ev.get("result"), str) and ev["result"].strip():
                 a.final_text = ev["result"]
             mu = ev.get("modelUsage")
@@ -837,8 +1042,9 @@ class Runner:
             m["error"] = err
             m["updated"] = m["finished_at"] = time.time()
             # which item this turn ran: on_turn_end callbacks answer only their own turns (never a summary)
-            m["last_turn"] = {"id": self.turn_id, "kind": item.get("kind") or "user",
-                              "source": item.get("source") or "web", "refs": list(item.get("refs") or [])}
+            m["last_turn"] = {"id": self.turn_id, "kind": item.get("kind") or "user", "at": self.turn_at,
+                              "source": item.get("source") or "web",
+                              "refs": list(item.get("refs") or []) + list(self.injected_refs)}
             if not m.get("title"):
                 m["title"] = " ".join((item.get("text") or "").split())[:60] or "Untitled"
             if m.get("cron") and m.get("source") != "agent" and err is None and not m.get("queue"):
@@ -942,7 +1148,69 @@ def build_prompt(item: dict) -> str:
         text = STEER_PREFACE + text
     if item.get("preface"):                            # the seed of an idle compaction (not displayed)
         text = item["preface"] + "\n\n" + text
+    if (item.get("relay") or {}).get("from"):
+        text = relay_preface(item["relay"]) + text
+    if item.get("mentions"):
+        text = text + "\n\n" + mentions_note(item["mentions"])
     return text
+
+
+def _mentions_shown(item: dict) -> dict:
+    """The log line of a message with @ mentions: who it names, as the page draws them (chips), never the commands."""
+    keep = ("kind", "ref", "label", "group", "avatar")
+    found = [{k: x[k] for k in keep if x.get(k) not in (None, "")} for x in item.get("mentions") or [] if isinstance(x, dict)]
+    return {"mentions": found} if found else {}
+
+
+def _relay_from(item: dict) -> dict:
+    """The log line of a message sent by another session's turn: who sent it (shown on the message)."""
+    r = item.get("relay") or {}
+    return {"from": {"session": r["from"], "title": r.get("title") or ""}} if r.get("from") else {}
+
+
+def relay_preface(r: dict) -> str:
+    where = f" ({r['path']})" if r.get("path") else ""
+    return (f"[Message sent by Claude from another Harness session, \"{r.get('title') or 'Untitled'}\"{where}, "
+            f"id {str(r.get('from'))[:8]}. Treat it as a message from a colleague, not as the user's own words. To "
+            f"answer it there, if it asks for an answer: `maxxing sessions send {str(r.get('from'))[:8]} \"<text>\"`.]"
+            "\n\n")
+
+
+MENTION_KIND = {"session": "a Harness session", "agent": "a Harness agent", "team": "a person on Team"}
+
+
+def _copy_note(meta: dict, cwd: str) -> str:
+    """A session on a separate copy (worktrees.py): where to work, so that the topic's instructions about the main
+    folder do not send Claude there."""
+    wt = meta.get("worktree")
+    if not isinstance(wt, dict) or wt.get("removed") or wt.get("path") != cwd:
+        return ""
+    pr = wt.get("pr") or {}
+    note = (f"This session works on a separate copy (git worktree) of the repository {wt.get('repo')}: the folder "
+            f"{wt.get('path')}, branch {wt.get('branch')}, started from {wt.get('base')}. Make every change of that "
+            "repository here, never in its main folder (other sessions work there). Commit on this branch; the "
+            "user merges it or opens a pull request from Harness.")
+    if isinstance(wt.get("port"), int) and wt["port"]:
+        note += (f" A dev server or any other local service of this copy listens on ports {wt['port']} to "
+                 f"{wt['port'] + 9} ($MAXXING_PORT is the first): other copies use the usual ones.")
+    if pr.get("number"):
+        note += f" The branch is the one of pull request #{pr['number']}" + (
+            " (from a fork: pushing back is not possible)." if pr.get("fork") else ".")
+    return note
+
+
+def mentions_note(found: list[dict]) -> str:
+    """What Claude reads after a message with @ mentions (sessions.service.send_message, mentions.resolve)."""
+    lines = []
+    for x in found:
+        what = "a group on Team" if x.get("kind") == "team" and x.get("group") else MENTION_KIND.get(x.get("kind"), "")
+        where = f" in {x['where']}" if x.get("where") else ""
+        extra = " (add `--file <absolute path>` for a file)" if x.get("kind") in ("team", "session") else ""
+        lines.append(f"- @{x.get('label')}: {what}{where}. To write to it: `{x.get('command')} \"<text>\"`{extra}")
+    return ("[Harness: the message above names these with @. When it asks you to send, pass on or ask something to "
+            "one of them, write the text yourself and run its command (a Team message goes out in the user's name, "
+            "as written). Do not send anything the message does not ask for, and say in your answer what you sent "
+            "to whom.]\n" + "\n".join(lines))
 
 
 VOICE_WAIT_S = 1800.0                                  # a transcription never holds the session longer than this
@@ -1018,6 +1286,13 @@ def approvals_dir() -> Path:
     return config.STATE / "approvals"
 
 
+def _approval_timeout(timeout_s: object) -> int:
+    try:
+        return max(30, int(float(timeout_s)))       # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return int(approval_mcp.DEFAULT_TIMEOUT_S)
+
+
 def approval_args(sid: str, path: str, timeout_s: object) -> list[str]:
     """`--mcp-config <file> --permission-prompt-tool mcp__maxxing-approval__approve`: Claude Code asks our approval
     MCP server (approval_mcp.py) before every tool call that is not pre-allowed. The file is
@@ -1025,10 +1300,7 @@ def approval_args(sid: str, path: str, timeout_s: object) -> list[str]:
     --strict-mcp-config (both are read)."""
     folder = approvals_dir() / "config"
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        timeout = max(30, int(float(timeout_s)))       # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        timeout = int(approval_mcp.DEFAULT_TIMEOUT_S)
+    timeout = _approval_timeout(timeout_s)
     spec = {"type": "stdio", "command": sys.executable, "args": ["-I", str(Path(approval_mcp.__file__).resolve())],
             "env": {"MAXXING_APPROVAL_DIR": str(approvals_dir()), "MAXXING_SESSION": sid,
                     "MAXXING_AGENT_PATH": path, "MAXXING_APPROVAL_TIMEOUT": str(timeout)}}
@@ -1104,7 +1376,7 @@ HUD_PREFACE = ("[Sent from the HUD: a small floating window over the user's scre
                "Never edit the original capture.]\n\n")
 
 
-def _idle_compact(m: dict, item: dict, cfg: dict, now: float) -> tuple[str, int] | None:
+def _idle_compact(m: dict, item: dict, cfg: dict, now: float, window: object = None) -> tuple[str, int] | None:
     """Idle compaction: (time away, context in k tokens) when a user message comes back to a big session whose
     prompt cache has expired (last call more than `idle_compact_after_s` ago). The history would be re-sent
     uncached anyway: summarizing it now costs that once, and every later turn starts from a small seed."""
@@ -1118,9 +1390,12 @@ def _idle_compact(m: dict, item: dict, cfg: dict, now: float) -> tuple[str, int]
         return None
     if not math.isfinite(after) or not math.isfinite(last):
         return None
-    if limit <= 0 or after <= 0 or not last or ctx < max(limit, IDLE_COMPACT_MIN) or now - last < after:
+    if limit <= 0 or after <= 0 or not last or now - last < after:
         return None
-    if base and ctx - base < max(limit, IDLE_COMPACT_MIN) // 2:
+    limit = resume.fit(max(limit, IDLE_COMPACT_MIN), window)
+    if ctx < limit:
+        return None
+    if base and ctx - base < limit // 2:
         return None                                    # mostly fixed context: a summary would save nothing
     if (item.get("kind") or "user") != "user" or item.get("source") in ("system", "cron") or item.get("steer") \
             or item.get("plan_approved"):

@@ -6,9 +6,11 @@ section: Extending
 A page extension adds a full page to the app, served at `/x/<id>`. It is a plain JavaScript
 module – no build step – plus an optional Python API.
 
-Where it appears: every page is listed under **Extensions** in the sidebar (the `/x` page). Click the
-**pin** at the top right of a page (or on the Extensions page, or turn on **In the sidebar** in
-Settings -> Pages) to give it its own sidebar entry, right below Extensions; click it again to unpin.
+Where it appears: the pages you pin sit in the **Extensions** folder at the end of the sidebar's pages: click
+**Extensions** to unfold or fold it (it stays as you left it), drag a page in it to reorder. Folded sidebar: the Extensions icon opens the same list beside it; on a phone, the
+folder is in the menu of the left drawer. Every page, pinned or not, is listed in Settings -> Pages (**Open page**) and
+found by the search (Ctrl K). Click the **pin** at the top right of a page (or turn on **In the sidebar** in Settings ->
+Pages) to put it in the folder; click it again to take it out. No page pinned: no folder.
 
 ```
 /root/maxxing/extensions/notes-board/
@@ -144,7 +146,8 @@ export function mount(el, ctx) {
 ### Styling
 
 The page gets the app's **UI kit**: CSS classes that look exactly like the rest of the app and follow the theme,
-the accent color and the density by themselves. Prefer them to hand-written styles:
+the accent color, the density and the material by themselves (with **Glass**, in Settings -> Appearance, cards,
+tiles and secondary / outline buttons become liquid glass like the app's). Prefer them to hand-written styles:
 
 | Classes | |
 |---|---|
@@ -162,21 +165,22 @@ the accent color and the density by themselves. Prefer them to hand-written styl
 
 Icons come from `ctx.icon(name)`; use them instead of emoji. Your own CSS always wins over the kit, and the app's
 CSS variables are there for the rest: `--background`, `--foreground`, `--card`, `--border`, `--muted`,
-`--muted-foreground`, `--primary`, `--primary-foreground`, `--success`, `--warning`, `--destructive`. HTML widgets
-get the same kit. Inputs of the kit are 16 px on phones (no zoom on iPhone).
+`--muted-foreground`, `--primary`, `--primary-foreground`, `--success`, `--warning`, `--destructive`, the quiet fills
+`--fill-1` (a soft background) and `--sunken` (a recessed zone). HTML widgets get the same kit; their `<html>` carries
+`data-theme` and `data-material` (`solid` or `glass`). Inputs of the kit are 16 px on phones (no zoom on iPhone).
 
 ## 4. Test and load
 
 - Python side: call `handle()` directly (see the test snippet in
   [Dashboard widgets](dashboard-widgets), with `api.handle(ctx, "GET", "notes", {}, None)`).
 - JavaScript syntax: `node --check page.js` if Node is installed.
-- **Settings -> Pages -> Rescan**, then open the page from the sidebar (Extensions, or its own entry once pinned). Errors appear on the
+- **Settings -> Pages -> Rescan**, then open the page from its **Open page** link there (or from the Extensions folder once pinned). Errors appear on the
   extension's row.
 
 
-## Office views of the Agents page
+## Overview views of the Agents page
 
-An extension can also bring a **view of the Office** (the overview of the Agents page): it is listed in the Office's
+An extension can also bring a **view of the Overview** (the page of the Agents page with every agent at its desk): it is listed in the Overview's
 view menu after Classic and Space. **Create my custom view**, at the end of that menu, opens a session
 that builds one with you.
 
@@ -198,15 +202,15 @@ that builds one with you.
 
 | In the frame | |
 |---|---|
-| `maxxing.onData(fn)` / `maxxing.data` | the Office, given at once and again at every change: `{lang, new_agent_route, projects: [{name, emoji, color, agents: [...]}]}`, projects and agents in the user's order, `color` = the project's color (hex). Each agent: `path`, `project`, `topic`, `name`, `display_name`, `description`, `enabled`, `model`, `status` (`running`, `waiting`, `unread`, `failed`, `off`, `idle`), `status_text` (in the UI language), `running`, `waiting`, `unread`, `cost_today`, `last_run` (`{at, kind, ok, text}`, text cut at 300 characters), `avatar` (its 6 parts), `avatar_svg` (its pixel character as SVG markup: `img.src = "data:image/svg+xml," + encodeURIComponent(a.avatar_svg)`), `route` |
-| `maxxing.navigate(route)` | opens a route of the Agents page: an agent's `route`, or `new_agent_route` (New agent); other routes are ignored |
+| `maxxing.onData(fn)` / `maxxing.data` | the Overview, given at once and again at every change: `{lang, new_agent_route, projects: [{name, emoji, color, agents: [...]}]}`, projects and agents in the user's order, `color` = the project's color (hex). Each agent: `path`, `project`, `topic`, `name`, `display_name`, `description`, `enabled`, `model`, `status` (`running`, `waiting`, `unread`, `failed`, `off`, `idle`), `status_text` (in the UI language), `running`, `waiting`, `unread`, `cost_today`, `last_run` (`{at, kind, ok, text}`, text cut at 300 characters), `avatar` (its 6 parts), `avatar_svg` (its pixel character as SVG markup: `img.src = "data:image/svg+xml," + encodeURIComponent(a.avatar_svg)`), `route` (its page), `chat_route` (its conversation, opened next to the Overview) |
+| `maxxing.navigate(route)` | opens a route of the Agents page: an agent's `route` or `chat_route`, or `new_agent_route` (New agent); other routes are ignored |
 | `maxxing.app(path)` | a read-only GET of `/api/agents/layout` (the raw order and colors); any other path is refused |
 
 - The frame grows with `maxxing.resize(px)` (up to 6000 px). Make it work in light and dark (`maxxing.theme`) and on
   a phone.
 - What the view sees: your agents' names, roles, states and the start of their last results. As for any extension,
   it is code you trust: do not load scripts from sites you do not trust.
-- If the extension is turned off, deleted or in error, the Office shows Classic (the choice comes back with it).
+- If the extension is turned off, deleted or in error, the Overview shows Classic (the choice comes back with it).
 
 ## 5. Community extensions
 

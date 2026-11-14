@@ -5,6 +5,702 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
+## 2.0.0-alpha.151 - 2026-11-14
+
+- Chips: one component `web/src/features/chips/Chip.tsx` (`Chip`, `ChipData` kinds session/agent/team/group/all/
+  command, `findNames`, `findCommand`, `withChips`, `ChipBackdrop`). In a textarea the chip is a backdrop: the same
+  text, transparent, with a tint under each span, mirrored from the textarea's computed font/padding/width and scroll;
+  the textarea keeps drawing text, caret and selection. Used by the sessions composer (`/` command + picked `@`), the
+  agent conversation box (`/`) and the group box (`@handle`, `features/agents/mentions.tsx` now builds on it).
+- The `mx_user` log line keeps the resolved mentions (`runner._mentions_shown`: kind, ref, label, group, avatar; never
+  the command); the `user` event carries them as `mentions` (`SentMention`), drawn by `ChipText` in `UserMessage`.
+  `mentions.resolve` adds the agent's `avatar`; `mentions.candidates` labels Team names with `_plain()` like `resolve`
+  (the written `@name` is found again). A sent `/name` is a chip only for a skill of its topic (`ChipText path`).
+  Unsent bubbles carry their mentions (`Pending.mentions`).
+
+- Memory: `memory.files()` adds `heavy` (bytes > `max_bytes(limit)` = limit x 1024 / `LINES_PER_KB`, 1 KB for 10
+  lines) and `over` is now "too many lines OR too heavy"; `/api/memory` and `maxxing memory --json` add `max_bytes`;
+  `compact_prompt` names both limits; skills `memory` (one or two lines per bullet) and `memory-compaction` (weight,
+  how to shorten a heavy file). No new setting. Why: Claude Code re-reads the instruction files at each process
+  start (`--resume`, attachment `instructions` with `changed: true`, reason `session_start`) and attaches every
+  changed file IN FULL; a turn is a new process unless it joins a live one, so each edit of an imported `memory.md`
+  costs its whole size in every session of the folder at their next turn. Measured here: 71 KB = +32k tokens per
+  edit, three edits between two automatic compactions (130k on a 200k window). No switch for this in the CLI.
+- Sessions: the `init` event carries `same: true` when its turn runs in a Claude process that already ran one
+  (`runner.py` stamps the raw line `mx_same_proc`, after `clip_event`, from `_Proc.inits`). The page (`log.ts`
+  `fold`) marked every running task `interrupted` at each `user` event (true before stream-json input, when a turn
+  was a process); it now does it at the `init` that follows a typed message and has no `same` (`turnOpen`, `cut`,
+  `headNew` in `LogState`, used by `foldBefore` when the turn straddles two pages). Logs written before have no
+  stamp: their tasks read as before. Mock: `same` on the turn of a session with its background agent.
+- Runner, reuse of the live process: `launch` differed as soon as `mcp_auto.plan` did (the hint of the system
+  prompt lists the servers left out), so a handed-over message got a new process for any drift of the plan. Now
+  `proc_core` (the command line built with `NO_PLAN`, + cwd, env, the `mcp_auto` switch) and `proc_plan` are kept
+  next to `proc_launch`: same core and `mcp_auto.missing(proc_plan, plan) == []` -> the process stays. `Plan.asked`
+  = servers of the pool named by the message or by `mcp_loaded`. A turn that joins a live process (steer too)
+  passes `proc_plan` to `_mcp_after`: `given` is what the process has, not what a new one would get.
+
+## 2.0.0-alpha.150 - 2026-11-13
+
+- Documents: `maxxing/documents.py` (stdlib only: zipfile + ElementTree) reads OOXML and ODF: `read(path)` ->
+  `{type: text|slides, markdown}` or `{type: sheets, sheets: [{name, rows, truncated}]}`, `media(path, name)` for a
+  picture of the package; `Unreadable(unsupported|too_large)`. Guards: XML parts capped, 8 s deadline, DTD refused,
+  text escaped, links http(s)/mailto only, pictures png/jpg/gif/webp/bmp only. Routes `GET /api/files/doc`
+  (413 / 415) and `/api/files/doc/media`. Web: kind `document` (`kinds.ts`, `isSheets` / `isTextDoc`),
+  `features/files/docs.tsx` (`DocView`, `SheetsView`), `MarkdownView` / `MarkdownReader` take `image` (a ref of the
+  Markdown -> URL).
+- PDF pages: `GET /api/files/pdf` (`{pages, ratio, mtime}`, 415 without poppler / ffmpeg) and `/api/files/pdf/page`
+  (`n`, `w` mapped to 640 / 1280 / 2048, WebP cached in `state/thumbs`). `_pdf_thumb` renders through an uncompressed
+  TIFF (0.04 s instead of 0.33 s for the PNG; ~0.35 s per page with the WebP). Web: `PdfView` keeps the iframe when
+  `navigator.pdfViewerEnabled` and the pointer is fine, else `features/files/pdfPages.tsx` (pages near the screen
+  only, zoom 1-4 by pinch / double tap / Ctrl + wheel, the picture asked again at the zoom once the fingers are up,
+  `data-zoomed` holds the viewer's swipe); a 415 falls back to the iframe.
+- Web, file viewer speed: the viewer's chunk is loaded by `features/files/viewerLoad.ts` (`loadFileViewer`, with
+  the `files` words) and mounted by `AppShell` WITHOUT Suspense: React keeps a fallback it has shown for 300 ms
+  (even `null`), which delayed every first opening. It is warmed by the last step of `startIdlePrefetch` and by a
+  delegated `pointerover` on `[data-mx-file]` / `#mx-file=` links (the chunk only, no request about the path).
+  `warmLazy()` (`viewers.tsx`) does the same for CodeMirror and Markdown: warmed when the file opens
+  (`warmCodeEditor`, `warmMarkdown`), rendered directly once loaded. `ViewerPane`: a name with a known extension
+  (`kind !== 'binary'`) no longer waits for the probe (`eager`): `/read`, `/stat`, `/doc`, `/pdf` leave with the
+  listings, and the first answer shows the file (the probe still decides when it says folder or missing). The
+  probe's listings seed the stamps (`seedFileStamps`), a stamp asked `within` a folder also seeds the plain one,
+  `prefetchMedia` (thumbnail hover) asks the stamp first (`fileStamp`) so it loads the URL the viewer uses.
+  `ImageView` fetches the original after the preview only when `canPrefetch()`. `PdfPages` starts from the
+  screen's width (it asked the first pages at 2048 then again at 1280 on a phone). Not changed: video Auto quality.
+
+- Web, surface levels (`styles/globals.css`): the surfaces come from one lightness scale per theme (`--l-frame`
+  `--l-list` `--l-content` `--l-card` `--l-float` `--l-muted` `--l-accent`) and a hue/chroma pair (`--sf-h`, `--sf-c`;
+  `[data-tint='tinted']` only changes the pair). New token `list` (`bg-list`, second bar). Shell classes: `mx-shell`
+  (AppShell root = frame), `mx-frame` (sidebar), `mx-list` (second bar), `mx-content` (`#main`: inset panel, 8 px
+  margin, `--shadow-panel`, desktop only), `mx-bar` (sticky headers), `mx-glass` (floating layers: popover, dropdown,
+  select, dialog, alert dialog, sheet, palette, `/` menu, session preview). Light mode: hover/selected rows on the bars
+  rise to white (`--accent` redefined under `.mx-frame, .mx-list`). Sidebar and second bar lost their right border.
+- Web, sessions: `TaskBar` (pill above the composer, `data-testid="task-bar"`) removed; `RunningRow` (Thread.tsx)
+  shows the running tasks itself through `TasksRunning` (Tasks.tsx, `data-testid="tasks-running"`, same popover,
+  `runningTasks()`): the count leads when nothing else is pending or when the pending tool launched one of them,
+  otherwise "· N subagents" after the tool (`tasks.short*`). `RunningRow tasks={false}` in `PreviewWorking` (the
+  preview lists them already).
+- Web, fills: `--fill-1` / `--muted` / `--accent` are now `color-mix` veils of `--foreground` (`--a-fill-1/2/3`:
+  3 / 5.5 / 8.5 % light, 3.5 / 6.5 / 10.5 % dark), `--sunken` = `--sidebar` at 60 %; utilities `bg-fill-1`,
+  `bg-sunken`. Codemod: `bg-muted/20-30` → `bg-fill-1`, `bg-muted/40-70` and `bg-accent/30-70` → `bg-muted`,
+  `bg-card/60` → `bg-card`, `bg-background/40-80` in quiet zones → `bg-sunken` (overlays over text kept). New test
+  `test_fills_come_from_the_scale`. `--secondary` stays solid.
+- Web, liquid glass (Glass material only): `.mx-lg` (Card, Composer box), `.mx-lg-btn` (button secondary/outline),
+  `.mx-lg-pill` (`navRow` active, `Segmented` active); vars `--lg-fill/-sheen/-rim-hi/-rim-lo/-rim-mid/-spec/-drop`;
+  the content panel goes to 58 % in glass so the wallpaper shows through the cards.
+- Web, material: `useUI().material` = `solid | glass` (localStorage `mx-ui`, mirrored by the `index.html` first-paint
+  script as `html[data-material]`), Settings -> Appearance row. Glass = accent wallpaper on `.mx-shell`
+  (`--wall-a/-b`), translucent `color-mix` on the classes above, `backdrop-filter` only on `.mx-bar` and `.mx-glass`
+  (DESIGN.md rule relaxed for this opt-in; `test_no_backdrop_blur` skips the glass rules of `globals.css`),
+  `--glass-edge` inset highlight; disabled under `prefers-reduced-transparency`. Not part of the server-shared look (`/api/settings/look`).
+- Web, glass 2nd pass: wallpaper in `--wall`, also on `.mx-wall` (the phone `Drawer`, opaque) and on the folded list
+  `.mx-list.mx-list-peek` (list tint over the fixed wallpaper: opaque, same look as the list kept beside the page);
+  fills raised (cards 62/56 %, message box 86 %, `.mx-glass` 86 % with the cards' sheen + gradient rim); the
+  `.mx-lg-pill` halo is neutral; the message box in focus lights its rim instead of `border-ring` + ring; the glass
+  `box-shadow` replaced the ring of `.mx-lg-btn` / `.mx-lg-pill`, so a soft `:focus-visible` outline instead.
+- Web, gliding selection: `ActiveMark` now renders the active row's pill (`bg-accent` / `.mx-lg-pill`, `-z-10` in the
+  `isolate` row) next to its bar and FLIPs both; `navRow(active)` no longer paints a background. `Segmented`: one
+  absolute highlight placed from the chosen option's offsets (ResizeObserver: options may wrap), FLIP translate +
+  scaleX on change; no animation with reduced motion.
+- UI kit twins (rule a69): `ui-callout` fill = `--fill-1`, `ui-tile` = `--sunken` (hover `--accent`); Glass material
+  = the app's liquid glass on `ui-card`, `ui-tile`, `ui-btn.ui-secondary/.ui-outline` (`html[data-material='glass']`:
+  the app's `<html>` for page extensions; the widget frame's `<html>`, set by the bridge from `material` in the
+  fragment and the `theme` message). `HtmlWidget` also sends `--fill-1`, `--sunken` and the `--lg-*` variables, and
+  re-sends on a material change.
+- Web, entrance order (top to bottom): boot `--bd` = height under the logo (index.html, no longer the radial
+  distance) and also set on `.mx-rise` / `.mx-unfold` / `.mx-fade` (they played hidden under the loader before);
+  session tree `--i` = running row index (`rowAt`, was `pi * 2 + ti + 1`: a project's 3rd topic rose with the next
+  project); `SectionStack` cards after the section title; `.mx-card-in` sets `--cd` and its rows / fades / chart /
+  end dot wait for it (the dot's `[animation-delay:720ms]` was overridden by `.mx-pop` and played at once).
+
+## 2.0.0-alpha.149 - 2026-11-13
+
+- Web, file viewer loaders: `features/files/skeletons.tsx` (`FileSkeleton({kind, preview})`: picture, PDF page,
+  prose, table, numbered code lines, media, card; `CodeSkeleton` / `ProseSkeleton` / `MediaSkeleton` moved there
+  from `viewers.tsx`), used by `Viewer.tsx` (probe and version pending), `FilePreview.tsx`, `pages/files/FileView.tsx`
+  and `HtmlView`. `.mx-file-wait` (`globals.css`): fades in after 120 ms, one `::after` band sweeps by transform
+  (`mx-sweep`); bones are `bg-muted-foreground/15` (visible in the dark theme).
+
+## 2.0.0-alpha.148 - 2026-11-13
+
+- Copies, review before integration: a pull request from a fork or from outside the repository (`fork` / `outside`)
+  gets neither the clone's ignored files (`.env`, `.worktreeinclude`) nor its prepare command (`npm ci` runs the
+  PR's scripts with the server's rights); a copy whose session could not be made (`_copy_env` error,
+  `store.create` failure) is removed with its branch (`worktrees.undo`). `maxxing sessions new --file` checks the
+  files before the session exists. `agents.voice_heard` compares real paths (workspace behind a link) and runs
+  under the agents lock (a transcript faster than `_fire`'s post waits for it). Agents' `/` menu: "This
+  conversation"; "Default" in an agent's model picker shows the agent's model (`defaultModel`). Tests:
+  `test_worktrees.py::test_a_strangers_pull_request_runs_nothing_before_it_is_read`,
+  `::test_a_copy_that_fails_halfway_leaves_no_folder_nor_branch`, `test_mentions.py`, `test_agent_voice.py`.
+- `maxxing sessions new TOPIC [TEXT...]` (`cmd_sessions._new`): `<project>/<topic>` or a full path, an agent path
+  refused (`agents run`); `service.check_hops` (split from `relay_message`) refuses before anything is created, then
+  `create_session` (title = `titles.provisional` of the text unless `--title`, `auto_title`) and the first message goes
+  through `relay_message` (from a turn: `relay` with sender and hops, source `session`; from a shell: `cli`). Not in
+  `agent_guard.CLI_ALLOWED`: refused in a sandboxed agent. Template `CLAUDE.md` row of `maxxing sessions` updated:
+  **upgrade note at the version** - replace the row starting with `` | `maxxing sessions send`` by the template's.
+  Tests: `tests/test_mentions.py::test_sessions_new_…`.
+- Agents' box like a session's. `POST /api/agents/{p}/{t}/{a}/run` takes `voice` (a file under the agent's
+  `attachments/`, checked like the attachments) and `effort` (a new conversation's); `agents.fire(voice=, effort=)`
+  (owner's words only) hands `voice_path` to `service.send_message` / `create_session` (an empty message: no "Run
+  your routine."), the run message of the thread carries `voice: [path]`, and owner messages that wait keep both.
+  `voicejobs._run` calls `agents.voice_heard(path, audio, job)` for an agent path: the run message whose `voice` has
+  the recording gets the transcript as `text` (or `voice_error`). Web: `OwnerMessage` shows `VoiceNote` (exported from
+  `Items.tsx`); the agent `Composer` passes `onVoiceMessage` (upload, then run; refused = the recording comes back
+  attached), its `ModelPicker` has the effort and patches the conversation's session once there is one
+  (`useSession(chat_session)`), and the "/" menu comes from `useSlashCommands` + the new `pages/sessions/useSlashMenu.tsx`
+  (the menu of a box without "@"). Tests: `tests/test_agent_voice.py`.
+- Failed turn as one card (`web/src/pages/sessions/Cut.tsx`). `normalize.py`: an `assistant` event written by
+  Claude Code in place of an answer (raw event with `error`: `rate_limit`, `server_error`, `authentication_failed`…)
+  carries `error`; the `note` of `mx_done` with a non-zero code (not stopped, not timed out) carries `failed: true`.
+  `log.ts` folds them into `cut` on the turn's `result` item (or on the `note` item when the process died before any
+  result): the refused answer is no longer an `assistant` item, so its user message counts as unanswered.
+  `endingCut(items)` = the failed turn the thread ends on; only that card has Resume / the model picker
+  (`CutContext`, set by `Column.tsx`), and the `session.error` banner above the composer is hidden then. A result
+  that is not ok without either mark (a stopped turn) stays the plain result line. Texts: dictionary group `cut`
+  (not in the first load). The mock writes failed turns like the server.
+- `MediaPlayer.tsx` `seek()`: writes `last.current.t` at once (it was only set by `timeupdate`), and while a
+  source switch or a reload is on its way (`resume.current` set, `duration` NaN on the element) it moves the time
+  to resume instead of being dropped. Before, the stall of a seek made the player take the Auto copy and resume at
+  the time before the seek.
+- Separate copies (`maxxing/worktrees.py`, plan `code-worktree-pr`): session meta `worktree`, `runner._cwd` runs the turn
+  in the copy and `_copy_note` adds a line to `--append-system-prompt`; `titles.refine` / `update_session` rename the
+  branch (`worktrees.rename_for_title`) until it has an upstream; `move_session` refuses (`409 has_copy`); routes
+  `/api/code/copy-repos`, `/api/code/copy-prefs`, `/api/sessions/{id}/copy{,/merge,/remove,/prepare-log}`,
+  `/api/code/copies`, `/api/code/pr-session`; `<state>/worktrees.json` (per repository `prefix`, `prepare`,
+  `copy_env`), `<state>/worktrees/<sid8>.log`. `search.SKIP_DIRS` and `backup.PRUNE_DIRS` skip `worktrees`.
+- Pull requests: `gitview.github_pull`, `pull_comment`, `pull_review`, `pull_merge`, `pull_close`; `_gh_send` takes a
+  method (PUT merge, PATCH close; 405/409 -> `409 refused`); `github_pulls(full, state)` adds `state`, `outside`,
+  `review_me` (requested reviewer among the server's accounts); `codediff.parse_patch` shared by `codediff.diff` and
+  the PR files. Routes `/api/git/pull`, `/api/git/pull/{comment,review,merge,close}`, `/api/git/pulls?state=`.
+- Web: `features/code/{copyApi,prApi}.ts`, `NewCopy.tsx` (new session), `CopyBar.tsx` (bar + end window + header
+  mark), `PrPane.tsx` (viewer paths `mx-pr:<owner/name>|<n>[|files|checks|file|<path>]`, one pane per PR), `DiffRows.tsx`
+  (diff rows shared with `ChangesPane`), `PrReviewBlock.tsx` (` ```pr-review ` in `markdown.tsx`; PR text is rendered
+  with plain code blocks). Git page: `PullList` (filters, opens the PR view, also on a clone of a GitHub repository),
+  `CopyList`. i18n namespaces `copy`, `pr` in the `code` group. Tests `test_worktrees.py`, `test_pulls.py`
+  (`_conn_helpers._Server` answers PATCH).
+- Copies, round 2 (needs reported by T3 Code users): `.worktreeinclude` (`worktrees._copy_included`: `ls-files
+  --others --ignored --exclude-from` then `check-ignore`, capped `INCLUDE_MAX` / `INCLUDE_BYTES`); a block of 10 ports
+  per copy (`_free_ports`, meta `port`, `MAXXING_PORT` + `MAXXING_COPY_PATH` for turns - `runner` - and the
+  preparation, `_copy_note` names them); `gitview.merged_pull` + `branch_status.merged_pr` (the last merged PR of a
+  branch with no open one) and `copy/remove {merged_pr}` (looked up again server-side; branch deleted when its tip
+  is in the PR's head, so squash merges count); `api/code._pr_text` appends the repository's pull request template
+  (`PR_TEMPLATES`). `codediff.repo_head` reads `remote.origin.url` (no `insteadOf` rewrite, as `gitview` does).
+- Workspace template: `CLAUDE.md` (separate copy, PR view) and the help index line `35-code.md`: carried over by the
+  upgrade note of the next version.
+- PR watch (`maxxing/prwatch.py`, loop in `api/code.py` startup, `MAXXING_PRWATCH_LOOP=0` in tests): `scan()` every
+  `INTERVAL`; events `checks:<sha>` (all checks of the head completed, some in `FAILED`), `conflict:<sha>`
+  (`mergeable` false / `dirty`), `c:` / `r:` / `l:<id>` (issue comments, reviews with a body or changes requested,
+  line comments; OWN_ROLES only, never bots nor `_my_logins`); one `send_message(..., source="github")` per round,
+  `MAX_WAKES` per `WAKE_WINDOW`, never while running; state `<state>/prwatch.json` (`seen`, `wakes`, `updated`,
+  `done_sha`, `new` = first sight is history). Meta `worktree.watch` (`PUT /api/sessions/{id}/copy/watch`), `watch`
+  in the copy status (false for a fork's / outsider's PR). Web: eye in `CopyBar`, source label `GitHub`.
+- PR text by Claude: `POST /api/code/pr-text` (`_pr_draft`, `PR_PROMPT`, `_conversation` reads `mx_user` and `result`
+  lines of the session log); `_ask_claude` shared with `_message`. The end window of a copy always opens for
+  "Open a PR" (title + description fields, filled once, typed text wins); `codeApi.pr(repo, {title, body})`.
+- Big diffs: `codediff.MAX_LINE_CHARS` cuts a very long line until "show all" (`cut`); PR files are parsed whole
+  (`parse_patch(full=True)`, the PR view has no "show all"); a text file without GitHub patch is `too_big` (not
+  `binary`), the PR view links to GitHub; `files_total` = `changed_files` when GitHub lists fewer.
+
+## 2.0.0-alpha.147 - 2026-11-13
+
+- Audit fixes (straight to `main`, merged here): `approvals.py` survives a WebFetch request whose URL does not
+  parse; `sessions/opened.py` refuses an id with a final newline (`$` -> `\Z`); `cmd_agents.py` `show` reads the role
+  file with `errors="replace"`, `set` catches `RecursionError` on a too deeply nested JSON value; `iconBtn`
+  `pointer-coarse:size-10`; `MessagePopup` truncates a long chat name. Tests in `test_approvals.py`,
+  `test_sessions.py`, `test_agents_cli.py`.
+- Side questions: `aside.ask` no longer refuses a thread whose `fresh` flag is still set when the session is
+  `running` (`fresh` is cleared only when a turn ends, so the whole first turn of a thread - new session, or the
+  thread after a compaction - answered 409 `no_thread`). The fork is tried; if Claude has not written the thread yet
+  (`RESUME_LOST` on a first turn) the answer is 409 `no_thread` "This session is only starting". Checked with the
+  real CLI: `--resume <csid> --fork-session` finds a thread 2 s into its first turn. Test:
+  `test_sessions.py::test_side_question_during_the_first_turn_of_a_thread`.
+- Web, session shortcuts window (`ShortcutsHelp` in `pages/sessions/index.tsx`): rows `/` (slash menu), `@`
+  (mentions), Mod+Shift+V (plain paste, `plainPaste` of `Composer.tsx`) and Ctrl+J only when `settings.code_mode`
+  (the key is caught by `Column.tsx`, Ctrl on macOS too); i18n `kbd.*` (the rows of the window, group `composer`:
+  out of the first load, which was over `test_web_first_load`'s budget).
+- Security: `codediff.diff()` and `raw_diff()` pass `--no-textconv` (a `diff.<name>.textconv` from `.git/config`
+  bound by `.git/info/attributes` ran with the server's rights: `GIT_ATTR_SOURCE` only covers the worktree's
+  `.gitattributes`, `--no-ext-diff` only `diff.external`); test `test_a_diff_never_runs_the_repository_textconv`.
+- Workspace template: `templates/workspace/CLAUDE.md` gets a paragraph under "Use what Harness already has" (the
+  Code mode terminal, opened only by the user: a terminal opened through `POST /api/term` is not in the drawer, whose
+  tabs are per browser in `mx-terminals`; Revert / Changes view) and Hermes, OpenClaw on the `maxxing import` line;
+  the help topic index: line `04-sessions.md` (Tabs or Zones, intelligence, `/`, `@`), line `29-team.md`
+  (`maxxing team send`). Templates are copied only when missing: the upgrade note of the next version must carry
+  these three edits over (check: the paragraph is absent; do: insert it from the shipped template).
+- Web, sidebar last line: Settings is an `iconBtn` like the three others (`Sidebar.tsx`, `lead` of `StatusBlock`:
+  tooltip + `aria-label`, `data-tour` kept), `SidebarLook` centres the four (`justify-center gap-2`); folded bar unchanged.
+- Web, Sessions, Tabs <-> Zones: `useModeMotion` (pages/sessions/tabMotion.ts, `MODE_MS` 340, 35 ms between
+  sessions). The places "before" are read during the render that changes `tabs` (the tab chips `[data-tab]` of
+  `sessions-bar` when leaving Tabs, the columns when leaving Zones: the commit has not moved anything yet), the
+  animations start in a layout effect: to Zones each column slides from its chip's x and unrolls (`clip-path`
+  inset from the top, opacity); to Tabs each chip rises from its column's x and the shown session slides from its
+  column's centre. Web Animations, `fill: backwards` for the delays, nothing under `prefers-reduced-motion`,
+  nothing on load. The page's `bar` ref moved above the hook.
+- Sessions, wording only: "Add now" is "Add to plan" (`sessions.queue.inject`, `injectTip`, `sessions.msg.injected`
+  = "added to the plan"; docs/user/04-sessions gains its paragraph). Route, signal and runner unchanged
+  (POST /api/sessions/{id}/inject, SIGUSR2, `runner_caps`).
+- Web, sidebar status line: `components/shell/mood.ts`. `pickMood(facts)` (pure) returns ONE sentence (`key`, `vars`,
+  `when` = times formatted by the hook, `level` ok / note / warn / error / idle, `to`, `issues`), most pressing first:
+  open health problems (one sentence per issue `code`, `ISSUE_MOOD`; several = their count; an unknown code keeps
+  `health.issues`), quota at 100 %, CPU >= 85 %, RAM >= 90 %, quota forecast, quota >= 90 %, disk >= 80 %, feed unread
+  > 10, sessions unread >= 5, agents attention, Team unread >= 5, then the calm ones (just restarted, sessions
+  running, 5-hour quota that will hold, night, 30 days up, `shell.allGood`). `forecast(window, length, now)`: the
+  usage so far as a straight line to `resets_at` (window start = reset - 5 h / 7 d); says nothing before 15 % of the
+  window or under 20 % used. `useMood()` gathers the queries the shell already runs (Team / Agents only when their
+  page is on) and `useStatusLine()` (HealthIndicator.tsx) maps it to the line: `note` = amber dot without the alert
+  background, the line is a link to `to` unless `issues` (problems window); two lines (`line-clamp-2`, whole text in
+  `title`), masked in presentation mode when it holds figures; no chevron any more. Texts: `mood.*`, a
+  dictionary group of their own (`mood` in i18n/groups.ts, fetched by `useMood` once the shell shows: the core dictionary
+  is at its first-load budget, test_web_first_load); "Checking…" while they download.
+  `shell.claudePct` and `usePlanPct` removed (unused). Bench: one capture per case with `page.route` on
+  /api/system/health, /api/usage, /api/feed, /api/workspace/tree.
+- Sessions: `ViewSwitch` (computer: one button left of New session, after the layouts button which comes and goes with the
+  mode; its icon = four square bars whose shape follows `data-kind`, moved by the transitions of `.mx-view-glyph` in
+  globals.css, so nothing plays at page load; `currentColor`, the colour of the ghost icon buttons beside it) and `TabsToggle` (phone) in `pages/sessions/Tabs.tsx`; the store's `tabs` defaults to true and `merge` sets
+  it false for a stored `mx-sessions` key without the field (a browser from before keeps its columns). The Sessions
+  page has no `PageHeader` on a computer (`useDocumentTitle` called directly): one `sessions-bar` holds the tabs and
+  the actions, measured by a ResizeObserver (`tight` = New session and Waiting without their label). Removed:
+  `SubtitleWithBadges`, `WhereBadge`'s `generic`, keys `sessions.description`, `where.howTo`, `where.topicHelpAny`,
+  `tabs.toggle/on/off`.
+- Feedback: `POST /api/settings/feedback/check` (`feedback.check`: one read-only `claude -p`, tools Read/Grep/Glob,
+  cwd `system/help` when it exists, default model, 90 s, one at a time; verdict `send | answer | self` with `answer`,
+  `prompt`, `topic`; fail-open: anything unclear is `send`); `forced` on `POST /api/settings/feedback` appends
+  `FORCED_NOTE` to the message (the cloud is unchanged); `FeedbackDialog` answer view, session created with
+  `prompt` in `topic`; mock routes for feedback; `tests/fake_claude.py` knows `--allowedTools` / `--add-dir`.
+- Import: `importer.py` `HINTS` / `PROMPT` rewritten for Hermes and OpenClaw, `_entries` strips every single folder
+  above the export, `_plan` finds the skill folder by its `SKILL.md` (`skill_root`) and takes `memories/MEMORY.md` /
+  `USER.md` as root memory, `_apply` keeps the generated heading over an imported CLAUDE.md without one;
+  `cmd_import.py` prints `finish_prompt`.
+
+## 2.0.0-alpha.146 - 2026-11-13
+
+- Code changes (`maxxing/codediff.py`, `maxxing/gitsafe.py`, `api/code.py`, docs/dev/API.md#code): the runner photographs
+  the session's repositories before / after each turn (throwaway index -> `commit-tree`, refs
+  `refs/maxxing/<sid8>/<n>/{pre,post}`, never pushed; `Attempt.touched` = files of Edit / Write / MultiEdit /
+  NotebookEdit), log entry `mx_changes` -> event `changes`; meta `code_turn`, `code_repos` (≤ 8, also in `Session`),
+  `code_base`. `gitsafe.py` holds the stdlib-only git primitives shared with `gitview` (the runner stays stdlib-only).
+  Reads with `SAFE_GIT`; commit / push keep the repository's hooks. `maintenance.run` prunes photos > 30 days or of
+  deleted sessions. `gitview.open_pull` / `branch_status`. Revert = `POST /api/sessions/{id}/revert` (409 while running).
+- Web: `features/code/` (`ChangesPane` inside `Viewer.tsx` through `mx-changes:` paths, `useRevert`), `ChangesChip` on
+  the result line (`log.ts` hangs `changes` on the turn's result and marks the user message `changed`), `sid` in
+  `ItemCtx`, `QUOTE_EVENT` to the column's composer; undo bar inside the viewer (a toast's button cannot be clicked
+  under a modal dialog). i18n groups `code`, `term`; `toast.action` takes a duration. Showcase `code`.
+- Terminal (`maxxing/terminal.py`, `api/term.py`): config `code_mode` (read-only in `/api/settings`; `POST
+  /api/term/enable {password}` via `auth._check_current`, `/disable` closes all). Shell = `setsid -c $SHELL -l` on a pty,
+  child of the server (ends with the service; no tmux), 256 KB replay buffer, 4 max, 30 min idle reaper (`startup`).
+  WS `/api/term/{id}/ws`: cookie + same origin + one-time token (30 s); binary output, JSON `{i}` / `{r}`. Web:
+  `features/terminal/` (xterm.js 6 + addon-fit, lazy), drawer in `Column.tsx` (Ctrl+J, `/terminal`, `SessionOptions`
+  `onTerminal`), per-browser store `mx-terminals`, not for `agentRun` / paths under `agents/`.
+- Doctor: `check_stale_units` / `stale_units()` (transient services other than turns running > 7 days).
+
+## 2.0.0-alpha.145 - 2026-11-12
+
+- Sidebar: the pinned extension pages leave the page list for `ExtFolder` (`Sidebar.tsx`), after the pages; unfolded
+  state `ui.extFolderOpen` (persisted, default true); its rows have their own drag order (`useDragOrder(..., 'ext')` ->
+  `PUT /api/extensions/pins`); folded bar: a `DropdownMenu` beside the icon. `nav.ts`: `orderEntries` / `NavEntry` /
+  `useUnpinnedPages` removed, `orderPages(items, order)`, `useNavEntries()` -> `{ pages, pins, end }`; the pages'
+  drag saves `sidebar_order` without `/x/...` (old entries are ignored). `/x` (`pages/ext/hub.tsx`) removed: the route
+  redirects to `/settings/pages`, Ctrl K's Extensions entry too; Settings -> Pages loses its All pages button.
+- Team: `TeamNavExtra` keeps only the unread count (the hover button that opened the bubble list is gone). The Team
+  page's chat header gets **Open in a bubble** (`team.toBubble`, bubbles on, desktop): `useTeamUI.openChat(id)`
+  (also clears `hidden`) then back one step in the history (or `/`). `team.bubblesHiddenDesc` updated.
+
+## 2.0.0-alpha.144 - 2026-11-12
+
+- Sessions: the column menu (`DropdownMenu` of `Column.tsx`) is replaced by `pages/sessions/SessionOptions.tsx`
+  (`Dialog`, bottom sheet on touch), opened by the "..." and by the header's right click / long press:
+  `useContextMenu` takes `onOpen` (called instead of the menu at the pointer). `ColumnHeader` loses `onPlan`,
+  `onNotify`, `onHud`, `tgLinked`; `SessionMarks` shows plan / notify while on. Removed: move left / right, copy
+  ID (and their i18n keys, with `plan.toggleOn/Off`, `sessions.notify.label/off/unavailable`,
+  `sessions.grid.(un)stack`, `sessions.layout.menu`, `sessions.menu.detach`). The layout picker still gets the
+  focus (`keepFocus` = `onCloseAutoFocus` prevented while `layoutPicker === col.key`).
+
+## 2.0.0-alpha.143 - 2026-11-12
+
+- Web, list pages (`components/shell/PageList.tsx`): `PageList`/`ListHead` `search` ({value, onChange, placeholder}:
+  the 🔍 of the head filters the list; touch without `search` = the palette, `searchNow`), `actions` (buttons of the
+  list in its head), `ListChips` (one-line filters), `ListEntry` (Overview / All rows). `Page` `sensitiveTitle`, its
+  description is a `div`. Applied to Agents (`AgentsLayout/AgentsList/AgentsPage`, i18n "Office" -> "Overview", route
+  `/agents/office` kept), Team (`TeamPage/Chat/Friends/Side`), Infra, Mail (`CountBadge exact` = no 99+ cap),
+  Files (`HeaderSearch` and `useFileSearch` removed: Ctrl+K finds files), Tasks (`ProjectNav` `query`/`matched`,
+  the list search = `TaskFilters.q`), Feed, Sessions (`SessionTree` `query`, also in `SessionsPanel`).
+- Web, Git (`features/git/GitPage.tsx`): `GitNav` = the sources only (`?source=github`, `&account=<login>` with
+  several accounts); `SourceCards` = the former cards; `RepoView` in its own `Page` (title, Server | GitHub
+  `Segmented`), side column (commit, pull requests) from 1700 px, below it the commit opens in a sheet.
+- Web, Infra: place colours unused (`PlaceTag`/`PlaceIcon` neutral, `MixBar` removed), one problems pill per list
+  entry, `HowItWorks` in a `Dialog` from the header's ? (`extra` = the tab's note; `useHowItWorks` and its
+  localStorage key removed), search = the list's, project `Select` + hidden toggle + refresh icon in the header.
+- Web, touch: `TouchNav.tsx` one left drawer, level 1 = `<Sidebar drawer />`, level 2 = the page's list (`LISTS`,
+  `levelHere`, `.mx-level-in/back` in globals.css); `TouchAppButton`/`TouchSearchField` removed.
+- Web, sidebar: last line Settings + `SidebarLook` (theme, presentation) + Help (`iconBtn` in `nav.ts`); health line
+  -> `/feed` or `IssuesDialog` (one card per open issue, `ISSUE_TO`); `StatusPanel`, `HealthMeters`,
+  `HealthIssues` removed.
+- i18n: new group `composer` (`slash`, `mention`, `effort`; keys were `sessions.slash.*`, `sessions.mention.*`,
+  `sessions.effort.*`), loaded on the first key asked: keeps the first-load dictionary under its budget.
+- Sessions, safety of `sessions send` / `@`: `service.find_session` and `mentions.resolve` refuse an agent's sessions
+  (`403 agent_session`; `agents send` only); `mentions._plain` (Team names: one line, no `[]` or backticks, 64
+  chars); `service._merged_relay`: one sender = its relay kept, mixed = a preface per relayed text and `relay =
+  {hops: max}`; `runner._inject_step` raises `turn_hops` to the injected item's hops. Tests `test_mentions.py`.
+- `tests/test_web_ext_hub.py`: the touch drawer's entry comes from `<Sidebar drawer />`.
+- Sessions: meta `effort` (`spawn.EFFORTS` = low|medium|high|xhigh|max, `""` = Claude Code's default) -> runner adds
+  `--effort <level>`; `POST /api/sessions` and `PATCH /api/sessions/{id}` take `effort` (`400 bad_effort`), Session
+  carries `effort`; a hand-off copies it. Agents and crons unchanged (no effort). `tests/fake_claude.py` knows
+  `--effort`. Web: `ModelPicker` `effort`/`onEffort` (the `EffortRow` under the models, a 6-way segmented control),
+  `PatchSessionBody.effort` is an instant field.
+- Composer `/` menu: `pages/sessions/SlashMenu.tsx` (`slashItems`, `slashAction`, `SlashMenu`) + `slashCommands.ts`
+  (`useSlashCommands(path, actions)`: session commands `model|effort|plan|compact|handoff|new|rename`, then the
+  topic's skills from `GET /api/skills?path=` = `skills.for_topic()`). Composer prop `commands`: a session command
+  typed in full runs instead of being sent (only without attachments or quotes); a skill is sent as typed (Claude Code
+  expands `/name args` in `-p` mode, checked with 2.1.285). New-session form: `model|effort|plan` only.
+  Menu groups (`SlashGroup` session | here | other, `SlashCommand.group`): skills ranked topic, project, others,
+  `maxxing-*` last; with nothing typed a skills group over 6 rows shows 5 + a "+ N more" row (`SlashItem.expand`,
+  Composer `expanded`); typing: names starting with it, then names containing it, descriptions only when no name
+  matches.
+- Composer `@` mentions: `pages/sessions/mentions.tsx` (`mentionAt(text, caret)`, `mentionRows` - grouped `@session` /
+  `@agent` / `@team` with a title, folded like the `/` groups -, `usedMentions`), the
+  same list component as `/` (`SlashMenu` now takes `MenuRow[]`, `label`, `keys`, rows with an `icon`); Composer prop
+  `mentionsFor` (session id), `onSend(..., mentions)`. `GET /api/sessions/{id}/mentions` = `mentions.candidates()`
+  (sessions not archived and not an agent's, running first, 60 max; agents if `agents_page`; `team.recipients()` if
+  `team_page`). `POST .../messages` takes `mentions: [{kind, ref}]`: `mentions.resolve()` keeps known ones only (not
+  the session itself, 8 max) with the label and command computed server-side, stored on the queue item (`_merged`
+  keeps them); `runner.build_prompt` appends `mentions_note()` to the prompt (not to the logged/displayed text).
+  `maxxing sessions send TO TEXT... [--file] [--json]` / `sessions list` (`cmd_sessions.py`):
+  `service.relay_message()` + `find_session()` (id, 6+ char prefix, folded title exact then unique prefix, archived
+  last); item `relay: {hops, from, title, path}`, source `session` (from a turn) or `cli`; `build_prompt` prefixes
+  `relay_preface()`; the `mx_user` line carries `from: {session, title}` (normalize -> user event `from`, shown as a
+  link). Loop guard: the runner writes `turn_hops` (the item's hops) in the meta; `agent_guard.agent_turn()` depth =
+  max(agent depth, turn_hops), so sessions and agents share one count: `sessions send` refuses hops > `MAX_HOPS` (3,
+  429 `too_many_hops`), `agents send` keeps `agents.MAX_DEPTH`. Not in `CLI_ALLOWED`: refused in a sandboxed turn.
+  Workspace template `CLAUDE.md`: a `maxxing sessions send` row (**upgrade note: add it to existing workspaces**).
+  Tests: `test_mentions.py`.
+- Team: `maxxing team send TO TEXT... [--file P] [--json]` / `team list` (`cmd_team.py`). `team.recipients()`
+  (contacts -> dm, groups not left), `team.find_recipient(to)` (folded name `_fold`: NFKD without accents +
+  casefold, exact name / person id / chat id / address / netloc / hostname, else a unique prefix; 404 lists the
+  names, 409 the ambiguous ones), `team.send_to(to, text, files)` (409 `team_off` when `team_page` is off; dm created
+  by `create_chat`; files copied into `files_dir()` by `_attach`, removed if the send fails, then plain `send()`).
+  Not in `agent_guard.CLI_ALLOWED`: refused in a sandboxed turn. Nothing reads chats (design rule of team.py kept).
+  The command writes team.json / peers.json from its own process: `team._lock` and `teampeer._lock` are now
+  `config.ProcessLock("team")` / `ProcessLock("team-peer")` (were thread RLocks; order team -> team-peer unchanged),
+  the server's outbox worker delivers the queued event within 5 s (`_wake` is per process) and calls
+  `team.notice_outside_writes()` each pass: team.json changed by another process (signature != `_written`, set by
+  `_save`) -> `bus.invalidate("team")`. Workspace template `CLAUDE.md`: a `maxxing team` row in the CLI table
+  (**the version's upgrade note must add it to existing workspaces**). Tests: `test_team.py::test_cli_send_*`,
+  `test_a_write_from_another_process_refreshes_the_pages`.
+
+- Agents: `agent_templates.fields()` sets `sandbox: True` for every template that reads outside text: a webhook, a
+  mailbox (as before) or a web tool pre-allowed in `allowed_tools` (`reads_web()`: `Bash(curl…)`, `WebFetch`,
+  `WebSearch`), i.e. `sales`, `orders`, `watch`, `writer`, `uptime` too. Without it `Bash(curl:*)` ran unsandboxed
+  with `approvals: False` and the template's `domains` had no effect (`agent_guard.settings()` uses them only in the
+  sandbox). `--no-sandbox` / `sandbox: false` in the request still wins; existing agents are not migrated. Test:
+  `test_agent_guard.py::test_templates_that_read_the_web_are_protected`.
+- Dependencies: `server/uv.lock` certifi 2026.7.22 -> 2026.10.23 (GHSA-6q48-6c7w-9gw2), filelock 4.1.0 -> 4.2.10
+  (`voice` extra, via huggingface-hub); `templates/remotion`: `overrides.zod` 4.6.7 (GHSA-mrhx-c7xc-m3w5; Remotion
+  4.0.534 pins 4.5.4 exactly, 4.0.543 pins 4.6.7: drop the override at the next Remotion bump). The lock change makes
+  `deps._up_remotion` reinstall the shared Remotion. `THIRD_PARTY_NOTICES.md`: these two lines only (the file has
+  other drift on the JavaScript side, not regenerated here).
+- Voice: `web/src/features/voice/mic.ts` holds the microphone of the device (`localStorage` `mx-voice-mic`, never
+  sent to the server). `openMic()` (used by `useRecorder`, so by the mic button and the record test) asks for
+  `deviceId: {exact}` and, on `OverconstrainedError` / `NotFoundError`, for the default microphone, keeping the
+  choice. `useMics()` lists the `audioinput` devices (without Chrome's `default` / `communications` aliases),
+  reloads on `devicechange` and on a change of the `microphone` permission; browsers give no names before the
+  microphone is allowed: `named` is false and the row shows a button that asks for it (`MicRow` in `VoiceSetup.tsx`).
+- Sessions: the answer to `POST /api/sessions/{id}/messages` carries the Session read right after the message was
+  queued (`sent_items` lists it: state running, no pid yet). When it reached the page after the stream's `state`
+  frame of the runner taking the message, it replaced the fresher Session, and no other frame came until the turn
+  ended (the meta file is not written in between): the thread showed the message a second time as "Sending…".
+  `useSendMessage` keeps the cached Session when its `updated` is later than the answer's, and the thread drops a
+  `sent_items` entry whose `client_ids` are already on a user event of the log (`sentLeft` in `Thread.tsx`). The
+  mock puts `client_ids` on the user event of a send, as the server does.
+
+## 2.0.0-alpha.142 - 2026-11-12
+
+- `agent_cost.saved_by_claude(done)`: `thread_cost.estimated` is set only when the lost turn ended with Claude
+  Code's own exit after the runner's SIGTERM (`mx_done.code` 143, `SAVED_CODES`): after a SIGKILL (no exit within
+  5 s, OOM) or a crash Claude saved nothing in its thread, and taking the estimate off the next turn counted it 0 $.
+- `agents.on_turn_end`: `charge_unbilled(sid, at)` gets no `at` for a turn that died unrecorded (`turn_died`: its
+  message has no `last_turn.at`, which still names the turn before).
+- `stable` merged into `beta` with `-s ours`: the slow-connection fix pushed to `stable` (`f9af80a28`) is the same
+  code as `d9efa0d09`, already in `beta`; `stable` is again an ancestor of `main` for `publish.py`.
+- fake_claude: `HALFTURN HALFCOST=x` saves `x` in the thread and exits 143, like the real CLI on SIGTERM.
+
+## 2.0.0-alpha.141 - 2026-11-12
+
+- Cost of a lost agent turn, two fixes on top of `agent_cost`: (1) Claude Code still saves the cost of a turn
+  stopped by SIGTERM in its thread, so the next `--resume` reports it again in `total_cost_usd` (measured: a killed
+  turn was counted by the estimate, then again in the next turn's increase). `charge_unbilled` now adds its estimate
+  to `meta.thread_cost.estimated` (same `csid`), and `store.turn_cost(total, prev, estimated)` takes it off the next
+  reported increase, never below 0 (runner `Attempt.prev_est`, `aside.py`); `_record` writes a new `thread_cost`
+  without it. (2) `last_turn(lines, at)` / `charge_unbilled(sid, at)` find the lost turn by its message's time
+  (`last_turn.at`, from `agents._which_turn`): a queued message the runner already started no longer hides it.
+- `test_skills::test_folders_with_a_name_that_is_not_utf8_are_left_out` uses its own `claude_dir` (it listed the user
+  skills of the machine running the tests).
+- `test_approvals::test_outside_events_always_ask_unless_trusted` was flaky: its user run read the outside run's result
+  in its context as soon as `on_turn_end` had written it (then asked first, as designed since `020694531`); the user
+  run now comes first.
+- Upgrade note: agents whose cron jobs have a timeout above `limits.timeout_s` (now capped by `run_timeout`).
+
+- #75 (20 reported bugs, 18 fixed, each with its test): `telegram/format.py` measures the 4096 limit in UTF-16 units
+  (`_u16`, in `render`, `_split_big`, `code`, `plain`); `mail/send._text` (HTML fallback shared by draft, reply,
+  forward); `mail/imap._size` counts a `=\r\n` soft break as 0; `infra/actions.pg_install` raises `start_failed` when
+  `systemctl enable --now` fails; `infra/providers._fqdn` whole labels only; `infra/probe.parse_nginx` skips regex
+  locations without `proxy_pass`; `mcp_auto.candidates` drops a user server hidden by a folder server of the same
+  name; `teampeer.normalize` keeps IPv6 brackets; `api/settings` and `gitview.resolve` turn the `RuntimeError` of an
+  unknown `~user` into 400; `api/dashboard._defs` ignores a layout of the wrong shape; `uploads._num` catches
+  `OverflowError`; `shopify._local_time`; `cmd_video.pdf` catches `TimeoutExpired`; `cmd_agents` on/off/silent/loud
+  catch `AgentError` (exit 2) and a role-only `--mail` sets `allowed_tools` to `Bash(maxxing mail:*)`;
+  `importer._claude_config` no longer exempts `.md` under `.claude/agents|commands` (`EMPTY` message);
+  `agent_guard.topic_edit_denied` always denies the topic's `.mcp.json` (the sandbox mount still skips a missing
+  one). Not taken: autoconfig "plain" -> none (kept "ssl"), project description with a `## ` line.
+- `office.useDesk` spreads `useAgentMenu` (the menu of the agents list) on the desk and returns its `menu`, rendered
+  by the Space view's `Console`: the right click / long press works on the desks too.
+- `backup.LEAKS` "password": a value that is a whole upper-case name with an underscore (a vault key name such
+  as `P30J_CF_PASSWORD`) is not a secret; a value that only starts like one is still caught. Tests in
+  `test_backup.py::test_scanner_ignores_names`.
+- `crons.restore_job` goes through `_commit(old, jobs)` like `create_job`, `update_job` and `delete_job` (crontab,
+  then `jobs.json`, the crontab put back when the save fails). It called `sync_crontab` then `_save_raw`, so a failed
+  save left a crontab line for a job that `jobs.json` does not hold. Test added in `tests/test_crons.py`.
+- `tests/test_search.py::test_unchanged_sessions_are_not_read_again` counts only the `store.read` calls of its own
+  thread: the sessions watcher of the test server (`service._scan`) reads the same metas in the background, and the
+  test failed now and then when its pass landed between `reads.clear()` and the assertion (with the next fix: 3 runs
+  of `test_search.py` out of 12 failed on beta, 0 out of 20 with both).
+- `api/search.startup`: `MAXXING_SEARCH_LOOP=0` leaves the background refresh loop off, like `MAXXING_CRON_TICK=0`;
+  `tests/conftest.py` sets it. The loop started with every test server and could clean the index up before
+  `test_search.py::test_data_files_leave_the_index_and_the_base_shrinks` did (its "compacted" log was then
+  missing).
+- `trash._item` refuses an id longer than 255 bytes (`400 bad_id`): `Path.exists()` raised `OSError` ENAMETOOLONG
+  (Python 3.12 only swallows ENOENT, ENOTDIR, EBADF, ELOOP), a 500 on restore and delete. Test in
+  `tests/test_trash.py`.
+- `feed.mark_read` passes `source` through `_utf8` like `post()`: a lone surrogate (valid JSON) raised
+  `UnicodeEncodeError` in SQLite, a 500 on `POST /api/feed/read`. Test in `tests/test_feed.py`.
+- `gitview._is_repo` returns False on `OSError` ENAMETOOLONG (any other error still raises): a path component longer
+  than 255 bytes made `exists()` raise it while `resolve()` walked up to the clone, a 500 on every `/api/git/*` route instead of
+  `404 not_a_repo`. Test in `tests/test_gitview.py`.
+- `docs/dev/API.md`: rows for `PUT /api/system/auto-update`, `PUT /api/extensions/pins`, `GET /api/files/preview` and
+  `GET /api/files/archive`, which the code served without a row.
+- `tests/test_api_contract.py`: every route of the app and of each router of `maxxing.api.ROUTERS` (this FastAPI
+  does not flatten included routers into `app.routes`; websockets and routes outside the OpenAPI schema count too)
+  must have its `| METHOD | /api/... |` row in API.md. It reads the notations of the table (`ANY`, `[/{id}]`, `<x>`,
+  `a\|b` and `{a\|b}` listing the values of the last parameter, a parameter inside a word such as `install.{kind}`);
+  a whole-word parameter otherwise needs a `{...}` in its row. `/api/stream` (Global bus section) and the JSON 404
+  are not rows; `KNOWN_MISSING` holds the agents' `chat/new` (being reworked). The `/api/ext/{id}` row now says its
+  `{path}` is optional (`forward_root`).
+- `components/ui/dialog.tsx`, `sheet.tsx`: the close button's `sr-only` text is `t('common.close')` (was "Close" in
+  every language). `tests/test_web_labels.py`.
+- `pages/sessions/Column.tsx`: the column and row resize handles take `t('shell.resize')` / `t('shell.resizeRows')`
+  (new key, "double-click: equal heights", as `resetRowSplit` sets 0.5) as their `aria-label` (was "Resize").
+- `presentation.hidden` (core group): the `aria-label` of the presentation-mode masks (`Sensitive`, the file viewers'
+  placeholders, `MaskedLines` of the sessions), "Hidden (presentation mode)" in English in 8 places before.
+- `web/src/pwa/index.ts`: a worker that reaches `installed` while a page is open is asked its `VERSION`; when every
+  hashed file of the page's `index.html` (entry script, styles, read at `initPWA`) is in its `mx-assets-<version>`
+  precache, the page is that build already (navigations are network-first): `SKIP_WAITING` with `silentSwap`, no
+  reload. Before, only a worker already waiting at `load` was swapped silently; one still installing (precache on a
+  slow link) went through `announceUpdate` and reloaded the freshly loaded page. No answer in 3 s or a file missing:
+  the usual `announceUpdate` (a tab left open on an older build reloads as before).
+- Sessions: the stack drop zone of a column (dashed third) was a local state of `ColumnShell`, cleared only by its own
+  `dragleave` / `drop`; a cancelled drag fires neither. It is now `dropStack` in the sessions store (`setDropStack`),
+  cleared with `dropBeside` by `setDragging(null)` (grip `dragend`, document `dragend` / `drop`), and one session at
+  most shows it.
+- Web i18n: `networkError()` (lib/api.ts) builds the `ApiError(0, 'network')` with the `common.networkError` text (core,
+  en + fr, English fallback while the core chunk is pending); `request`, `uploadFileWithProgress` (files.ts) and
+  `uploadAttachment` (sessions.ts) throw it, so `errorMessage()` and every direct `.message` read are translated. Route
+  `feed` and `settings/:section` declare the `team` group (their `team.*` keys were '' while it downloaded). Known
+  undeclared pairs, exempted in the test: `sessions/*` with `tasks` (first-load dictionary budget) and with `agents`
+  (agents feature, out of scope). Tests: `test_web_i18n_groups.py`.
+- `cmd_core.do_init` checks `--timezone` (`ZoneInfo`) and `--public-url` (`config.PUBLIC_URL_RE`, now shared with
+  `api/settings.py`) before any write, as `PUT /api/settings` does: the URL is stripped once and that value is stored
+  (whitespace-only clears), `SystemExit` with a message, `config.json` untouched. A host without tz database now fails
+  early on `init --timezone UTC` (`install.sh` installs tzdata). Tests: `test_cmd_core.py::test_init_refuses_an_unknown_zone_or_a_malformed_url`,
+  `test_init_normalises_the_public_url_it_stores`.
+- CLI output: `cmd_proxy` status hint f-string; `cmd_deps` (`deps check --json`) prints `{checked: 0, vulnerable: [], skipped}` when
+  OSV is down; `cmd_import._fail` prints `{"error": code, "message"}` in --json; `cmd_mail list` clamps `--page` with `max(0, ...)`.
+  Tests: `test_status_names_the_port_when_the_address_is_on_no_interface`, `test_check_json_stays_json_when_osv_is_unreachable`,
+  `test_cli_json_errors_stay_json`, `test_cli_list_never_passes_a_negative_page`.
+- CLI errors instead of tracebacks: `cmd_deps._unknown` (verify/update check names through `deps.get`, exit 1);
+  `cmd_deps` update also refuses a name that is in the manifest but not in `deps.UPDATE_ORDER` (caddy);
+  `crons.spawn_run` wraps `OSError` of Popen and `systemd-run` in `CronError("spawn_failed")` so `cmd_cron` falls back
+  to running the job inline, and a `systemd-run` timeout in `CronError("spawn_timeout")` (the unit may still start:
+  exit 1, no inline run, the tick's catch-up recovers the slot; `api/crons._bad` maps both to 502); `cmd_cron._stamp` shows `????-??-?? ??:??` for a bad run time
+  (list: last run, retry, and the removed-jobs list now also tolerates a missing `at`) and `run --if-due` answers exit 2 on a `CronError` of the schedule; `cmd_video.pdf` ends
+  in `SystemExit("PDF failed: ...")` when the output folder cannot be created; `cmd_voice` prints errors to stderr
+  and catches a failed `download_model`. Tests: `test_deps.py::test_verify_and_update_refuse_an_unknown_component`,
+  `test_pdf_into_an_uncreatable_folder_raises_system_exit`, `test_cli_voice_download_prints_failures_to_stderr`;
+  `test_crons.py::test_cron_run_detach_runs_here_when_systemd_run_cannot_be_executed`,
+  `test_cron_run_detach_does_not_run_twice_when_systemd_run_times_out`,
+  `test_cron_run_if_due_with_a_broken_schedule_is_an_error`, `test_cron_list_survives_a_bad_time_in_the_run_history`.
+- DESIGN.md §8/§11: the 9 `window.confirm` of Mail (`Compose`, `MailPage`) and Team (`Chat`, `Friends`) use
+  `confirm()` of `ui/alert-dialog` (Compose's `useBlocker` effect proceeds/resets from the promise; `run`, `tryClose`,
+  `remove` are async); `pages/sessions/Tabs` arrows lose `backdrop-blur`. Test: `tests/test_web_design_rules.py`
+  (browser dialogs and backdrop blur in `web/src`; only `features/agents/OfficeFuture.tsx` is exempt from the blur).
+- Hand-edited state of the wrong type falls back to the default: `api/settings.current` (`result_line_hidden` must be a
+  list), `extensions._ext_list` (`extensions.disabled` / `pinned` must be lists, used by `disabled_ids`, `pinned_ids`,
+  `_pinned_list`), `config._path_setting` (`workspace`, `files_root`, `claude_dir` must be non-empty strings),
+  `backup.history` skips history lines that are valid JSON but not objects, `gitview._root` uses
+  `config.files_root()`. Tests:
+  `test_a_hand_edited_result_line_hidden_of_the_wrong_type_never_breaks_the_settings`,
+  `test_hand_edited_extension_lists_of_the_wrong_type_fall_back_to_empty`,
+  `test_hand_edited_path_settings_of_the_wrong_type_use_the_defaults`,
+  `test_hand_edited_history_lines_that_are_not_objects_are_skipped`.
+  Not covered: the other raw readers of these settings (`sessions/runner.py`, `cmd_core.py`, `cmd_mcp.py`,
+  `spawn.py`, `api/settings.py` returning the raw value).
+- `workspace.update_project` / `update_topic` run the validation (slug, emoji, permission mode, allowed tools) and the
+  busy (`409 has_running_sessions`) and destination (`409 exists`) checks before any write; they used to save emoji /
+  `permission_mode` / `allowed_tools` first, then refuse the rename. Tests: `tests/test_workspace.py`
+  (`test_a_refused_topic_rename_saves_nothing_else`, `..._of_a_busy_topic_...`, `test_a_refused_project_rename_...`).
+- A lone surrogate (valid JSON, not encodable to the UTF-8 state files) is refused where it is validated instead of
+  raising `UnicodeEncodeError` in `config._atomic_write` (500): `api/dashboard.layout` drops such ids (reuses
+  `api.settings._utf8`), `workspace.check_emoji` -> 400 `bad_emoji`, `backup.clean_include` -> 400 `invalid_include`
+  (reuses `backup._utf8`), `api/settings` `public_url` -> 400 `invalid_url` (`_utf8`; other non-ASCII still accepted).
+  Tests: `test_dashboard`, `test_workspace`, `test_backup`, `test_settings`.
+- `api/files.resolve` refuses a NUL in the last name with 400 `bad_path` for `follow=False` and `new=True`, which never
+  resolve the last part (mkdir/move raised `ValueError`, 500). `follow=False` on an existing path (`/delete`, the `from`
+  of `/move`) with a NUL in the last name now answers 400 `bad_path` instead of 404. Test: `test_files_guard`.
+
+## 2.0.0-alpha.140 - 2026-11-11
+
+- `agents`: outside provenance follows a result into the next session. `on_turn_end` marks the `result` message
+  `outside: true` when the session was started by outside text (`MAXXING_AGENT_OUTSIDE=1` without
+  `MAXXING_AGENT_OUTSIDE_FROM=context`; in a group, `agent_rooms.turn_outside`). New `_context(path, own) -> (text,
+  outside)` (`context()` unchanged for callers). A new conversation of the owner (`_owner_chat`) gets `own=True`: the
+  marked results are left out of its context, since outside text never enters the owner's conversation (and
+  `MAXXING_AGENT_OUTSIDE` would take the manager away from it). Any other start that gets the context (a script's
+  `agents run`) and finds a marked result in it gets `MAXXING_AGENT_OUTSIDE=1` + `MAXXING_AGENT_OUTSIDE_FROM=context`,
+  so `run_settings` forces approvals unless `trust_outside`; its own result is not marked, so the mark does not renew
+  itself: it lasts while the marked result is among the last `CONTEXT_RESULTS` (3). Accepted limit: what that run
+  repeats of the outside text is unmarked one run later. API.md: `AgentMessage.outside?`. Results written before
+  this change carry no mark. Test:
+  `test_agents.py::test_the_result_of_an_outside_run_keeps_its_provenance_in_the_next_sessions`.
+- `nav.useUnpinnedPages()` (page extensions on, without error, not pinned): while > 0, `Sidebar` ends the page rows
+  with `hubItem` (`/x`, `data-tour="nav-extensions"`, not draggable, not in `sidebar_order`) and `TouchNav` adds an
+  Extensions tile. `tests/test_web_ext_hub.py` checks both.
+- The `/x` hub (`pages/ext/hub.tsx`) had no link left since the sidebar shows only pinned pages: `CommandPalette`
+  gets `nav:x` (keywords extensions, pages, plugins) and Settings -> Pages an **All pages** button (`ext.allPages`, unused
+  until now); `docs/user/13-page-extensions.md` says where it is. `tests/test_web_ext_hub.py` checks both links.
+- Tasks: the view switch leaves the header below 480 px (was 400: on 393-412 px phones it pushed the touch Menu
+  button to x 398-442, 14 px of it on screen); feed **Show more** gets a `pointer-coarse:before` hit area (50x16 ->
+  66x28, exactly the gap to the title and the actions above and below: it never takes their taps). `tests/test_web_mobile.py` checks both.
+- `telegram.gateway.forget()` also deletes `new.json` (`_new_path()`, the messages waiting for the "where?" answer).
+  It was left behind, so `_new_restore()` revived the pending question after the next link. Test added in
+  `tests/test_telegram_reliability.py` (`test_forgetting_the_bot_drops_a_pending_where_question`).
+- `skills._front`: the block scalar header (`|` or `>`, with the chomping sign `-` or `+`) is stripped by one regex;
+  `|-` and `|+` left their sign at the start of the description ("- Line one"). Test added in `tests/test_skills.py`.
+- `agents.clean`: `triggers` is read as a list only when it is one (the slice ran before the `isinstance` check, so a
+  dict raised `KeyError` and an int `TypeError`); `_clean_avatar` looks a value up in `_OLD_AVATAR` only when it is a
+  string (a list was unhashable). `GET /api/agents/<topic>/<agent>` failed with an error for such a file. Tests added
+  in `tests/test_agents.py`.
+- Radar fixes merged from `main` (one commit each, with its test): `claude_models` (a non-list `data` is a failed
+  read; a preview/variant suffix is not a newer model), `agents.clean` (lone surrogate in a rule -> 400 `bad_rule`, a
+  limit too big for a number -> 400), `infra.probe` (`bad_probe` marks only its server), sessions (a change of Plan
+  mode, model or permissions restarts the process before the next message), web (composer cap kept while Send is
+  tapped, Tasks `tight` below 480 px of page width, agent settings chip track `minmax(0,1fr)`, feed Show more hit area,
+  folded sidebar compact rows under 820 px of height with an edge fade).
+- PR #74 (review of 2.0.0a139, agents): owner messages queue instead of `busy`; Run now fires the routine; a Free agent
+  that gets outside text turns Protected; an allowed safety change applies the values of its card; a sandboxed agent
+  never writes `.maxxing.json`; a turn bigger than the 512 KB tail read keeps its answer; the thread refetches only on
+  its own agent's turns and keeps its place across pages; silent agents answer on Telegram; settings show the
+  conversation's model; French texts say vous. Tests: `test_agents_conv_fixes.py`, `test_agent_safety_changes.py`,
+  `test_agent_turn_bus.py`.
+
+## 2.0.0-alpha.139 - 2026-11-10
+
+- Fixes before release: `agent_guard._manages` reads the target with `cmd_agents._configure`'s parser
+  (`parse_known_args`; `--name writer other` targets `other`) and `cmd_agents._handler` refuses a manager command of
+  `AGENT_OWNER_ONLY` on another agent; `silent` / `loud` joined `AGENT_OWNER_ONLY` (and `AGENT_MANAGER`);
+  `check_cli` takes `-h` / `--help` as help only before `--`. `on_turn_end` finds the ended turn by
+  `last_turn.at` (the runner writes the `mx_user` time there) and `turn_died` (watcher: error without a recorded
+  turn): `service._ended_turn(evs, at, died)` -> `ended_turn_text` / `ended_turn_steps` never take another turn's
+  answer, tools or model (no `at`: the old last-result rule). UI: `fetchAgentThreadBefore` (`?before=`, pages of
+  200 when the flow is scrolled to its top, view kept in place); the composer's model is the agent's
+  (`chat_model` or `model`) unless picked, and is sent only when picked; `NewAgentForm` explains an empty slug.
+- `pages/ext/index.tsx`: `t` / `navigate` read through a ref, not effect deps (`useT()` changes with each
+  dictionary group: ~10 remounts of an extension page while it opened).
+- **Agent chat** (every agent, no switch: a `chat` key left in an agent.json is dropped by `clean()`):
+  `limits.chat_idle_h` (6, 0-720). `agents._fire`: the owner's own words
+  (`_owner_chat`: trigger manual/telegram, source manual/telegram, no outside `text`) go on in the session kept in
+  `<state>/agents/<key>.json` `chat: {session, at}` (`_chat_session`: gone, failed, other path or idle > chat_idle_h
+  -> new session, which gets `context()` as before). `new_chat()` + `POST /api/agents/{p}/{t}/{n}/chat/new` +
+  Telegram `/new` in an agent thread (`agent_new_chat` text). Run posts carry `owner: true` (and `chat: "new"` when
+  they open a conversation); `gate(owner=True)` skips runs_per_hour and `_runs_last_hour` leaves owner runs out; a
+  `busy` owner message that goes on in the running session is let through (`_joins_running`: it queues under that
+  run's hold). `status()` gives `chat_session`. `on_turn_end` reads `service.ended_turn_text()` (the answer of the
+  last turn with a `result`, even when a queued turn already started) instead of `last_assistant_text(turn_only=not
+  ok)`, which posted the previous turn's answer again in a continued session. UI: `AgentPage.tsx` live text/tool in
+  `Working` (`useSessionLog`), `ChatLine` divider, New conversation bar, Reply hidden on the open conversation;
+  Settings -> Limits switch + `chat_idle_h` field (`LimitsFields chat`).
+- **Agent page = one flow** (`AgentPage.tsx` `AgentCenter` -> `Flow` + `Composer`, no tabs, no `SessionColumn`): the
+  thread oldest first with day lines; owner runs = bubbles on the right (reply tag when `reply_to`); other runs =
+  `TriggerCard` (icon by trigger); results = `AgentTurn` in `AgentBubble` (avatar): a turn of an own session
+  (`ownSessions`: chat, last chat, sessions of owner runs without `reply_to`) shows its steps as rows (`StepList`) and
+  a `ResultLine` (model, duration, cost), a run's result folds them (`StepsFold`) with Reply / Open the run / Continue;
+  "Memory updated" when a step edited `memory.md`; `changed_chat` notes = a green `ChangeLine`; `new_chat` notes and
+  a `chat: "new"` owner run after an earlier one = a "New conversation" line; each running session = `LiveTurn`
+  (steps and text of its current turn from `useSessionLog`, Stop; Open the run for a run only) right under the last
+  message of its session. A conversation turn has no link to a session view and is never folded (`FOLD_CHARS` only for
+  runs); its answered approvals are one line (`approvals.tsx` `ApprovalLine`). The manager may run itself:
+  `maxxing agents run <itself>` in a manager turn (`AGENT_MANAGER` += run) = `fire(trigger manual, source
+  "conversation")`, a run of its own ("Started at your request, from the conversation"); `MANAGER_NOTE` tells it to
+  do so when asked to do its routine now; the conversation hands its hold of the day's budget over to that run
+  (`agents.hand_over`), else the run would find it all held (busy).
+- **Conversation from the Office**: `AgentsOverview` keeps `?chat=<agent path>` and gives `office.tsx` `OfficeChat`
+  ({open, current}) to the desks (`useDesk`, `AgentTile`): a desk toggles the panel instead of navigating (outside the
+  Office the desk still opens the page). Panel = `AgentPage.tsx` `AgentChatPanel` (header + `AgentCenter`), docked
+  440 px from 1024 px, else a `Sheet`. Extension views get `chat_route` per agent (`OfficeCustom`, the current
+  pathname + `?chat=`).
+- **Agents, simpler**: `agents.create()` defaults `sandbox` to whether the fields
+  read outside text (`mail`, a `feed` trigger); `cmd_agents create` sets it for a webhook / mail template, `--sandbox`
+  added; imports are free. `request_change` applies at once what only makes the agent safer (`_safer`,
+  `_safer_limit`: sandbox on, approvals on, trust off, a stricter mode, subsets of domains / writable (any when the
+  sandbox comes on) / keys / allowed tools, supersets of disallowed tools and rules, lower limits; mail and subagent
+  always asked). `MANAGER_NEW` joins the manager's system note while its role (CLAUDE.md description) is empty.
+  UI: `CreateAgent.tsx` = `NewAgentForm` (where + name + random character -> `POST /api/agents` with an empty
+  description -> the agent page); the old 3-step form, `QuickCreate`, the gallery cards, `EditWithClaude` /
+  `useCreateWithClaude` are gone (`draftUrl` stays for groups and custom Office views); the empty conversation of an
+  agent without role shows the templates as `Suggestions` (`AgentComposerApi.fill`). `AgentSettings.tsx`: sections
+  `essential | protection | mail | advanced` (`SectionId`; `?settings=mail` unchanged), `LimitsFields part`,
+  `readsOutside()`; 46 unused texts dropped.
+  Then: `MANAGER_NEW` sets the agent up in one turn from a brief (My job / When / Results / Never without me),
+  freedoms decided by rule, questions only for what it cannot guess; `schedule_zone_note()` (config `timezone`) joins
+  every manager note and `agents cron` prints the zone (the server clock may differ: `system_clock: keep`).
+  `agent_templates.BRIEFS` / `brief()` / `FIRST_IDEAS` -> `brief`, `first` in `GET /api/agents/templates`;
+  `Suggestions`: Blank brief + 6 ideas + "more", `fill()` selects the first `[…]`. Profile: one add-trigger menu
+  (`agent-add-trigger`; Telegram row only when on), guards = budget + Free/Protected line (opens the Protection
+  section) + approvals / keys when set; group link under Settings; `CronRow` shows `settings.timezone` when it is
+  not the browser's. Skill `maxxing-agents`: same brief and rules.
+- Removed the text as it is written (`--include-partial-messages`, `<sid>.live`, the SSE `partial` frame,
+  `partialText`): not needed. The runner still drops `stream_event` lines. The manager's sandboxed turns pre-allow
+  `agent_guard.MANAGER_SAFE` (Read, Glob, Grep, WebSearch; the deny rules still win).
+- "New conversation" moved under the box; "Edit with Claude" only in the profile. Results now carry the
+  turn's steps: `service.ended_turn_steps(sid)` -> `tools` ([{name, summary (160 chars), error?}], the last 40),
+  `tools_total`, `model`, `duration_ms` (omitted when empty); older results have none. `RunView` goes back to the
+  agent page (no `?tab`). The chat notes (change requests answered) go into the manager turn's system note
+  (`run_settings`) instead of the owner's message, so a message typed in the session's own box gets them too.
+  `BUS_TURN_KEYS` += agent one/thread (a run started by another process reaches the page by the session watcher).
+  Settings: the `chat_model` picker is gone from the UI (field kept).
+- **Agent manager (the owner's conversation)**: a new chat session gets `MAXXING_AGENT_CHAT=1` in its meta env and no
+  model of its own; `agents.manager_turn(meta)` (chat, no outside, no group) -> `run_settings(manager=True)`: model
+  `chat_model` (new agent.json field, "" = `model`) or `model`, `MANAGER_NOTE` instead of `OWNER_NOTE`, approvals on
+  when sandboxed (else the agent's), `agent_guard.settings(manager=True)`: `allowUnsandboxedCommands: true`,
+  `autoAllowBashIfSandboxed: true`, its `CLAUDE.md` out of denyWrite / `permissions.deny` (the `agents/*/CLAUDE.md`
+  glob dropped), `allow` `Bash(maxxing:*)` + `Edit(/<write dirs>/**)`. `agent_guard.agent_turn()` gives `manager` and
+  `session`; `check_cli` lets the manager run `agents show|set|cron|webhook|watch|on|off` on itself
+  (`AGENT_MANAGER`, `_manages`); `set` joins `AGENT_OWNER_ONLY`. New CLI `maxxing agents set <agent> FIELD=VALUE|--json`
+  (owner: `update()`; manager: `agents.request_change`) and `maxxing agents cron <agent> --job ID [--schedule]
+  [--prompt] [--on|--off] [--remove]` (its own jobs only). `request_change`: validates the whole target with
+  `clean(strict)`, applies the non-safety fields, writes an approval request `{kind: "agent_change", tool: "Agent
+  settings", input: {description}, fields, expires: +7 d}` in `<state>/approvals/`; `approval_mcp.expire(session=)`
+  and the watcher's orphan expiry skip that kind (it expires at `expires`), `prime()` announces it; `approvals.decide`
+  -> `agents.change_decided` (applies on allow) and a `chat_notes` entry in the agent state, prepended to the next
+  owner message ("Since your last message: ..."). `approvals.public` gives `kind`; `status().waiting` counts pending
+  changes. `_fire`: a non-owner message never continues a manager session (reply_to -> new run). `on_turn_end`: a
+  change by the manager is a `changed_chat` note. UI: `ApprovalCard` renders `agent_change` as one line per change,
+  Settings -> Model "Model of the conversation" (`ModelSelect defaultLabel`), the self-locked line says the
+  conversation can. Tests `test_agent_manager.py`.
+- Runner: Claude Code's own permission questions on the control channel (`control_request` `can_use_tool`, e.g. the
+  sandbox's `SandboxNetworkAccess {host}` for a host outside the domains) were never answered, so the command waited
+  until its timeout. `_can_use_tool` answers them in a thread: through `approval_mcp.ask(ctx=...)` when the turn has
+  approvals (an approval card), else a deny at once. `approvals.summary` reads `host`. `agent_guard.check_cli` never
+  refuses `-h` / `--help`, and refuses any command run inside the sandbox (`in_the_sandbox()`: an agent turn's unit
+  whose state is hidden; a command line with a pipe, `;`, `&&` is sandboxed as a whole and its writes would vanish).
+  fake_claude: `ASKNET`. `public()` gives `chat_model`.
+
 ## 2.0.0-alpha.138 - 2026-11-10
 
 - Released from `main` ("Urgent fixes" path). `server/maxxing/claude_models.py`: daily `GET /v1/models`

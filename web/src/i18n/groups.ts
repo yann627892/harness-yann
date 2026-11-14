@@ -27,14 +27,25 @@ export const GROUPS = {
   maxxing: ['maxxing'],
   // dragging content from one session into another: loaded when a drag starts
   drag: ['drag'],
+  // the card of a failed turn (pages/sessions/Cut.tsx): loaded when a thread shows one
+  cut: ['cut'],
   // a pasted text that became a file: loaded on that paste
   paste: ['paste'],
   // extra words of the Settings sections for the command palette: loaded on its first search
   skw: ['skw'],
   // the guided tour: loaded with its chunk (tour/Tour.tsx); its entry points (menu, palette) use help.*
   tour: ['tour'],
-  // the model picker's effort levels: loaded when the picker first shows one
-  effort: ['effort'],
+  // the composer's / and @ menus, the intelligence (effort) level and the rows of the session shortcuts window
+  // (pages/sessions/index.tsx): loaded on their first text asked
+  composer: ['slash', 'mention', 'effort', 'kbd'],
+  // the Changes view of a session (features/code): loaded when it opens
+  code: ['code', 'copy', 'pr'],
+  // the terminal drawer and its setting (features/terminal)
+  term: ['term'],
+  // Office documents and the page-by-page PDF reader (features/files/docs.tsx, pdfPages.tsx): on the first one opened
+  docs: ['doc'],
+  // the sentences of the status line (components/shell/mood.ts): fetched once the shell shows, not before it
+  mood: ['mood'],
 } as const satisfies Record<string, readonly string[]>
 
 export type Group = keyof typeof GROUPS

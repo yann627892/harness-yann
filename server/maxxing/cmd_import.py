@@ -16,6 +16,10 @@ def _configure(p) -> None:
     p.add_argument("--json", action="store_true", help="machine-readable output")
 
 
+def _fail(a, code: str, msg: str, text: str | None = None) -> None:
+    print(json.dumps({"error": code, "message": msg}) if a.json else (text or msg))
+
+
 def _handler(a) -> int:
     from . import importer
     if a.prompt:
@@ -26,7 +30,7 @@ def _handler(a) -> int:
         return 2
     src = Path(a.zip).expanduser()
     if not src.is_file():
-        print(f"No such file: {src}")
+        _fail(a, "not_found", f"No such file: {src}")
         return 2
     try:
         if a.dry_run:
@@ -37,7 +41,7 @@ def _handler(a) -> int:
             res = importer.apply(tmp)
             res["finish_prompt"] = importer.finish_prompt(res)
     except importer.ImportFailed as e:
-        print(f"Import refused: {e.message}")
+        _fail(a, e.code, e.message, f"Import refused: {e.message}")
         return 1
     if a.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
@@ -55,6 +59,10 @@ def _handler(a) -> int:
         print(f"refused (contains {', '.join(s['kinds'])}): {s['file']}")
     for s in res["skipped"]:
         print(f"skipped ({s['reason']}): {s['file']}")
+    if not a.dry_run:
+        print("\nLast step: open a session in general/inbox and send it this message, so that Claude tidies the "
+              "memory, creates the tasks, proposes the scheduled jobs and lists the keys to add:\n")
+        print(res["finish_prompt"])
     return 0
 
 

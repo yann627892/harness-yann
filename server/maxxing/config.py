@@ -19,6 +19,7 @@ import logging
 import os
 import pickle
 import pwd
+import re
 import shutil
 import tempfile
 import threading
@@ -32,6 +33,11 @@ WEB_DIST = Path(os.environ.get("MAXXING_WEB_DIST") or CODE / "web" / "dist")   #
 DOCS_DIR = CODE / "docs" / "user"
 SKILLS_DIR = CODE / "skills"
 TEMPLATES_DIR = CODE / "templates"
+
+# Names tzdata ships that are not zones: `localtime` is a link to /etc/localtime, so `timedatectl set-timezone
+# localtime` makes /etc/localtime point at itself (the server falls back to UTC, cron fires an hour or more off).
+PSEUDO_ZONES = ("localtime", "posixrules")
+PUBLIC_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?(/[^\s]*)?$")   # shared by PUT /api/settings and init
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "workspace": "/root/maxxing",
@@ -50,7 +56,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_model": "",
     "permission_mode": "bypass",          # bypass | acceptEdits | default | ask
     # A turn that ends above this context (tokens) is followed by a summary turn and a fresh thread seeded with it
-    # (the same as "Compact"): long sessions stop re-sending their whole history. 0 = off.
+    # (the same as "Compact"): long sessions stop re-sending their whole history. 0 = off. This threshold and the two
+    # below follow the model: never above its context window - 70k (sessions/resume.fit), 130k on a 200k model.
     "auto_compact_tokens": 300000,
     # Idle compaction: a message that comes back to a session after its prompt cache expired (last call more than
     # idle_compact_after_s ago) with a context of at least idle_compact_tokens is preceded by the same summary turn:
@@ -86,6 +93,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tasks_page": False,               # Settings -> Features: the Tasks page, its sidebar entry and dashboard widget
                                        # (`maxxing init`: on for installs made before Tasks became optional)
     "git_page": False,                 # Settings -> Features: the Git & GitHub page and its sidebar entry
+    "code_mode": False,                # Settings -> Features -> Sessions -> Code mode: the terminal drawer (POST /api/term/enable: password)
     "infra_page": False,               # Settings -> Features: the Infra page (sites, databases, buckets, domains, servers)
     "infra_refresh_min": 15,
     "result_line_hidden": [],          # Sessions: parts of the line under each answer that are hidden (cost, tokens...)           # Infra: background refresh period (minutes) while the page is on
@@ -474,17 +482,23 @@ def set_secrets(values: dict[str, Any]) -> None:
 
 
 # ---- derived paths -------------------------------------------------------------------------
+def _path_setting(name: str) -> str | None:
+    """A path setting, or None when it is missing or hand-edited to something that is not a string."""
+    v = _setting(name)
+    return v if isinstance(v, str) and v else None
+
+
 def workspace() -> Path:
-    return Path(_setting("workspace") or DEFAULT_CONFIG["workspace"])
+    return Path(_path_setting("workspace") or DEFAULT_CONFIG["workspace"])
 
 
 def files_root() -> Path:
-    return Path(_setting("files_root") or DEFAULT_CONFIG["files_root"])
+    return Path(_path_setting("files_root") or DEFAULT_CONFIG["files_root"])
 
 
 def claude_dir() -> Path:
     """Claude Code's folder: config.claude_dir, else CLAUDE_CONFIG_DIR, else ~/.claude."""
-    d = _setting("claude_dir") or os.environ.get("CLAUDE_CONFIG_DIR")
+    d = _path_setting("claude_dir") or os.environ.get("CLAUDE_CONFIG_DIR")
     if d:
         return Path(d)
     return Path(os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir) / ".claude"

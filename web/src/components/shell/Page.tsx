@@ -4,7 +4,7 @@
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 import { useCompact } from '@/stores/media'
-import { TouchAppButton, TouchListButton } from './TouchNav'
+import { TouchListButton } from './TouchNav'
 
 export function useDocumentTitle(title?: string) {
   React.useEffect(() => {
@@ -35,20 +35,20 @@ export function PageHeader({
   return (
     <header
       className={cn(
-        'sticky top-0 z-20 flex shrink-0 items-center gap-3 border-b bg-background/95 px-4 max-md:gap-2 max-md:px-3 md:px-6',
+        'mx-bar sticky top-0 z-20 flex shrink-0 items-center gap-3 border-b bg-background/95 px-4 max-md:gap-2 max-md:px-3 md:px-6',
         'min-h-[calc(var(--header-h)+var(--safe-top))] pt-[var(--safe-top)]',
         className,
       )}
     >
       {touch && <TouchListButton />}
       {leading}
-      <div className="flex min-w-0 flex-1 flex-col justify-center py-2">
-        <h1 className="truncate text-[15px] leading-tight font-semibold tracking-tight md:text-base">{title}</h1>
-        {description && <p className="truncate text-[13px] text-muted-foreground max-md:hidden">{description}</p>}
+      {/* a narrow phone with several actions: no room left for the title - it goes, rather than showing "Tâ…" */}
+      <div className="@container flex min-w-0 flex-1 flex-col justify-center py-2">
+        <h1 className="truncate text-[15px] leading-tight font-semibold tracking-tight md:text-base @max-[3.25rem]:invisible">{title}</h1>
+        {description && <div className="truncate text-[13px] text-muted-foreground max-md:hidden">{description}</div>}
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {actions}
-        {touch && <TouchAppButton />}
       </div>
     </header>
   )
@@ -70,9 +70,12 @@ export function Page({
   width = 'default',
   className,
   bodyClassName,
+  sensitiveTitle,
   children,
 }: {
   title: React.ReactNode
+  /** document.title string (when `title` is a node) */
+  sensitiveTitle?: string
   description?: React.ReactNode
   actions?: React.ReactNode
   leading?: React.ReactNode
@@ -83,7 +86,7 @@ export function Page({
 }) {
   return (
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
-      <PageHeader title={title} description={description} actions={actions} leading={leading} />
+      <PageHeader title={title} description={description} actions={actions} leading={leading} sensitiveTitle={sensitiveTitle} />
       <PageBody width={width} className={bodyClassName}>
         {children}
       </PageBody>

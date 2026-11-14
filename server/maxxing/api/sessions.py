@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from .. import media, security, streamcap
 from .. import uploads as upload_limits
 from ..security import require_auth
-from ..sessions import costfix, maintenance, service, wake
+from ..sessions import costfix, maintenance, opened, service, wake
 from ..sessions.service import SessionError
 
 router = APIRouter(prefix="/api", tags=["sessions"], dependencies=[Depends(require_auth)])
@@ -50,24 +50,33 @@ class _Text(BaseModel):
 CLIENT_ID_RE = r"^[A-Za-z0-9_-]{1,64}$"
 
 
+class WorktreeIn(BaseModel):
+    repo: str
+    base: str | None = Field(None, max_length=200)
+    prepare: str | None = Field(None, max_length=500)    # this time only ("" = none); remembered with `remember`
+    copy_env: bool | None = None
+    remember: bool = False                               # keep prepare / copy_env for the next copies of this repo
+
+
 class CreateIn(_Text):
     path: str = ""
     message: str | None = None
     title: str | None = None
     model: str | None = None
     provider: str | None = None      # gateway:<id> | anthropic: the credential its turns use
-    effort: str | None = None        # low | medium | high | xhigh | max ("" = the model's default)
+    effort: str | None = None        # low | medium | high | xhigh | max ("" = Claude Code's default)
     attachments: list[str] = Field(default_factory=list)
     plan_mode: bool = False
     voice: str | None = None          # absolute path of a voice message sent directly (transcribed afterwards)
     client_id: str | None = Field(None, pattern=CLIENT_ID_RE)   # the sender's id for the first message (see MessageIn)
+    worktree: WorktreeIn | None = None                    # work on a separate copy (Code mode, worktrees.py)
 
 
 class PatchIn(_Text):
     title: str | None = None
     model: str | None = None
     provider: str | None = None      # gateway:<id> | anthropic ("" = back to the default provider)
-    effort: str | None = None        # low | medium | high | xhigh | max ("" = the model's default)
+    effort: str | None = None        # low | medium | high | xhigh | max ("" = Claude Code's default)
     archived: bool | None = None
     notify: bool | None = None
     favorite: bool | None = None
@@ -88,6 +97,11 @@ class HideIn(BaseModel):
     hidden: bool = True
 
 
+class MentionIn(BaseModel):
+    kind: str = Field(max_length=16)
+    ref: str = Field(max_length=300)
+
+
 class MessageIn(_Text):
     text: str = ""
     attachments: list[str] = Field(default_factory=list)
@@ -96,6 +110,8 @@ class MessageIn(_Text):
     # The sender's own id for this message, found again in its queue item and its log line (`client_ids`): a page
     # reloaded mid-send tells whether the server got it.
     client_id: str | None = Field(None, pattern=CLIENT_ID_RE)
+    # @ of the composer: who the message names (mentions.resolve); Claude is told how to write to each
+    mentions: list[MentionIn] = Field(default_factory=list, max_length=20)
 
 
 async def _call(fn: Callable[..., Any], *args: Any, **kw: Any) -> Any:
@@ -132,15 +148,48 @@ async def list_sessions(path: str | None = None, archived: int | None = Query(No
 
 @router.post("/sessions")
 async def create_session(body: CreateIn):
+    wt = None
+    if body.worktree:
+        wt = {"repo": body.worktree.repo, "base": body.worktree.base, "prepare": body.worktree.prepare,
+              "copy_env": body.worktree.copy_env}
+        if body.worktree.remember:
+            await asyncio.to_thread(_remember_copy, body.worktree)
     return await _call(service.create_session, body.path, message=body.message, title=body.title,
                        model=body.model, provider=body.provider, effort=body.effort,
                        attachments=body.attachments, source="web",
-                       plan_mode=body.plan_mode, voice_path=body.voice, client_id=body.client_id)
+                       plan_mode=body.plan_mode, voice_path=body.voice, client_id=body.client_id, worktree=wt)
+
+
+def _remember_copy(w: WorktreeIn) -> None:
+    from .. import codediff, worktrees
+    from ..gitsafe import GitError
+    try:
+        repo = worktrees.main_clone(codediff.checked_repo(w.repo))
+    except GitError:
+        return                                            # create_session says why
+    worktrees.set_prefs(repo, prepare=w.prepare, copy_env=w.copy_env)
 
 
 @router.get("/sessions/search")
 async def search(q: str = ""):
     return await _call(service.search, q)
+
+
+class OpenIn(BaseModel):
+    open: list[str] = Field(default_factory=list, max_length=200)
+    close: list[str] = Field(default_factory=list, max_length=200)
+    order: list[str] = Field(default_factory=list, max_length=200)
+
+
+@router.get("/sessions/open")
+async def open_sessions():
+    """The sessions open on screen, shared by the user's browsers (sessions/opened.py); `ids: null` = none shared yet."""
+    return await asyncio.to_thread(opened.load)
+
+
+@router.post("/sessions/open")
+async def set_open_sessions(body: OpenIn):
+    return await asyncio.to_thread(opened.update, body.open, body.close, body.order)
 
 
 # ---- one session ---------------------------------------------------------------------------
@@ -186,7 +235,15 @@ async def delete_session(sid: str):
 @router.post("/sessions/{sid}/messages")
 async def send_message(sid: str, body: MessageIn):
     return await _call(service.send_message, sid, body.text, body.attachments, "web", hud=body.hud,
-                       voice_path=body.voice, client_id=body.client_id)
+                       voice_path=body.voice, client_id=body.client_id,
+                       mentions=[m.model_dump() for m in body.mentions])
+
+
+@router.get("/sessions/{sid}/mentions")
+async def mentions(sid: str):
+    """Who the composer's @ can name: the other sessions, the agents, the Team contacts and groups."""
+    from .. import mentions as mentions_mod
+    return {"items": await _call(mentions_mod.candidates, sid)}
 
 
 @router.post("/sessions/{sid}/queue/take")
@@ -198,6 +255,11 @@ async def take_queue(sid: str):
 async def hide_message(sid: str, body: HideIn):
     await _call(service.hide_message, sid, body.at, body.hidden)
     return {"ok": True}
+
+
+@router.post("/sessions/{sid}/inject")
+async def inject(sid: str):
+    return await _call(service.inject, sid)
 
 
 @router.post("/sessions/{sid}/steer")

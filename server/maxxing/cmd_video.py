@@ -82,13 +82,21 @@ def pdf(src: str, out: Path) -> None:
     b = browser()
     if b is None:
         raise SystemExit("No headless browser on this server: " + HINT.format(code=config.CODE))
-    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise SystemExit(f"PDF failed: cannot create {out.parent}: {e.strerror or e}") from None
     url = src if src.startswith(("http://", "https://")) else Path(src).expanduser().resolve().as_uri()
     node = _node()
     if node is None:
         raise SystemExit("Node.js is not installed: " + HINT.format(code=config.CODE))
     script = Path(__file__).resolve().parent / "assets" / "print_pdf.mjs"
-    r = subprocess.run([node, str(script), str(b), url, str(out.resolve())], capture_output=True, text=True, timeout=180)
+    try:
+        r = subprocess.run([node, str(script), str(b), url, str(out.resolve())], capture_output=True, text=True,
+                           timeout=180)
+    except subprocess.TimeoutExpired:
+        # a page that never finishes loading: same clean exit as the other failures, not a traceback
+        raise SystemExit("PDF failed: the page did not print within 180 s") from None
     if r.returncode != 0 or not out.exists():
         raise SystemExit("PDF failed: " + (r.stderr or r.stdout).strip()[-400:])
 

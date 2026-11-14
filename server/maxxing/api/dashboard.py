@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from .. import bus, config, extensions, widgets
 from ..security import require_auth
+from .settings import _utf8
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], dependencies=[Depends(require_auth)])
 log = logging.getLogger("maxxing.dashboard")
@@ -39,9 +40,14 @@ def _defs() -> list[dict[str, Any]]:
     defs.append({"id": custom.id, "title": widgets.t(custom.title), "icon": custom.icon, "span": custom.span,
                  "source": "builtin"})
     layout = config.load_config().get("dashboard") or {}
-    order = [x for x in layout.get("order") or [] if isinstance(x, str)]
+    # config.json can be edited by hand: a layout of the wrong shape is ignored, never a 500 for the whole page
+    layout = layout if isinstance(layout, dict) else {}
+    order = layout.get("order")
+    order = [x for x in order if isinstance(x, str)] if isinstance(order, list) else []
+    saved_hidden = layout.get("hidden")
+    saved_hidden = saved_hidden if isinstance(saved_hidden, list) else []
     # never arranged (no saved order): the default set; once saved, exactly what the user chose
-    hidden = set(layout.get("hidden") or []) if order else widgets.default_hidden()
+    hidden = {x for x in saved_hidden if isinstance(x, str)} if order else widgets.default_hidden()
     rank = {wid: i for i, wid in enumerate(order)}
     # stable: unknown ids keep the default order, after the saved ones; "Make it yours" stays last until placed
     defs.sort(key=lambda d: rank.get(d["id"], len(order) + (d["id"] == custom.id)))
@@ -128,7 +134,8 @@ class LayoutIn(BaseModel):
 @router.put("/layout")
 def layout(body: LayoutIn):
     def dedupe(xs: list[str]) -> list[str]:
-        return list(dict.fromkeys(x for x in xs if isinstance(x, str) and 0 < len(x) <= 64))[:200]
+        # a lone surrogate (valid JSON) cannot be written to the UTF-8 config.json: dropped like any bad id
+        return list(dict.fromkeys(x for x in xs if isinstance(x, str) and 0 < len(x) <= 64 and _utf8(x)))[:200]
     config.update_config(dashboard={"order": dedupe(body.order), "hidden": dedupe(body.hidden)})
     bus.invalidate("extensions")
     return {"ok": True}

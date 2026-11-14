@@ -10,6 +10,8 @@ export type Theme = 'dark' | 'light' | 'system'
 export type Density = 'comfortable' | 'compact'
 /** Background: neutral greys, or a shade of the accent color. */
 export type Tint = 'neutral' | 'tinted'
+/** Material of the bars and floating layers: solid colors, or translucent glass over a wallpaper of the accent. */
+export type Material = 'solid' | 'glass'
 /** Layout of this device: auto (touch screens and narrow windows get the touch layout), always touch, or the
  *  desktop layout whenever the window is wide enough. */
 export type Layout = 'auto' | 'touch' | 'desktop'
@@ -31,6 +33,7 @@ type UIState = {
   accent: Accent
   density: Density
   tint: Tint
+  material: Material
   /** Interface and code fonts (this browser). */
   font: SansFont
   monoFont: MonoFont
@@ -41,6 +44,8 @@ type UIState = {
   /** The second-level sidebar (the list of Sessions, Agents, Team; desktop, components/shell/PageList.tsx) is open, for
    *  every page; closed, the page's entry in the sidebar shows it on hover. */
   secondBarOpen: boolean
+  /** The Extensions folder of the sidebar (the pinned extension pages) is unfolded. */
+  extFolderOpen: boolean
   /** Its width dragged by the user; null = the default (SECOND_W). */
   secondBarWidth: number | null
   layout: Layout
@@ -74,12 +79,14 @@ type UIState = {
   setAccent: (a: Accent) => void
   setDensity: (d: Density) => void
   setTint: (t: Tint) => void
+  setMaterial: (m: Material) => void
   setFont: (f: SansFont) => void
   setMonoFont: (f: MonoFont) => void
   setLanguage: (l: Language) => void
   toggleSidebar: () => void
   setSidebarWidth: (w: number | null) => void
   setSecondBarOpen: (v: boolean) => void
+  setExtFolderOpen: (v: boolean) => void
   setSecondBarWidth: (w: number | null) => void
   setLayout: (l: Layout) => void
   setTouchHome: (h: TouchHome) => void
@@ -103,6 +110,7 @@ export const useUI = create<UIState>()(
       accent: 'blue',
       density: 'comfortable',
       tint: 'neutral',
+      material: 'solid',
       font: 'inter',
       monoFont: 'system',
       language: initialLang(),
@@ -110,6 +118,7 @@ export const useUI = create<UIState>()(
       sidebarCollapsed: false,
       sidebarWidth: null,
       secondBarOpen: true,
+      extFolderOpen: true,
       secondBarWidth: null,
       layout: 'auto',
       touchHome: 'session',
@@ -129,12 +138,14 @@ export const useUI = create<UIState>()(
       setAccent: (accent) => set({ accent, lookChosen: true }),
       setDensity: (density) => set({ density }),
       setTint: (tint) => set({ tint, lookChosen: true }),
+      setMaterial: (material) => set({ material }),
       setFont: (font) => set({ font }),
       setMonoFont: (monoFont) => set({ monoFont }),
       setLanguage: (language) => set({ language }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarWidth: (w) => set({ sidebarWidth: w == null ? null : clampSidebar(w) }),
       setSecondBarOpen: (secondBarOpen) => set({ secondBarOpen }),
+      setExtFolderOpen: (extFolderOpen) => set({ extFolderOpen }),
       setSecondBarWidth: (w) => set({ secondBarWidth: w == null ? null : clampSecond(w) }),
       setLayout: (layout) => set({ layout }),
       setTouchHome: (touchHome) => set({ touchHome }),
@@ -162,10 +173,12 @@ export const useUI = create<UIState>()(
         if (!ACCENTS.includes(out.accent)) out.accent = 'blue'
         if (!(out.font in SANS_FONTS)) out.font = 'inter'
         if (out.tint !== 'tinted') out.tint = 'neutral'
+        if (out.material !== 'glass') out.material = 'solid'
         if (!(out.monoFont in MONO_FONTS)) out.monoFont = 'system'
         if (out.layout !== 'touch' && out.layout !== 'desktop') out.layout = 'auto'
         out.sidebarWidth = typeof out.sidebarWidth === 'number' && Number.isFinite(out.sidebarWidth) ? clampSidebar(out.sidebarWidth) : null
         out.secondBarOpen = out.secondBarOpen !== false
+        out.extFolderOpen = out.extFolderOpen !== false
         out.secondBarWidth = typeof out.secondBarWidth === 'number' && Number.isFinite(out.secondBarWidth) ? clampSecond(out.secondBarWidth) : null
         if (out.touchHome !== 'dashboard') out.touchHome = 'session'
         if (out.presentationShot) {
@@ -194,6 +207,7 @@ export function bindUIToDocument() {
     r.dataset.accent = s.accent
     r.dataset.density = s.density
     r.dataset.tint = s.tint
+    r.dataset.material = s.material
     r.lang = s.language
     applyFavicon(s.accent)
     applyFonts(s.font, s.monoFont)

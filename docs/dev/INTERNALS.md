@@ -107,9 +107,9 @@ Python modules call each other only through these functions. Keep signatures sta
   so the proposals name what the conversation is actually doing.
 - `ask(meta, prompt) -> [str]` - `claude -p --output-format json --model gateway.small_model("haiku",
   provider_of(meta)) --tools "" --no-session-persistence --strict-mcp-config --system-prompt …`, cwd
-  `<state>/claude-suggest`, env `spawn.claude_env({**meta.env, **spawn.effort_env(meta)}, "default", provider=…)`
-  (the session's own side and effort), timeout 15 s, at most two calls at a time; answer through `parse()`
-  (JSON array, else one line per item; bullets/numbers and quotes stripped, 3 at most, 100 chars each).
+  `<state>/claude-suggest`, env `spawn.claude_env(meta.env, "default", provider=…)` (the session's own side),
+  timeout 20 s, at most two calls at a time; answer through `parse()`
+  (JSON array, else one line per item; bullets/numbers and quotes stripped, 3 at most, 110 chars each).
 ## maxxing.claude_auth  (stdlib only, also used by the runner)
 - `record(ok, error=None, source="turn"|"test"|"check", provider=None)` - outcome of a real call on that side;
   `detect(text) -> str|None` finds a sign-in error; `status() -> {ok, method, detail, checked_at, error}` (GET
@@ -278,7 +278,10 @@ call it), only the API and the page are cut.
   agent's sessions) >= `usd_per_day`, `rate` = `run` messages of the last hour >= `runs_per_hour`); `depth >
   MAX_DEPTH` (3) -> `depth`. A refusal is a `skip` message, never retried. Otherwise a NEW session (`source:
   "agent"`, `cron: True` = no Telegram session thread, out of the human lists; env `MAXXING_AGENT`,
-  `MAXXING_AGENT_TRIGGER`, `MAXXING_AGENT_DEPTH`, + `MAXXING_AGENT_OUTSIDE=1` when `text` is given) and a `run`
+  `MAXXING_AGENT_TRIGGER`, `MAXXING_AGENT_DEPTH`, + `MAXXING_AGENT_OUTSIDE=1` when `text` is given or when the
+  `context()` it gets holds a result marked `outside`: one written by a run started with `text`, see `on_turn_end`;
+  such a start also gets `MAXXING_AGENT_OUTSIDE_FROM=context` and its own result is not marked; the owner's new
+  conversation gets no marked result at all) and a `run`
   message. `reply_to` (a thread message id) sends the message to that message's session instead
   (`service.send_message`, `continued: true`); a new `manual` / `telegram` / `agent:` start gets `context()` = the last
   3 results (500 characters each) between `THREAD-<hex>` markers; cron and feed runs get nothing. `tidy(path)` runs
@@ -566,7 +569,7 @@ listing (`clear_cache()` in tests). Web: `features/git/` (GitGraph = lane layout
 `components/ui/markdown.tsx`, lazy; GitPage = route `/git`, shown in the nav by `useNav()` when settings `git_page`).
 
 ## maxxing.team  (owner: organisation)
-Chats between people, `<state>/team/team.json` (format in the docstring), one lock (`_lock`), atomic writes, bus
+Chats between people, `<state>/team/team.json` (format in the docstring), one lock (`_lock`, a `config.ProcessLock` shared with `maxxing team`), atomic writes, bus
 topic `team`. `state()`, `messages(cid)`, `create_chat`, `send`, `react`, `create_poll`, `vote`, `mark_read`,
 `mark_sent` (a "to a session" click), `edit_message` / `delete_message`, `update_group` / `leave_group` / `set_muted`,
 `typing` and the read receipt (signals through `teampeer.signal_all`, never queued), `summarize(cid, ids, since)` (one `claude -p` without tools, Sonnet,
@@ -577,6 +580,9 @@ through `apply_remote(frm, contact, event)` which checks membership and authorsh
 the user is `ME`. Numbers from peers go through `_finite`; a group roster is stored only if we are in it.
 Web: `features/team/` (page `/team`, right panel `TeamPanel`, `Live.tsx` presence + notifications, `SendTo.tsx` from
 the session message menu).
+`recipients()` / `find_recipient(to)` / `send_to(to, text, files)` back `maxxing team send|list` (`cmd_team.py`,
+another process: hence the `ProcessLock`s of team and teampeer, and `notice_outside_writes()` called by the outbox
+worker so the pages refetch).
 
 ## maxxing.teampeer  (owner: organisation)
 Server-to-server transport, stdlib + httpx, protocol in the docstring. `<state>/team/peers.json` (600): peers,
@@ -881,9 +887,9 @@ visible in `ps`: never add a secret to this list; credentials go through `auth_e
 runner). Simplest for users: the `env` block of `~/.claude/settings.json`, read by Claude Code itself.
 To set them on the service: `systemctl edit claude-maxxing` -> `[Service]` `Environment=NAME=value`.
 
-`CLAUDE_CODE_EFFORT_LEVEL` can also be chosen per session (the model picker's **Effort** submenu):
-the session meta keeps `effort`, `spawn.effort_env(meta)` adds it to the turn's `claude_env`, and
-it wins over the service value for that turn (empty = the model's own default, service value if any).
+`CLAUDE_CODE_EFFORT_LEVEL` can also be chosen per session (the model picker's **Intelligence** row):
+the session meta keeps `effort` and the runner passes it as `claude --effort <level>` for that turn
+(empty = Claude Code's own default; a value set on the service still applies when the session is on Auto).
 
 ## Environment overrides (tests / development - never needed in production)
 - `MAXXING_WEB_DIST` serve the UI from another build folder (dev)
@@ -896,6 +902,7 @@ it wins over the service value for that turn (empty = the model's own default, s
 - `MAXXING_LICENSE_API` license server (default `https://api.harness-maxxing.com`) · `MAXXING_GIT_URL` repository an install still on archives moves to (tests) · `MAXXING_LICENSE_PING=0` no hourly loop: no registration heartbeat, no call to the cloud (tests)
 - `MAXXING_AUTH_CHECK=0` no background Claude sign-in verification (tests) · `MAXXING_AUTH_CHECK_DELAY` seconds
   before the first one (default 5)
+- `MAXXING_SEARCH_LOOP=0` no background search index refresh (tests: a query brings the sessions up to date itself)
 - `MAXXING_CLAUDE_UPDATE=0` no background Claude Code update (tests), `=1` also on a non-default state dir · `MAXXING_CLAUDE_UPDATE_DELAY` seconds before
   the first pass (default 600)
 - `MAXXING_GROQ_API` / `MAXXING_OPENAI_API` base URLs of the speech-to-text APIs (default the providers' `/v1`)
@@ -913,7 +920,11 @@ it wins over the service value for that turn (empty = the model's own default, s
   `invalidate_sizes()` after writing deep inside an existing item (backup restore's previous versions).
 - `maxxing/importer.py`: `prompt(agent)`, `inspect(zip)` (preview, writes nothing), `apply(zip)`,
   `finish_prompt(result)`; uploads in `state_dir("import")` (24 h). Never overwrites; secret scan =
-  `backup.scan_bytes`. API `/api/import`, CLI `maxxing import`.
+  `backup.scan_bytes`. API `/api/import`, CLI `maxxing import` (prints `finish_prompt` after an import). `HINTS` =
+  where each agent keeps things (Hermes: `~/.hermes/` with `memories/`, `cron/jobs.json`; OpenClaw: its workspace,
+  jobs in its own store). `_entries` strips every single folder above the export; `_plan`: a skill = the first
+  folder that holds `SKILL.md` (`skills/<category>/<name>/`), `memories/MEMORY.md|USER.md` = root memory;
+  `_apply` keeps the generated `# ` heading of a new level when the imported CLAUDE.md has none (description).
 - `maxxing/videos.py`: lighter copies for the player. `probe(p)` (ffprobe, cached by `sha1(path, mtime_ns,
   size)`), `status(p)`, `prepare(p, q)` -> `_encode` on a 1-worker pool (`nice -n 10 ffmpeg ... -progress pipe:1`,
   writes `<key>.part.mp4` then renames; `_jobs[key]` = state/progress/error in memory, lost on restart: a

@@ -266,7 +266,8 @@ def parse_once(value: str, zone: ZoneInfo | None = None) -> str:
             d = d.astimezone(zone or tz()).replace(tzinfo=None)   # year 1 / 9999 with an offset: out of range
         return d.strftime("%Y-%m-%dT%H:%M")
     except (ValueError, OverflowError):
-        raise CronError(f"once_at: '{value}' is not a date and time (YYYY-MM-DDTHH:MM)", "invalid_once") from None
+        shown = str(value).encode("utf-8", "replace").decode()   # a lone surrogate: the JSON error could not hold it
+        raise CronError(f"once_at: '{shown}' is not a date and time (YYYY-MM-DDTHH:MM)", "invalid_once") from None
 
 
 def once_ts(value: str, zone: ZoneInfo | None = None) -> float | None:
@@ -523,9 +524,9 @@ def restore_job(cid: str, topic_path: str | None = None) -> dict:
             raise CronError(f"no removed job {cid}", "not_found")
         if topic_path is not None:
             job = {**job, "topic_path": topic_path}
+        old = list(jobs)
         jobs.append({**_clean(job), "id": cid, "updated": time.time()})   # checked like a new job
-        sync_crontab(jobs)
-        _save_raw(jobs)
+        _commit(old, jobs)
     return get_job(cid)  # type: ignore[return-value]
 
 
@@ -881,6 +882,8 @@ def align_system_timezone(tz: str) -> bool:
     could not be switched (no systemd-timedated, polkit...): cron then still fires in the old zone."""
     if _crontab_file() is not None or os.environ.get("MAXXING_SYSTEM_TZ") == "0":
         return True
+    if tz in config.PSEUDO_ZONES:                      # never handed to timedatectl (see config.PSEUDO_ZONES)
+        return False
     try:
         cur = subprocess.run(["timedatectl", "show", "-p", "Timezone", "--value"],
                              capture_output=True, text=True, timeout=10).stdout.strip()
@@ -982,14 +985,30 @@ def _zone(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def guarded() -> bool:
-    """True when crontab lines must be guarded (clock kept and zones that differ)."""
-    if not keep_system_clock():
-        return False
+def _zones_differ() -> bool:
+    """config.timezone and the system zone are not the same clock (any offset that differs over the next year)."""
     a, b = _zone(config.load_config().get("timezone") or "UTC"), _zone(system_zone_name())
     now = dt.datetime.now(dt.timezone.utc)
     return any((now + dt.timedelta(days=30 * k)).astimezone(a).utcoffset()
                != (now + dt.timedelta(days=30 * k)).astimezone(b).utcoffset() for k in range(13))
+
+
+def guarded() -> bool:
+    """True when crontab lines must be guarded (clock kept and zones that differ)."""
+    return keep_system_clock() and _zones_differ()
+
+
+def fire_zone() -> ZoneInfo:
+    """The zone the crontab lines really fire in: config.timezone, except when the system zone differs and the lines
+    are not guarded (system_clock "follow", but the system zone was changed or broken outside Harness - doctor says
+    so). cron then fires on the system clock: a missed slot is one of THAT clock. Computed in config.timezone, every
+    job was "missed" at its displayed time, caught up, then started again by cron when the system clock got there."""
+    if keep_system_clock() or (_crontab_file() is not None and not os.environ.get("MAXXING_SYSTEM_ZONE")):
+        return tz()
+    try:
+        return _zone(system_zone_name()) if _zones_differ() else tz()
+    except Exception:  # noqa: BLE001 - never a stopped tick
+        return tz()
 
 
 def _whole_hours_apart() -> bool:
@@ -1657,7 +1676,7 @@ def tick(now: float | None = None) -> list[tuple[str, str]]:
     jobs = _read_raw()
     if not jobs:
         return []
-    zone, started = tz(), []
+    zone, started = fire_zone(), []
     runs: dict[str, list[dict]] = {}
     history = _all_runs()
     since = _known_since(history)
@@ -1761,7 +1780,7 @@ def _skip_reason(cid: str, trigger: str, attempt: int, now: float) -> str | None
         return "gone"
     job = {**DEFAULTS, **job}
     if trigger == "catch-up":
-        if catch_up_slot(job, _runs_of(cid), now, tz(), _known_since(_all_runs())) is None:
+        if catch_up_slot(job, _runs_of(cid), now, fire_zone(), _known_since(_all_runs())) is None:
             return "not missed any more"
     elif trigger == "retry":
         if _take_retry(cid, attempt, now) is None:
@@ -1803,7 +1822,7 @@ def run_job(cid: str, trigger: str = "manual", attempt: int = 1) -> dict | None:
         if why:
             log.info("cron %s: %s run skipped: %s", cid, trigger, why)
             return {"skipped": why, "cron_id": cid}     # the interrupted run is still reported (finally)
-        slot = catch_up_slot(job, _runs_of(cid), time.time(), tz()) if trigger == "catch-up" else None
+        slot = catch_up_slot(job, _runs_of(cid), time.time(), fire_zone()) if trigger == "catch-up" else None
         start = time.time()
         _mark(lockf, start)
         _live_locks[cid] = (lockf, start)
@@ -1979,15 +1998,23 @@ def spawn_run(cid: str, trigger: str = "manual", attempt: int = 1) -> None:
     if trigger != "manual":
         cmd += ["--trigger", trigger] + (["--attempt", str(attempt)] if attempt > 1 else [])
     if not units_available():
-        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        try:
+            subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        except OSError as e:
+            raise CronError(f"cannot start the job: {e}", "spawn_failed") from e
         return
     env_args = [f"--setenv={k}={v}" for k, v in os.environ.items()
                 if k.startswith("MAXXING_") and k != DETACH_ENV]          # the unit runs it inline, not again detached
-    r = subprocess.run(["systemd-run", "--collect", "--quiet", "--unit", unit_name(cid),
-                        "--description", f"Harness Maxxing job {cid}", *unit_properties(_raw_job(cid)),
-                        *env_args, "--", *cmd],
-                       capture_output=True, text=True, timeout=15)
+    try:
+        r = subprocess.run(["systemd-run", "--collect", "--quiet", "--unit", unit_name(cid),
+                            "--description", f"Harness Maxxing job {cid}", *unit_properties(_raw_job(cid)),
+                            *env_args, "--", *cmd],
+                           capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as e:        # the unit may still start later: the caller must not run the job again
+        raise CronError("systemd-run did not answer within 15 s", "spawn_timeout") from e
+    except OSError as e:
+        raise CronError(f"systemd-run failed: {e}", "spawn_failed") from e
     if r.returncode != 0:
         if "already" in r.stderr.lower() or "exists" in r.stderr.lower():
             raise CronError("this job is already running", "already_running")

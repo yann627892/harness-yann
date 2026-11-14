@@ -50,12 +50,45 @@ def test_memory_files_limit_and_settings(client, mx):
     by = {f["path"]: f for f in r["files"]}
     assert by["memory.md"]["lines"] == 11 and not by["memory.md"]["over"]
     assert by["projects/acme/topics/blog/memory.md"]["over"] and by["projects/acme/topics/blog/memory.md"]["level"] == "topic"
+    assert r["max_bytes"] == 20 * 1024 and not by["projects/acme/topics/blog/memory.md"]["heavy"]
+    (t / "memory.md").write_text(("- " + "x" * 2000 + "\n") * 12)   # few lines, very long bullets: as heavy to load
+    heavy = {f["path"]: f for f in client.get("/api/memory").json()["files"]}["projects/acme/topics/blog/memory.md"]
+    assert heavy["lines"] == 12 and heavy["over"] and heavy["heavy"]
 
     assert client.put("/api/settings", json={"memory_max_lines": 10}).status_code == 400
     assert client.put("/api/settings", json={"memory_max_lines": 0}).json()["memory_max_lines"] == 0
     assert not any(f["over"] for f in client.get("/api/memory").json()["files"])
-    assert "No line limit" in memory.compact_prompt(0) and "at most 300 lines" in memory.compact_prompt(300)
+    assert "No line limit" in memory.compact_prompt(0) and "at most 300 lines and 30 KB" in memory.compact_prompt(300)
 
+
+def test_memory_files_skip_what_is_not_a_regular_file_and_read_a_bounded_part(mx, monkeypatch):
+    import os
+    ws = config.workspace()
+    for name, make in (("zero", lambda p: p.symlink_to("/dev/zero")), ("fifo", lambda p: os.mkfifo(p)),
+                       ("big", lambda p: p.write_bytes(b"x\n" * 100))):
+        t = ws / "projects" / name / "topics" / "t"
+        t.mkdir(parents=True)
+        make(t / "memory.md")
+    monkeypatch.setattr(memory, "READ_MAX", 50)
+    by = {f["path"]: f for f in memory.files()}
+    assert "projects/zero/topics/t/memory.md" not in by and "projects/fifo/topics/t/memory.md" not in by
+    big = by["projects/big/topics/t/memory.md"]
+    assert big["bytes"] == 200 and big["lines"] == 25
+
+
+
+def test_a_project_folder_named_in_another_encoding_does_not_break_the_memory_list(client, mx):
+    import os
+    ws = config.workspace()
+    bad = os.path.join(os.fsencode(ws), b"projects", b"bad\xff")
+    os.makedirs(bad)
+    with open(os.path.join(bad, b"memory.md"), "wb") as f:
+        f.write(b"- x\n")
+    (ws / "projects" / "ok").mkdir()
+    (ws / "projects" / "ok" / "memory.md").write_text("- y\n")
+    r = client.get("/api/memory")
+    assert r.status_code == 200
+    assert [f["path"] for f in r.json()["files"] if f["level"] == "project"] == ["projects/ok/memory.md"]
 
 def test_changelog_parse():
     assert changelog.normalize("2.0.0-alpha.6") == changelog.normalize("2.0.0a6") == "2.0.0a6"
@@ -90,6 +123,11 @@ def test_known_windows_per_model(client, mx):
     store.record_windows({"modelUsage": {"claude-a": {"contextWindow": 1000000}, "claude-b": {"contextWindow": 200000}, "x": "bad"}})
     store.record_windows({"modelUsage": {"claude-b": {"contextWindow": 400000}}})
     assert store.known_windows() == {"claude-a": 1000000, "claude-b": 400000}
+    # the window of a session's next turn: its model's (else the default model's), else its last turn's
+    assert store.window_for({"model": "claude-b", "context_window": 1000000}, {}) == 400000
+    assert store.window_for({"model": "", "context_window": 200000}, {"default_model": "claude-a"}) == 1000000
+    assert store.window_for({"model": "claude-new", "context_window": 200000}, {}) == 200000
+    assert store.window_for({"model": "claude-new"}, {}) is None and store.window_for({"context_window": "x"}, {}) is None
     service._models_cache = (0, [])
     by = {m["id"]: m for m in service.models()}
     assert all("context_window" in m for m in by.values())

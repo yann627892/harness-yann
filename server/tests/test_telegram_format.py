@@ -204,3 +204,37 @@ def test_heading_with_a_long_run_of_spaces_renders_quickly():
     # The old lazy pattern took minutes here (cubic backtracking).
     assert time.monotonic() - start < 1
     assert out.startswith("<b>a") and out.endswith("b</b>")
+
+
+def test_render_keeps_an_emoji_message_within_the_utf16_limit():
+    # Telegram counts the limit in UTF-16 units: an emoji outside the BMP counts 2.
+    def u16(s):
+        return len(s.encode("utf-16-le", "surrogatepass")) // 2
+    for md in ("🚀" * 3000, "\n\n".join("🚀" * 1500 for _ in range(4)), "- " + "🚀" * 3000,
+               "```\n" + "🚀" * 3000 + "\n```", "| a | b |\n|---|---|\n| x | " + "🚀" * 3000 + " |"):
+        msgs = fmt.render(md)
+        assert msgs and all(u16(m) <= fmt.LIMIT and _balanced(m) for m in msgs)
+        assert sum(fmt.strip_tags(m).count("🚀") for m in msgs) == md.count("🚀")
+
+
+def _u16(s):
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def test_cron_report_and_feed_message_count_their_header_in_utf16(posted):
+    gateway.notify_cron_report("🔥" * 200, "\n\n".join("a" * 90 for _ in range(200)))
+    assert all(_u16(p) <= fmt.LIMIT for p in posted[-1][1])
+    ev = {"id": 1, "title": "🔥" * 300, "level": "info", "source": "🔥" * 200, "body": "😀" * 700}
+    text, _ = gateway.feed_message(ev)
+    assert _u16(text) <= fmt.LIMIT
+
+
+def test_agent_message_counts_its_header_in_utf16(monkeypatch):
+    got = []
+    monkeypatch.setattr(gateway, "token", lambda: "t")
+    monkeypatch.setattr(gateway, "tg_config", lambda: {"chat_id": 1})
+    monkeypatch.setattr(gateway, "_agent_thread_sync", lambda *a: None)
+    monkeypatch.setattr(gateway, "_agent_display", lambda p: "x" * 40)
+    monkeypatch.setattr(gateway, "_send_sync", lambda key, parts, *a, **k: got.append(parts) or True)
+    gateway._agent_send_sync("projects/a/topics/b/agents/c", fmt.render("😀" * 2040), True)
+    assert got and all(_u16(p) <= fmt.LIMIT for p in got[0])

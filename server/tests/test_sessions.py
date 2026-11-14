@@ -144,31 +144,6 @@ def test_attachments_and_uploads(client, topic, mx):
     assert bad.status_code == 400
 
 
-def test_effort_level_is_stored_and_reaches_each_turn(client, topic, mx):
-    s = client.post("/api/sessions", json={"path": topic, "message": "one", "effort": "high"}).json()
-    assert s["effort"] == "high"
-    wait_idle(client, s["id"])
-    assert calls(mx)[-1]["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "high"
-    p = client.patch(f"/api/sessions/{s['id']}", json={"effort": "xhigh"}).json()
-    assert p["effort"] == "xhigh" and p["model"] == s["model"]          # other fields untouched
-    client.post(f"/api/sessions/{s['id']}/messages", json={"text": "two"})
-    wait_idle(client, s["id"])
-    assert calls(mx)[-1]["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "xhigh"
-    assert client.patch(f"/api/sessions/{s['id']}", json={"effort": ""}).json()["effort"] == ""
-    client.post(f"/api/sessions/{s['id']}/messages", json={"text": "three"})
-    wait_idle(client, s["id"])
-    assert calls(mx)[-1]["env"]["CLAUDE_CODE_EFFORT_LEVEL"] is None    # back to the model's own default
-
-
-def test_an_effort_level_is_checked(client, topic):
-    s = client.post("/api/sessions", json={"path": topic, "message": "x"}).json()
-    wait_idle(client, s["id"])
-    for bad in ("ultra", "xhigh2", "HIGHER"):
-        r = client.patch(f"/api/sessions/{s['id']}", json={"effort": bad})
-        assert r.status_code == 400 and r.json()["error"] == "bad_effort", bad
-    assert client.patch(f"/api/sessions/{s['id']}", json={"effort": "AUTO"}).json()["effort"] == ""
-
-
 def test_follow_up_suggestions_use_the_small_model_once_per_turn(client, topic, mx):
     s = client.post("/api/sessions", json={"path": topic, "message": "find the zebra"}).json()
     wait_idle(client, s["id"])
@@ -680,6 +655,28 @@ def test_side_question_answers_without_touching_the_session(client, topic, mx):
     assert client.post(f"/api/sessions/{sid}/ask", json={"question": " "}).status_code == 400
 
 
+def test_side_question_during_the_first_turn_of_a_thread(client, topic, mx):
+    """`fresh` is cleared when a turn ends: a session at work on its first turn (or on the first turn after a
+    compaction) can already be asked about; before its thread exists the answer is "starting", not "never
+    answered"."""
+    from maxxing.sessions import store
+    sid = client.post("/api/sessions", json={"path": topic, "message": "build the thing SLOW"}).json()["id"]
+    wait_for(lambda: any("SLOW" in c["prompt"] for c in calls(mx)), 20)
+    m = store.read(sid)
+    assert m["state"] == "running" and m["fresh"] is True
+    r = client.post(f"/api/sessions/{sid}/ask", json={"question": "where are you at?"})
+    assert r.status_code == 200, r.text
+    assert r.json()["answer"].startswith("Echo: [Side question")
+    argv = calls(mx)[-1]["argv"]
+    assert argv[argv.index("--resume") + 1] == sid and "--fork-session" in argv
+    store.update(sid, csid="0" * 8 + "-0000-4000-8000-" + "0" * 12)       # a thread Claude has not written yet
+    r = client.post(f"/api/sessions/{sid}/ask", json={"question": "and now?"})
+    assert r.status_code == 409 and r.json()["error"] == "no_thread" and "starting" in r.json()["message"]
+    store.update(sid, csid=sid)
+    client.post(f"/api/sessions/{sid}/stop")
+    wait_idle(client, sid, 20)
+
+
 @pytest.mark.parametrize("out,status", [("[1]", 502), ("123", 502),
                                         (json.dumps({"result": "hi", "total_cost_usd": "n/a", "duration_ms": "x"}), 200)])
 def test_side_question_with_an_odd_answer_line(client, tmp_path, monkeypatch, out, status):
@@ -760,6 +757,23 @@ def test_auto_compact_after_a_big_context(client, topic, mx):
     assert store.read(s["id"])["csid"] != s["id"]
     # below the threshold, or off: nothing happens
     config.update_config(auto_compact_tokens=0)
+    s3 = client.post("/api/sessions", json={"path": topic, "message": "again BIGCTX NOTOOL"}).json()
+    assert wait_idle(client, s3["id"])["turns"] == 1
+
+
+def test_auto_compact_follows_the_model_window(client, topic, mx, monkeypatch):
+    """300k is out of reach of a 200k model: its sessions are summarized from 130k (window - 70k), not left to
+    Claude Code's own compaction in the middle of a turn."""
+    monkeypatch.setenv("FAKE_CLAUDE_WINDOW", "200000")
+    assert client.get("/api/claude/status").json()["auto_compact_tokens"] == 300000
+    s = client.post("/api/sessions", json={"path": topic, "message": "long work BIGCTX NOTOOL"}).json()
+    s2 = wait_for(lambda: (lambda x: x if x["turns"] == 3 and x["state"] == "idle" else None)(
+        client.get(f"/api/sessions/{s['id']}").json()), 30)
+    assert s2 is not None and s2["context_window"] == 200000
+    notes = [e["text"] for e in all_events(client, s["id"]) if e["type"] == "note"]
+    assert any("150k tokens" in n and "this model's window is 200k" in n for n in notes)
+    # the same context on a 1M model stays under the 300k asked
+    monkeypatch.setenv("FAKE_CLAUDE_WINDOW", "1000000")
     s3 = client.post("/api/sessions", json={"path": topic, "message": "again BIGCTX NOTOOL"}).json()
     assert wait_idle(client, s3["id"])["turns"] == 1
 
@@ -919,6 +933,11 @@ def test_idle_compaction_rule():
     # a context that is mostly the fixed part of every thread (CLAUDE.md, memory): nothing to save
     assert _idle_compact({**m, "base_tokens": 24000}, user, cfg, 9000) is None
     assert _idle_compact({**m, "base_tokens": 12000}, user, cfg, 9000) == ("2 h", 25)
+    # a threshold out of reach of the model's window (200k) is brought to window - 70k
+    big, far = {**m, "context_tokens": 140000}, {**cfg, "idle_compact_tokens": 200000}
+    assert _idle_compact(big, user, far, 9000) is None and _idle_compact(big, user, far, 9000, 1000000) is None
+    assert _idle_compact(big, user, far, 9000, 200000) == ("2 h", 140)
+    assert _idle_compact({**big, "context_tokens": 125000}, user, far, 9000, 200000) is None
 
 
 def test_queue_preview_skips_the_message_being_sent_and_cuts_long_texts():
@@ -977,6 +996,22 @@ def test_a_model_id_is_checked_before_it_reaches_the_command_line(client, topic,
         assert r.status_code == 200 and r.json()["model"] == good.strip()
 
 
+def test_the_effort_of_a_session_reaches_claude(client, topic, mx):
+    s = client.post("/api/sessions", json={"path": topic, "message": "Hi NOTOOL", "effort": "high"}).json()
+    assert s["effort"] == "high"
+    wait_idle(client, s["id"])
+    argv = calls(mx)[-1]["argv"]
+    assert argv[argv.index("--effort") + 1] == "high"
+    for bad in ("turbo", "--model", "high max"):
+        assert client.patch(f"/api/sessions/{s['id']}", json={"effort": bad}).json()["error"] == "bad_effort"
+    assert client.patch(f"/api/sessions/{s['id']}", json={"effort": " MAX "}).json()["effort"] == "max"
+    assert client.patch(f"/api/sessions/{s['id']}", json={"effort": ""}).json()["effort"] == ""
+    client.post(f"/api/sessions/{s['id']}/messages", json={"text": "Again NOTOOL"})
+    wait_for(lambda: len(calls(mx)) >= 2)
+    wait_idle(client, s["id"])
+    assert "--effort" not in calls(mx)[-1]["argv"]                        # back to Claude Code's default
+
+
 def test_the_web_page_finds_its_message_ids_in_the_queue_and_the_log(client, topic):
     """A page reloaded mid-send looks for its own ids (`client_ids`), not for the same text at about the same time:
     two identical messages stay two, and the browser's clock does not matter."""
@@ -992,3 +1027,21 @@ def test_the_web_page_finds_its_message_ids_in_the_queue_and_the_log(client, top
     users = [e for e in all_events(client, sid) if e["type"] == "user"]
     assert [u.get("client_ids") for u in users] == [["c-first"], ["c1", "c2"]]
     assert client.post(f"/api/sessions/{sid}/messages", json={"text": "x", "client_id": "bad id!"}).status_code == 422
+
+
+def test_the_open_sessions_are_shared_between_the_browsers(client, topic):
+    # nothing shared yet: a phone must not take that for "everything was closed"
+    assert client.get("/api/sessions/open").json() == {"ids": None, "rev": 0}
+    assert client.post("/api/sessions/open", json={"open": ["a", "b", "c"]}).json() == {"ids": ["a", "b", "c"], "rev": 1}
+    # the same list again changes nothing (no event, no new rev): two browsers cannot answer each other for ever
+    assert client.post("/api/sessions/open", json={"open": ["b"]}).json()["rev"] == 1
+    assert client.post("/api/sessions/open", json={"open": ["d", "bad id!"], "close": ["a"]}).json() == {"ids": ["b", "c", "d"], "rev": 2}
+    assert client.post("/api/sessions/open", json={"open": ["d\n", "e\n"]}).json()["ids"] == ["b", "c", "d"]
+    # an order names what it knows; the rest keeps its place, after
+    assert client.post("/api/sessions/open", json={"order": ["d", "b"]}).json()["ids"] == ["d", "b", "c"]
+    # a deleted session is open nowhere
+    s = client.post("/api/sessions", json={"path": topic, "message": "Hello NOTOOL"}).json()
+    wait_idle(client, s["id"], 20)
+    assert client.post("/api/sessions/open", json={"open": [s["id"]]}).json()["ids"][-1] == s["id"]
+    assert client.delete(f"/api/sessions/{s['id']}").status_code == 200
+    assert client.get("/api/sessions/open").json()["ids"] == ["d", "b", "c"]

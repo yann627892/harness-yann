@@ -24,8 +24,22 @@ def _root_only() -> bool:
     return True
 
 
+def _unknown(names, update: bool = False) -> bool:
+    try:
+        for n in names or []:
+            deps.get(n)
+            if update and n not in deps.UPDATE_ORDER:
+                raise deps.DepError(f"{n} is not updated by maxxing deps update")
+    except deps.DepError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return True
+    return False
+
+
 def cmd_deps(a) -> int:
     what = a.action
+    if what in ("verify", "update") and _unknown(a.names, what == "update"):
+        return 1
     if what == "list":
         rows = deps.status()
         if a.json:
@@ -92,7 +106,9 @@ def cmd_deps(a) -> int:
         try:
             r = deps.check()
         except Exception as e:  # noqa: BLE001 - offline / OSV down: not a vulnerability
-            print(f"  – vulnerability check skipped (osv.dev not reachable: {str(e)[:120]})")
+            why = f"osv.dev not reachable: {str(e)[:120]}"
+            print(json.dumps({"checked": 0, "vulnerable": [], "skipped": why}, indent=1) if a.json
+                  else f"  – vulnerability check skipped ({why})")
             return 0
         if a.json:
             print(json.dumps(r, indent=1))

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import bus, claude_models, config, voice, workspace
-from . import clip, normalize, spawn, store, titles, voicejobs, wake
+from . import clip, normalize, opened, spawn, store, titles, voicejobs, wake
 from .runner import SUMMARY_PROMPT  # noqa: F401  (also used by the runner's automatic compaction)
 
 log = logging.getLogger("maxxing.sessions")
@@ -35,24 +35,18 @@ _MODEL_RE = re.compile(rb'"model"\s*:\s*"(claude-[a-z0-9.-]+)"')
 _MODEL_ID = re.compile(r"[A-Za-z0-9._:@/\[\]][A-Za-z0-9._:@/\[\]-]{0,99}")
 
 
+def _check_effort(effort: str | None) -> str:
+    effort = (effort or "").strip().lower()
+    if effort and effort not in spawn.EFFORTS:
+        raise SessionError(400, "bad_effort", f"Effort is one of: {', '.join(spawn.EFFORTS)}")
+    return effort
+
+
 def _check_model(model: str | None) -> str:
     model = (model or "").strip()
     if model and not _MODEL_ID.fullmatch(model):
         raise SessionError(400, "bad_model", "Invalid model id")
     return model
-
-
-EFFORTS = ("low", "medium", "high", "xhigh", "max")     # CLAUDE_CODE_EFFORT_LEVEL values
-
-
-def _check_effort(effort: str | None) -> str:
-    """The reasoning effort of a session's turns; "" = the model's own default (no variable set)."""
-    e = (effort or "").strip().lower()
-    if e in ("auto", "default"):
-        return ""
-    if e and e not in EFFORTS:
-        raise SessionError(400, "bad_effort", "Invalid effort (low, medium, high, xhigh, max)")
-    return e
 
 
 def _check_provider(provider: str | None) -> str:
@@ -176,7 +170,7 @@ def public(meta: dict) -> dict:
             "state": m.get("state") or "idle", "queue": _waiting(m), "queue_items": _queue_preview(m), "sent_items": _sent_preview(m),
             "created": m.get("created"), "updated": m.get("updated") or m.get("created"),
             "turns": int(_num(m.get("turns"))), "cost_usd": round(_num(m.get("cost_usd")), 4),
-            "model": m.get("model") or "", "real_model": m.get("real_model") or None,
+            "model": m.get("model") or "", "effort": m.get("effort") or "", "real_model": m.get("real_model") or None,
             "context_tokens": m.get("context_tokens"), "context_window": _context_window(m),
             "archived": bool(m.get("archived")), "favorite": bool(m.get("favorite")),
             "notify": bool(m.get("notify")), "source": m.get("source") or "web", "cron": bool(m.get("cron")),
@@ -184,7 +178,19 @@ def public(meta: dict) -> dict:
             "last_text": m.get("last_text") or "", "error": m.get("error") or None,
             "plan_mode": bool(m.get("plan_mode")), "plan_ready": bool(m.get("plan_ready")),
             "permission_mode": m.get("permission_mode") or "", "approvals": _approvals_waiting(m["id"]),
-            "effort": m.get("effort") or ""}
+            "provider": m.get("provider") or None,
+            "code_repos": [r for r in (m.get("code_repos") or []) if isinstance(r, str)],
+            "worktree": _worktree_public(m)}
+
+
+def _worktree_public(m: dict) -> dict | None:
+    """The session's separate copy (worktrees.py), what the list and the header show."""
+    wt = m.get("worktree")
+    if not isinstance(wt, dict):
+        return None
+    return {**{k: wt.get(k) for k in ("path", "repo", "branch", "base", "pr", "kept_branch", "port")},
+            "removed": bool(wt.get("removed")),
+            "preparing": (wt.get("prepare") or {}).get("state") == "running"}
 
 
 def _approvals_waiting(sid: str) -> int:
@@ -334,11 +340,14 @@ def create_session(path: str, message: str | None = None, title: str | None = No
                    source: str = "web", notify: bool = False, cron: bool = False,
                    env: dict | None = None, timeout_s: int | None = None, plan_mode: bool = False,
                    permission_mode: str = "", auto_title: bool = False, voice_path: str | None = None,
-                   client_id: str | None = None, silent_ok: bool = False,
-                   provider: str | None = None, effort: str | None = None) -> dict:
-    """`auto_title`: `title` was made from the first message by the caller (Telegram) - still worth a short title.
+                   client_id: str | None = None, silent_ok: bool = False, ref: str | None = None,
+                   provider: str | None = None, effort: str | None = None, worktree: dict | None = None) -> dict:
+    """`worktree` = {repo, base?, prepare?, copy_env?, pr?}: the session works on a separate copy (worktrees.py),
+    made before its first turn.
+    `auto_title`: `title` was made from the first message by the caller (Telegram) - still worth a short title.
     `silent_ok`: a scheduled job that reports every run - its turn may answer [SILENT] (runner, spawn.CRON_SILENT).
-    `provider`: the credential its turns use (gateway:<id> | anthropic); "" = the default provider."""
+    `provider`: the credential its turns use (gateway:<id> | anthropic); "" = the default provider.
+    `ref`: as send_message's, for the first message."""
     try:
         p = workspace.normalize_path(path)
         workspace.topic_dir(p)
@@ -349,18 +358,37 @@ def create_session(path: str, message: str | None = None, title: str | None = No
     given = (title or "").strip()[:120]
     model = _check_model(model)
     prov = _check_provider(provider)
-    lvl = _check_effort(effort)
+    effort = _check_effort(effort)
     meta = store.new_meta(p, given or _default_title(p, message), model=model or "",
                           source=source, notify=notify, cron=cron, env=env, timeout_s=timeout_s, plan_mode=plan_mode,
-                          permission_mode=permission_mode, effort=lvl)
+                          permission_mode=permission_mode)
     if prov:
         meta["provider"] = prov
     automatic, has_text = auto_title or not given, bool((message or "").strip())
+    if effort:
+        meta["effort"] = effort
+    if worktree:
+        from .. import worktrees
+        from ..gitsafe import GitError
+        if (worktree.get("pr") or {}).get("outside"):
+            meta["plan_mode"] = True                  # code of a stranger: read before anything runs
+        try:
+            meta["worktree"] = worktrees.create(p, str(worktree.get("repo") or ""), worktree.get("base"),
+                                                given or meta["title"], meta["id"], pr=worktree.get("pr"),
+                                                prepare=worktree.get("prepare"), copy_env=worktree.get("copy_env"))
+        except GitError as e:
+            raise SessionError(e.status, e.code, e.message) from None
     if automatic and not has_text:
         meta["title_auto"] = meta["title"]       # short title on the first message (titles.first_message)
-    store.create(meta)
+    try:
+        store.create(meta)
+    except BaseException:
+        if meta.get("worktree"):
+            from .. import worktrees
+            worktrees.undo(meta["id"], meta["worktree"])
+        raise
     first = _item((message or "").strip(), files, source, **_client_ids(client_id),
-                  **({"silent_ok": True} if silent_ok else {}))
+                  **({"silent_ok": True} if silent_ok else {}), **({"refs": [str(ref)]} if ref else {}))
     if audio:
         _enqueue_voice(meta["id"], first, audio)
     elif (message or "").strip() or files:
@@ -420,10 +448,13 @@ def _enqueue_voice(sid: str, item: dict, audio: str, *, reset_cron: bool = False
 
 def send_message(sid: str, text: str, attachments: list[str] | None = None, source: str = "web",
                  hud: bool = False, voice_path: str | None = None, ref: str | None = None,
-                 client_id: str | None = None, silent_ok: bool = False) -> dict:
+                 client_id: str | None = None, silent_ok: bool = False, mentions: list[dict] | None = None,
+                 relay: dict | None = None) -> dict:
     """`ref`: an id the caller (Telegram) finds again in the meta of the turn that ran this message
     (`turn_refs` while it runs, `last_turn.refs` once it ended; see live_refs). `client_id`: the web page's own id
-    for it, kept in its queue item and its log line (`client_ids`)."""
+    for it, kept in its queue item and its log line (`client_ids`). `mentions`: the @ of the composer ({kind, ref},
+    see mentions.resolve): Claude reads with the message how to write to each. `relay`: sent by another session's
+    turn (relay_message)."""
     _require(sid)
     files = _check_attachments(attachments)
     audio = _check_voice(voice_path)
@@ -435,6 +466,12 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
     extra.update(_client_ids(client_id))
     if silent_ok:
         extra["silent_ok"] = True
+    if mentions:
+        from .. import mentions as mentions_mod
+        if found := mentions_mod.resolve(mentions, sender=sid):
+            extra["mentions"] = found
+    if relay:
+        extra["relay"] = relay
     if text.strip():
         titles.first_message(sid, text.strip())
     item = _item(text.strip(), files, source, **extra)
@@ -443,6 +480,66 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
     else:
         queued = _enqueue(sid, item, reset_cron=source != "cron")
     return {"queued": queued, "session": get_session(sid)}
+
+
+MAX_HOPS = 3                                           # session -> session -> ... (agents count too)
+
+
+def relay_message(to: str, text: str, attachments: list[str] | None = None, sender: dict | None = None,
+                  hops: int = 0) -> dict:
+    """`maxxing sessions send`: a turn (or the owner's shell) writes to another session, as a message typed in it.
+    `to`: a session id (or its first 6+ characters) or its title (case and accents ignored, a unique beginning is
+    enough). `sender`: the session of the turn ({id, title, path}) or None. `hops`: how many sends led to this one
+    (the sender turn's, + 1): refused above MAX_HOPS, so two sessions never answer each other forever.
+    -> {queued, session}"""
+    target = find_session(to)
+    if sender and target["id"] == sender.get("id"):
+        raise SessionError(400, "self", "A session cannot send a message to itself")
+    check_hops(hops)
+    relay = {"hops": hops}
+    if sender:
+        relay.update({"from": sender.get("id") or "", "title": sender.get("title") or "",
+                      "path": sender.get("path") or ""})
+    return send_message(target["id"], text, attachments, "session" if sender else "cli", relay=relay)
+
+
+def check_hops(hops: int) -> None:
+    """A message that comes from `hops` sends in a row (sessions, agents): refused above MAX_HOPS."""
+    if hops > MAX_HOPS:
+        raise SessionError(429, "too_many_hops", f"Not sent: this message comes from {hops - 1} sends in a row "
+                           f"between sessions or agents (at most {MAX_HOPS}). Ask the user instead.")
+
+
+def find_session(to: str) -> dict:
+    """A session (not archived first) by its id, the beginning of its id (6+ characters) or its title."""
+    import unicodedata
+
+    def fold(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c)).casefold().strip()
+    want = (to or "").strip()
+    if not want:
+        raise SessionError(400, "no_session", "Say which session the message is for")
+    from .. import agents
+    # an agent's sessions are reached through `maxxing agents send` only (its guards, outside text marked as such)
+    if store.is_valid_id(want) and (s := get_session(want)):
+        if agents.is_agent_path(s["path"]):
+            raise SessionError(403, "agent_session", "This is an agent's session: use `maxxing agents send <agent>`")
+        return s
+    rows = [s for s in list_sessions() if not agents.is_agent_path(s["path"])]
+    rows.sort(key=lambda s: bool(s.get("archived")))
+    if len(want) >= 6 and (hit := [s for s in rows if s["id"].startswith(want.lower())]):
+        if len(hit) == 1:
+            return hit[0]
+    f = fold(want)
+    found = [s for s in rows if fold(s["title"]) == f] or [s for s in rows if fold(s["title"]).startswith(f)]
+    live = [s for s in found if not s.get("archived")]
+    found = live or found
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise SessionError(404, "no_such_session", f"No session {to!r} (give its id or its title)")
+    names = "; ".join(f"{s['id'][:8]} {s['title']}" for s in found[:8])
+    raise SessionError(409, "ambiguous", f"Several sessions match {to!r}: {names} - give its id")
 
 
 def clear_queue(sid: str) -> dict:
@@ -555,6 +652,77 @@ def take_queue(sid: str) -> dict:
     return {"messages": out, "session": get_session(sid)}
 
 
+def _merged_relay(mine: list[dict]) -> tuple[list[str], dict | None]:
+    """Texts and relay of merged messages. One sender for all: its relay as is (one preface, the "↩ session" mark).
+    Mixed (the user's own text with a message sent by another session, or two senders): each relayed text gets its
+    own preface inline, so the user's words are never introduced as a colleague's. The hops are the highest."""
+    from .runner import relay_preface
+    relays = [x.get("relay") for x in mine if x.get("relay")]
+    texts = [x["text"] for x in mine if x.get("text")]
+    if not relays:
+        return texts, None
+    hops = max(int(r.get("hops") or 0) for r in relays)
+    senders = {r.get("from") or "" for r in relays}
+    if len(relays) == len(mine) and len(senders) == 1:
+        return texts, {**relays[0], "hops": hops}
+    texts = [(relay_preface(x["relay"]) if (x.get("relay") or {}).get("from") else "") + x["text"]
+             for x in mine if x.get("text")]
+    return texts, {"hops": hops}
+
+
+def _merged(mine: list[dict], **extra: Any) -> dict:
+    """The queued user messages `mine` as ONE queue item (texts, files, voice, ids and refs kept)."""
+    texts, relay = _merged_relay(mine)
+    return _item("\n\n".join(texts),
+                 [a for x in mine for a in x.get("attachments") or []],
+                 mine[-1].get("source") or "web", **extra,
+                 **({"voice": [v for x in mine for v in x.get("voice") or []]}
+                    if any(x.get("voice") for x in mine) else {}),
+                 **({"hud": True} if all(x.get("hud") for x in mine) else {}),
+                 **({"client_ids": ids} if (ids := [c for x in mine for c in x.get("client_ids") or []]) else {}),
+                 **({"plan_approved": True} if any(x.get("plan_approved") for x in mine) else {}),
+                 **({"mentions": ms} if (ms := [mm for x in mine for mm in x.get("mentions") or []]) else {}),
+                 **({"relay": relay} if relay else {}),
+                 **({"refs": refs} if (refs := [r for x in mine for r in x.get("refs") or []]) else {}))
+
+
+def inject(sid: str) -> dict:
+    """Add to plan, without interrupting: the messages waiting in the queue become ONE message written into the turn
+    that runs (SIGUSR2: the runner writes it to Claude's stream-json stdin). Claude Code reads it at its next step,
+    between two tool calls - nothing is cut short, unlike a steer; if the turn was already ending, it answers it
+    right after, in the same process. When the runner cannot write it (no stream-json input, the turn just ended),
+    the message simply stays queued and runs after the turn, as before - never lost, never sent twice.
+    `reason` when nothing was done: idle (no turn running / nothing queued), unsupported (a runner from before this
+    feature), summary (a compact / hand-off summary runs), voice / plan (voice messages and plan approvals run as
+    their own turn: steer or wait). -> {injected: bool, reason, session}"""
+    _require(sid)
+    with store.edit(sid) as m:
+        idx, q = _user_items(m)
+        mine = [q[i] for i in idx]
+        turn = m.get("turn_id")
+        if m.get("state") != "running" or not m.get("pid") or not idx:
+            reason = "idle"
+        elif "inject" not in (m.get("runner_caps") or []) or not turn:
+            reason = "unsupported"
+        elif m.get("turn_kind") in ("compact", "handoff"):
+            reason = "summary"
+        elif any(x.get("voice") for x in mine):
+            reason = "voice"
+        elif any(x.get("plan_approved") for x in mine):
+            reason = "plan"
+        else:
+            reason = ""
+            m["queue"] = [_merged(mine, inject=turn)] + [x for i, x in enumerate(q) if i not in set(idx)]
+            m["updated"] = time.time()
+        pid = int(m.get("pid") or 0)
+    if reason:
+        return {"injected": False, "reason": reason, "session": get_session(sid)}
+    if pid and store.runner_alive(sid, store.read(sid) or {}):
+        _signal(pid, signal.SIGUSR2)
+    bus.invalidate("sessions")
+    return {"injected": True, "reason": None, "session": get_session(sid)}
+
+
 def steer(sid: str) -> dict:
     """Steer: the messages waiting in the queue become ONE message that runs right now. The running turn
     is cut short (SIGUSR1: the runner ends it and continues with the head of the queue in the same Claude
@@ -568,16 +736,7 @@ def steer(sid: str) -> dict:
         # Only while a turn is really in progress (the runner popped its item and set its pid).
         if m.get("state") != "running" or not m.get("pid") or not idx:
             return {"steered": False, "interrupted": False, "session": get_session(sid)}
-        mine = [q[i] for i in idx]
-        merged = _item("\n\n".join(x["text"] for x in mine if x.get("text")),
-                       [a for x in mine for a in x.get("attachments") or []],
-                       mine[-1].get("source") or "web", steer=True,
-                       **({"voice": [v for x in mine for v in x.get("voice") or []]}
-                          if any(x.get("voice") for x in mine) else {}),
-                       **({"hud": True} if all(x.get("hud") for x in mine) else {}),
-                       **({"client_ids": ids} if (ids := [c for x in mine for c in x.get("client_ids") or []]) else {}),
-                       **({"plan_approved": True} if any(x.get("plan_approved") for x in mine) else {}),
-                       **({"refs": refs} if (refs := [r for x in mine for r in x.get("refs") or []]) else {}))
+        merged = _merged([q[i] for i in idx], steer=True)
         m["queue"] = [merged] + [x for i, x in enumerate(q) if i not in set(idx)]
         m["updated"] = time.time()
         pid, caps, turn = int(m.get("pid") or 0), m.get("runner_caps") or [], m.get("turn_id")
@@ -619,11 +778,14 @@ def update_session(sid: str, title: str | None = None, model: str | None = None,
     if model is not None:
         model = _check_model(model)
     prov = _check_provider(provider) if provider is not None else None
-    lvl = _check_effort(effort) if effort is not None else None
+    if effort is not None:
+        effort = _check_effort(effort)
     if path is not None:
         move_session(sid, path, cur)
+    renamed = False
     with store.edit(sid) as m:
         if title is not None and title.strip():
+            renamed = m.get("title") != title.strip()[:120]
             m["title"] = title.strip()[:120]
         if model is not None:
             m["model"] = model
@@ -632,6 +794,8 @@ def update_session(sid: str, title: str | None = None, model: str | None = None,
                 m["provider"] = prov
             else:
                 m.pop("provider", None)          # back to the default provider
+        if effort is not None:
+            m["effort"] = effort
         if archived is not None:
             m["archived"] = bool(archived)
         if notify is not None:
@@ -642,8 +806,9 @@ def update_session(sid: str, title: str | None = None, model: str | None = None,
             m["plan_mode"] = bool(plan_mode)
             if not plan_mode:
                 m["plan_ready"] = False
-        if lvl is not None:
-            m["effort"] = lvl                    # "" = back to the model's default effort
+    if renamed and cur.get("worktree"):
+        from .. import worktrees
+        worktrees.rename_for_title(sid, title.strip()[:120])
     bus.invalidate("sessions", "workspace")
     return get_session(sid) or {}
 
@@ -663,9 +828,13 @@ def delete_session(sid: str) -> None:
     m = _require(sid)
     if m.get("state") == "running":
         stop(sid)
+    if m.get("worktree"):
+        from .. import worktrees
+        worktrees.on_delete(m)
     from .. import trash
     trash.trash_session(sid)
     _models_seen.pop(sid, None)
+    opened.forget(sid)
     bus.invalidate("sessions", "workspace")
 
 
@@ -702,6 +871,8 @@ def handoff(sid: str) -> dict:
                          env=meta.get("env"), timeout_s=meta.get("timeout_s"), effort=meta.get("effort") or "")
     if meta.get("favorite"):                 # the continuation stays in the user's favorites
         new["favorite"] = True
+    if meta.get("effort"):
+        new["effort"] = meta["effort"]
     new["handoff_pending"] = time.time()     # messages sent to it wait for the summary seed (runner._handoff)
     store.create(new)
     store.append_log(new["id"], {"type": "mx_note", "level": "info", "at": time.time(),
@@ -1032,7 +1203,7 @@ def last_assistant_text(sid: str, turn_only: bool = False) -> str:
     for ev in reversed(_tail_events(sid)):
         if ev["type"] == "assistant":
             return ev["text"]
-        if turn_only and ev["type"] == "user":
+        if turn_only and ev["type"] == "user" and not ev.get("injected"):
             return ""
     return ""
 
@@ -1051,11 +1222,80 @@ def last_user_message(sid: str) -> dict | None:
     return None
 
 
+def _ended_turn(evs: list[dict], at: float | None, died: bool) -> tuple[int, int]:
+    """[start, end) of the turn that ended in `evs`. `at`: the time of its message (meta last_turn.at), so a message
+    queued meanwhile that already runs is never taken for it; `died`: it ended without being recorded (killed,
+    server restarted) - the last message's turn."""
+    # a message added to the running turn (inject) is part of that turn, not the start of another one
+    users = [i for i, ev in enumerate(evs) if ev["type"] == "user" and not ev.get("injected")]
+    def ran(i: int) -> bool:                  # the message of the turn at `at`
+        return bool(at) and abs((evs[i].get("at") or 0) - at) < 1e-3
+    if died:                                  # its message (none if it never started: the last one is recorded)
+        if users and ran(users[-1]):
+            return len(evs), len(evs)
+        start = users[-1] + 1 if users else 0
+    elif at:
+        start = next((i + 1 for i in reversed(users) if ran(i)), None)
+        if start is None:
+            if any((evs[i].get("at") or 0) < at for i in users):
+                return len(evs), len(evs)     # its message should be in there: nothing of another turn
+            # its message is older than the tail read (a turn that wrote more than the window): the tail starts
+            # inside it, up to the next message (one queued meanwhile)
+            return 0, users[0] if users else len(evs)
+    else:                                     # an older runner (no last_turn.at): the turn of the last result
+        end = next((i for i in range(len(evs) - 1, -1, -1) if evs[i]["type"] == "result"), len(evs))
+        return next((i + 1 for i in reversed(users) if i < end), 0), end
+    return start, next((i for i in users if i >= start), len(evs))
+
+
+TURN_READ = (512 * 1024, 4 * 1024 * 1024)    # tail read for a turn that ended, then once more for a big turn
+
+
+def _turn_window(sid: str, at: float | None, died: bool) -> tuple[list[dict], int, int]:
+    """The tail of the log and the [start, end) of the turn that ended in it: read further back (once, bounded)
+    when its message is not in the first read; past that, the part of the turn the tail holds (_ended_turn)."""
+    evs: list[dict] = []
+    for n in TURN_READ:
+        evs = _tail_events(sid, nbytes=n)
+        if died or not at or any(ev["type"] == "user" and abs((ev.get("at") or 0) - at) < 1e-3 for ev in evs) \
+                or store.log_size(sid) <= n:
+            break
+    start, end = _ended_turn(evs, at, died)
+    return evs, start, end
+
+
+def ended_turn_text(sid: str, at: float | None = None, died: bool = False) -> str:
+    """What the turn that ended wrote ("" if nothing), never a reply of another turn (see _ended_turn)."""
+    evs, start, end = _turn_window(sid, at, died)
+    return next((ev["text"] for ev in reversed(evs[start:end]) if ev["type"] == "assistant"), "")
+
+
+STEPS_MAX = 40                                # tools kept per turn in the agent's thread (the run shows them all)
+
+
+def ended_turn_steps(sid: str, at: float | None = None, died: bool = False) -> dict:
+    """The tools the last turn that ended used ({name, summary, error?}, the last STEPS_MAX), with its model and
+    duration: what the agent page shows under the turn's answer without reading its whole log."""
+    evs, start, end = _turn_window(sid, at, died)
+    uses: list[dict] = []
+    failed: set[str] = set()
+    for ev in evs[start:end]:
+        if ev["type"] == "tool_use":
+            uses.append(ev)
+        elif ev["type"] == "tool_result" and ev.get("is_error"):
+            failed.add(ev.get("tool_use_id") or "")
+    tools = [{"name": u.get("name") or "", "summary": (u.get("summary") or "")[:160],
+              **({"error": True} if u.get("id") in failed else {})} for u in uses]
+    res = next((ev for ev in reversed(evs[start:end]) if ev["type"] == "result"), {})
+    return {"tools": tools[-STEPS_MAX:], "tools_total": len(tools), "model": res.get("model") or "",
+            "duration_ms": int(res.get("duration_ms") or 0)}
+
+
 def last_result(sid: str) -> dict | None:
     for ev in reversed(_tail_events(sid)):
         if ev["type"] == "result":
             return ev
-        if ev["type"] == "user":
+        if ev["type"] == "user" and not ev.get("injected"):
             return None
     return None
 
@@ -1207,6 +1447,10 @@ def move_session(sid: str, path: str, meta: dict | None = None) -> None:
         return
     if m.get("state") == "running" or _waiting(m):
         raise SessionError(409, "busy", "Wait for the current turn to finish before moving the session")
+    from .. import worktrees
+    if worktrees.live(m):
+        raise SessionError(409, "has_copy", "This session works on a separate copy of its topic: finish or "
+                                            "discard the copy before moving it")
     root = workspace.root()
     with store.edit(sid) as mm:
         if mm.get("state") == "running" or _waiting(mm):      # again under the lock: a turn may have just started
@@ -1296,10 +1540,11 @@ def release_handoff(sid: str) -> None:
         _spawn(sid)
 
 
-def _ended(s: dict, m: dict) -> dict:
+def _ended(s: dict, m: dict, died: bool = False) -> dict:
     """The Session given to on_turn_end callbacks, plus `last_turn`: which item the ended turn ran (id, kind,
-    source, refs) - not part of the API Session."""
-    return {**s, "last_turn": m.get("last_turn") if isinstance(m.get("last_turn"), dict) else {}}
+    source, refs, at) and `turn_died`: it failed without being recorded (last_turn is then the turn before) - not
+    part of the API Session."""
+    return {**s, "last_turn": m.get("last_turn") if isinstance(m.get("last_turn"), dict) else {}, "turn_died": died}
 
 
 def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
@@ -1354,10 +1599,12 @@ def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
         changed = True
         if (prev[2], prev[3]) != (cur[2], cur[3]):
             ws_changed = True
+            if "/agents/" in (m.get("path") or ""):   # an agent's turn started / ended: its page refetches, not all
+                _agent_turns.add(m["path"])
         # a turn ended, or failed to start (error without a new turn - also when it failed before this watcher
         # ever saw it running: systemd-run refusing within one pass)
         if cur[1] > prev[1] or (prev[2] != "error" and cur[2] == "error" and cur[1] == prev[1]):
-            ends.append((_ended(s, m), last_result(sid)))
+            ends.append((_ended(s, m, died=cur[1] == prev[1]), last_result(sid)))
     for sid in [k for k, until in _held.items() if k not in alive or until <= time.time()]:
         _held.pop(sid, None)
         if sid in alive:
@@ -1371,6 +1618,7 @@ def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
 
 
 _firing: set[asyncio.Task] = set()
+_agent_turns: set[str] = set()       # agents whose session started or ended a turn since the last bus message (_scan)
 
 
 async def _fire(session: dict, result: dict | None) -> None:
@@ -1429,7 +1677,9 @@ async def _watch(interval: float) -> None:
                 await asyncio.to_thread(_stamp, t0)
                 stamped, dirty = t0, False
             if changed:
-                bus.invalidate(*(("sessions", "workspace") if ws else ("sessions",)))
+                agent_topics = [f"agents:{p}" for p in sorted(_agent_turns)]
+                _agent_turns.clear()
+                bus.invalidate(*(("sessions", "workspace") if ws else ("sessions",)), *agent_topics)
             for s, r in ends:
                 t = asyncio.get_running_loop().create_task(_fire(s, r))
                 _firing.add(t)                 # keep a reference: an unreferenced task can be collected mid-run

@@ -38,6 +38,7 @@ import {
   projectStats,
   statsOf,
   todayISO,
+  withKnownProjects,
   type QuickParse,
   type SortKey,
   type TaskFilters,
@@ -99,7 +100,7 @@ export default function TasksPage() {
 
   const data = q.data
   const corrupt = isApiError(q.error, 'corrupt_file') ? q.error : null
-  const tasks = React.useMemo(() => data?.tasks ?? [], [data])
+  const tasks = React.useMemo(() => withKnownProjects(data?.tasks ?? [], data?.projects ?? []), [data])
   const wsOrder = React.useMemo(() => ws.data?.projects.map((p) => p.name) ?? [], [ws.data])
   const emojis = React.useMemo(() => new Map((ws.data?.projects ?? []).filter((p) => p.emoji).map((p) => [p.name, p.emoji])), [ws.data])
   const projects = React.useMemo(() => orderProjects(data?.projects ?? [], wsOrder), [data, wsOrder])
@@ -258,6 +259,8 @@ export default function TasksPage() {
   const bodyRef = React.useRef<HTMLDivElement>(null)
   const width = useWidth(bodyRef)
   const narrow = width !== null && width < 800
+  // Narrower still (a wide second sidebar on a laptop): the view switch leaves the header too, as below 400 px
+  const tight = width !== null && width < 480
   const label = narrow ? 'sr-only' : 'max-lg:sr-only'
   const body = () => {
     if (prefs.view === 'board' && scope === 'all' && prefs.lanes)
@@ -299,7 +302,7 @@ export default function TasksPage() {
           onAdd={(due, text) => addParsed(parseQuickAdd(text, projects, today), { due })}
         />
       )
-    return <TaskList tasks={visible} projects={projects} today={today} groupBy={groupBy} sort={prefs.sort} hideProject={oneProject} onOpen={openTask} onToggleDone={toggleDone} />
+    return <TaskList tasks={visible} projects={projects} today={today} groupBy={groupBy} sort={prefs.sort} hideProject={oneProject} onOpen={openTask} onToggleDone={toggleDone} onMoveStatus={moveStatus} onDelete={remove} />
   }
 
   const viewSwitch =
@@ -316,17 +319,31 @@ export default function TasksPage() {
     ) : null
 
   const filterProps = { filters, onChange: setFilters, projects, labels, withProject: false }
-  const nav = data ? <ProjectNav scope={scope} onScope={setScope} projects={projects} stats={stats} emojis={emojis} onManage={() => setProjectsOpen(true)} /> : null
+  // The list's 🔍: filters the tasks (title, notes, labels) and keeps only the projects with a match (or a matching name).
+  const listQuery = search.q
+  const matchedProjects = React.useMemo(() => {
+    if (!listQuery.trim()) return null
+    const ids = new Set<string>()
+    for (const x of tasks) if (matches(x, { ...EMPTY_FILTERS, q: listQuery }, today)) ids.add(x.project_id || '')
+    return ids
+  }, [tasks, listQuery, today])
+  const onListQuery = (q: string) => {
+    setSearch((s) => ({ ...s, q }))
+    if (q && scope === 'overview') setScope('all')
+  }
+  const nav = data ? <ProjectNav scope={scope} onScope={setScope} projects={projects} stats={stats} emojis={emojis} onManage={() => setProjectsOpen(true)} query={listQuery} matched={matchedProjects} /> : null
 
   return (
     <Page
-      title={t('nav.tasks')}
+      // the entry picked in the list is the page's title (the page's name is in the list's head)
+      title={scope === 'overview' ? t('tasks.nav.overview') : scope === 'all' ? t('tasks.nav.all') : scope === 'none' ? t('tasks.noProject') : project ? <Sensitive length={6}>{project.name}</Sensitive> : t('nav.tasks')}
+      sensitiveTitle={t('nav.tasks')}
       description={t('tasks.description')}
       width="full"
       actions={
         <>
-          {/* below 400 px the switch leaves the header, or the title shrinks to "Tâc…" */}
-          {viewSwitch && <div className="max-[399px]:hidden">{viewSwitch}</div>}
+          {/* below 480 px (a phone) or in a narrow page the switch leaves the header, or it pushes the Menu button off a 393-412 px phone */}
+          {viewSwitch && !tight && <div className="max-[479px]:hidden">{viewSwitch}</div>}
           {prefs.view === 'board' && scope === 'all' && (
             <Button variant={prefs.lanes ? 'secondary' : 'outline'} size="sm" aria-pressed={prefs.lanes} onClick={() => setPrefs({ lanes: !prefs.lanes })} title={t('tasks.lanesHint')} data-testid="task-lanes">
               <Rows3 />
@@ -339,7 +356,7 @@ export default function TasksPage() {
               <PopoverTrigger asChild>
                 <Button size="sm" data-testid="task-new">
                   <Plus />
-                  <span className={narrow ? 'sr-only' : 'max-sm:sr-only'}>{t('tasks.cmd.new')}</span>
+                  <span className="max-sm:sr-only">{t('tasks.cmd.new')}</span>
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="end" className="w-[min(30rem,calc(100vw-2rem))] p-3">
@@ -351,12 +368,12 @@ export default function TasksPage() {
       }
     >
       {nav && (
-        <PageList id="tasks" label={t('nav.tasks')}>
+        <PageList id="tasks" label={t('nav.tasks')} search={{ value: listQuery, onChange: onListQuery, placeholder: t('tasks.nav.search') }}>
           {nav}
         </PageList>
       )}
       <div ref={bodyRef} className="mx-auto grid max-w-[1800px] gap-4">
-        {viewSwitch && <div className="min-[400px]:hidden">{viewSwitch}</div>}
+        {viewSwitch && (tight ? <div>{viewSwitch}</div> : <div className="min-[480px]:hidden">{viewSwitch}</div>)}
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-4">
           {corrupt && (
             <Callout
@@ -428,7 +445,7 @@ export default function TasksPage() {
         </div>
       </div>
       {data && <BulkBar tasks={tasks} visible={visible} projects={projects} labels={labels} today={today} />}
-      <TaskSheet id={openId} tasks={data?.tasks} projects={projects} loading={q.isPending} onClose={closeTask} onManageProjects={() => setProjectsOpen(true)} />
+      <TaskSheet id={openId} tasks={data ? tasks : undefined} projects={projects} loading={q.isPending} onClose={closeTask} onManageProjects={() => setProjectsOpen(true)} />
       <ProjectsDialog open={projectsOpen} onOpenChange={setProjectsOpen} projects={projects} tasks={tasks} />
     </Page>
   )
@@ -544,7 +561,7 @@ function BoardSkeleton() {
   return (
     <div className="grid gap-4 md:grid-cols-3" aria-hidden>
       {[3, 2, 2].map((n, i) => (
-        <div key={i} className="grid content-start gap-2 rounded-xl border bg-muted/25 p-2 max-md:hidden first:max-md:grid">
+        <div key={i} className="grid content-start gap-2 rounded-xl border bg-fill-1 p-2 max-md:hidden first:max-md:grid">
           <Skeleton className="m-1 h-5 w-24" />
           {Array.from({ length: n }, (_, j) => (
             <Skeleton key={j} className="h-[68px] rounded-lg" />

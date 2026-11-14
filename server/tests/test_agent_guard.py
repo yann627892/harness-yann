@@ -9,14 +9,27 @@ import sys
 from pathlib import Path
 
 from conftest import wait_idle
-from test_agents import A, _calls, _create, _on
+from test_agents import A, _calls, _create as _create_any, _on, _run
+
+
+def _create(client, **extra) -> dict:
+    """An agent in its sandbox (new agents are free unless they read outside text: test_new_agents_are_free...)."""
+    return _create_any(client, **{"sandbox": True, **extra})
 
 
 def _settings(argv: list[str]) -> dict:
     return json.loads(argv[argv.index("--settings") + 1])
 
 
-def test_new_agents_are_sandboxed_and_never_bypass(client, topic, mx):
+def test_new_agents_are_free_unless_they_read_outside_text(client, topic, mx):
+    _on(client)
+    assert _create_any(client, name="free")["sandbox"] is False                 # free like a session
+    feed = [{"kind": "feed", "source": "shop", "prompt": "NOTOOL handle it"}]
+    assert _create_any(client, name="watcher", triggers=feed)["sandbox"] is True   # outside text: protected
+    assert _create_any(client, name="mine", triggers=feed, sandbox=False)["sandbox"] is False
+
+
+def test_sandboxed_agents_never_bypass(client, topic, mx):
     _on(client)
     a = _create(client, permission_mode="bypass", domains=["API.github.com", "https://*.example.com/"],
                 writable=["drafts", "."])
@@ -24,7 +37,7 @@ def test_new_agents_are_sandboxed_and_never_bypass(client, topic, mx):
     assert a["writable"] == ["drafts", "."]
     assert client.patch(f"/api/agents/acme/blog/writer", json={"domains": ["bad host!"]}).status_code == 400
     assert client.patch(f"/api/agents/acme/blog/writer", json={"writable": ["../x"]}).status_code == 400
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")
     wait_idle(client, run["session"]["id"])
     argv = _calls()[-1]["argv"]
     assert "--dangerously-skip-permissions" not in argv
@@ -45,7 +58,7 @@ def test_new_agents_are_sandboxed_and_never_bypass(client, topic, mx):
     assert argv[argv.index("--add-dir") + 1] == f"{root}/projects/acme/topics/blog"     # "." holds drafts
     # switched off: the agent's own mode, no sandbox
     client.patch("/api/agents/acme/blog/writer", json={"sandbox": False})
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")
     wait_idle(client, run["session"]["id"])
     argv = _calls()[-1]["argv"]
     assert "--dangerously-skip-permissions" in argv and "sandbox" not in _settings(argv)
@@ -189,7 +202,7 @@ def test_claude_code_agent_file_export_and_import(client, topic, mx):
     a = r.json()
     assert a["path"] == "projects/acme/topics/blog/agents/code-reviewer" and a["display_name"] == "Code Reviewer"
     assert a["allowed_tools"] == ["Read", "Grep"] and a["model"] == "" and a["permission_mode"] == "bypass"
-    assert a["sandbox"] is True and a["ignored"] == ["mcpServers", "memory"]
+    assert a["sandbox"] is False and a["ignored"] == ["mcpServers", "memory"]           # free like any new one
     assert a["description"] == "Reviews code: quality, security\n\nYou are a senior reviewer."
     assert client.post("/api/agents/import", json={"topic_path": "projects/acme/topics/blog",
                                                    "markdown": "no front matter"}).status_code == 400
@@ -257,13 +270,27 @@ def test_templates_bring_their_domains():
     assert agent_templates.fields(agent_templates.get("writer", "en"))["domains"] == []
 
 
+def test_templates_that_read_the_web_are_protected():
+    """A page read on a schedule may carry orders, as a webhook or a mail does: every template that fetches without
+    asking (curl, WebFetch, WebSearch) starts in its sandbox, not only those with a webhook or a mailbox."""
+    from maxxing import agent_templates
+    for tid in ("sales", "orders", "watch", "writer", "uptime"):
+        t = agent_templates.get(tid, "en")
+        assert not t["approvals"] and agent_templates.reads_web(t["allowed_tools"]), tid
+        assert agent_templates.fields(t)["sandbox"] is True, tid
+    assert not agent_templates.reads_web(agent_templates.READ + ["Bash(maxxing mail:*)", "Edit(./drafts/**)"])
+    for t in agent_templates.listing("en"):             # no template pre-allows curl outside the sandbox
+        if any(x.startswith("Bash(") and "maxxing" not in x for x in t["allowed_tools"]):
+            assert agent_templates.fields(t).get("sandbox") is True, t["id"]
+
+
 def test_an_agent_never_changes_its_own_settings(client, topic, mx, monkeypatch):
     from maxxing import agent_guard, agents
     _on(client)
     _create(client)
     root = client.get("/api/workspace/tree").json()["root"]
     (Path(root) / "projects/acme/topics/blog/.mcp.json").write_text("{}")
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")
     wait_idle(client, run["session"]["id"])
     s = _settings(_calls()[-1]["argv"])
     locked = s["sandbox"]["filesystem"]["denyWrite"]
@@ -317,7 +344,7 @@ def test_writable_topic_never_opens_the_agents_or_the_topic_files(client, topic,
     (t / "site").mkdir()
     (t / "README.md").write_text("hi")
     (t / "memory.md").write_text("")
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")
     wait_idle(client, run["session"]["id"])
     argv = _calls()[-1]["argv"]
     s = _settings(argv)
@@ -334,6 +361,46 @@ def test_writable_topic_never_opens_the_agents_or_the_topic_files(client, topic,
     assert argv[argv.index("--add-dir") + 1] == str(t)
     from maxxing import agents
     assert agents.clean({"writable": ["agents", "agents/x", "drafts"]})["writable"] == ["drafts"]
+
+
+def test_writable_topic_never_opens_the_topics_permission_file(client, topic, mx):
+    """The topic's .maxxing.json (permission mode and "Always allow" rules of the owner's sessions there) is never
+    writable by a sandboxed agent, even with `writable: "."` or naming it; missing, it gets no placeholder."""
+    from maxxing import agent_guard, agents
+    _on(client)
+    _create(client, writable=["."])
+    root = Path(client.get("/api/workspace/tree").json()["root"])
+    t = root / "projects/acme/topics/blog"
+    (t / "README.md").write_text("hi")
+    a = agents.load(A)
+    fs = agent_guard.settings(A, a)["sandbox"]["filesystem"]
+    assert str(t / ".maxxing.json") not in fs["denyWrite"]                 # missing: no placeholder mounted
+    (t / ".maxxing.json").write_text('{"permission_mode": "ask"}')
+    run = _run("NOTOOL hi")
+    wait_idle(client, run["session"]["id"])
+    s = _settings(_calls()[-1]["argv"])
+    fs = s["sandbox"]["filesystem"]
+    assert str(t / ".maxxing.json") not in fs["allowWrite"] and str(t / ".maxxing.json") in fs["denyWrite"]
+    assert f"Edit(/{t}/.maxxing.json)" in s["permissions"]["deny"]          # Write / Edit (--add-dir)
+    assert f"{t}/README.md" in fs["allowWrite"]                             # the rest of the topic stays writable
+    # named on its own: allowWrite may list it, denyWrite wins
+    fs = agent_guard.settings(A, {**a, "writable": [".maxxing.json"]})["sandbox"]["filesystem"]
+    assert str(t / ".maxxing.json") in fs["denyWrite"]
+
+
+def test_topic_mcp_json_write_is_denied_even_when_the_file_does_not_exist(client, topic, mx):
+    """With `writable: "."`, Write/Edit (--add-dir) could create the topic's .mcp.json, whose servers every session
+    of the topic would then start. The deny rule holds whether or not the file exists; the sandbox mount still gets
+    no placeholder for a missing one."""
+    from maxxing import agent_guard, agents
+    _on(client)
+    _create(client, writable=["."])
+    t = Path(client.get("/api/workspace/tree").json()["root"]) / "projects/acme/topics/blog"
+    assert not (t / ".mcp.json").exists()
+    assert f"Edit(/{t}/.mcp.json)" in agent_guard.topic_edit_denied(A)
+    s = agent_guard.settings(A, agents.load(A))
+    assert f"Edit(/{t}/.mcp.json)" in s["permissions"]["deny"]
+    assert str(t / ".mcp.json") not in s["sandbox"]["filesystem"]["denyWrite"]   # missing: no placeholder mounted
 
 
 def test_writable_links_never_lead_outside_the_topic(client, topic, mx, tmp_path):

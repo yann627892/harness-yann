@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { api, seg } from '../api'
+import { api, networkError, seg } from '../api'
 import { forgetDraft } from '../drafts'
 import type {
   CreateSessionBody,
+  MentionTarget,
   Ok,
   PatchSessionBody,
   SendMessageBody,
@@ -146,8 +147,24 @@ export function useDeleteSession() {
 }
 export function useSendMessage() {
   const set = useSetSessionCache()
+  const qc = useQueryClient()
   return useMut(({ id, ...b }: SendMessageBody & { id: string }) => api.post<SendMessageResult>(`/api/sessions/${seg(id)}/messages`, b), {
-    onSuccess: (r) => set(r.session),
+    // The answer is the Session as it was right after the message was queued. On a slow connection the stream may
+    // already have given a later one (the runner took the message): the older one would list it as "sent, not in
+    // the log yet" again, a second bubble that stays for the whole turn (no other state frame comes).
+    onSuccess: (r) => {
+      const cur = qc.getQueryData<Session>(qk.sessions.one(r.session.id))
+      if (!cur || !(cur.updated > r.session.updated)) set(r.session)
+    },
+  })
+}
+/** Who the composer's @ can name: the other sessions, the agents, the Team contacts (asked once an @ is typed). */
+export function useMentionTargets(sid: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['mentions', sid],
+    queryFn: () => api.get<{ items: MentionTarget[] }>(`/api/sessions/${seg(sid)}/mentions`).then((r) => r.items),
+    enabled: enabled && !!sid,
+    staleTime: 30_000,
   })
 }
 export function useClearQueue() {
@@ -171,6 +188,15 @@ export function useTakeQueue() {
 export function useSteerSession() {
   const set = useSetSessionCache()
   return useMut((id: string) => api.post<{ steered: boolean; interrupted: boolean; session: Session }>(`/api/sessions/${seg(id)}/steer`), {
+    onSuccess: (r) => set(r.session),
+    invalidate: invSessions,
+  })
+}
+/** Add to plan: the queued messages go into the running turn without interrupting it (Claude reads them at its next
+ *  step). `reason` when nothing was done: idle | unsupported | summary | voice | plan. */
+export function useInjectSession() {
+  const set = useSetSessionCache()
+  return useMut((id: string) => api.post<{ injected: boolean; reason: string | null; session: Session }>(`/api/sessions/${seg(id)}/inject`), {
     onSuccess: (r) => set(r.session),
     invalidate: invSessions,
   })
@@ -287,7 +313,7 @@ export function uploadAttachment(
       if (xhr.status >= 200 && xhr.status < 300 && data.files?.[0]) resolve(data.files[0])
       else reject(new Error(data.message || data.error || `HTTP ${xhr.status}`))
     }
-    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.onerror = () => reject(networkError())
     xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'))
     signal?.addEventListener('abort', () => xhr.abort())
     const fd = new FormData()

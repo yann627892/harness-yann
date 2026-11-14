@@ -1,3 +1,5 @@
+import pytest
+
 from _org_helpers import client, org  # noqa: F401
 from maxxing import config
 
@@ -5,7 +7,7 @@ from maxxing import config
 def test_get_defaults(client, org):
     s = client.get("/api/settings").json()
     assert s == {"timezone": "UTC", "language": "en", "public_url": "", "files_root": str(org.tmp),
-                 "presentation_default": False, "usage_widget": False, "tasks_page": False, "git_page": False, "infra_page": False, "team_page": False, "agents_page": False, "mail_page": False,
+                 "presentation_default": False, "usage_widget": False, "tasks_page": False, "git_page": False, "code_mode": False, "infra_page": False, "team_page": False, "agents_page": False, "mail_page": False,
                  "maxxing_mode": False,
                  "memory_max_lines": 200, "result_line_hidden": [], "donation_hidden": False, "sidebar_order": []}
 
@@ -53,6 +55,8 @@ def test_put_and_validate(client, org):
     assert cfg["timezone"] == "Europe/Paris" and cfg["port"] == 8787          # other keys untouched
 
     assert client.put("/api/settings", json={"timezone": "Mars/Base"}).json()["error"] == "invalid_timezone"
+    # `localtime` is a link to /etc/localtime, not a zone: handed to timedatectl it breaks the server's clock
+    assert client.put("/api/settings", json={"timezone": "localtime"}).json()["error"] == "invalid_timezone"
     assert client.put("/api/settings", json={"language": "de"}).status_code == 422
     assert client.put("/api/settings", json={"public_url": "ftp://x"}).json()["error"] == "invalid_url"
     assert client.put("/api/settings", json={"files_root": "/does/not/exist"}).json()["error"] == "invalid_files_root"
@@ -144,3 +148,30 @@ def test_a_broken_saved_sidebar_order_never_breaks_the_settings(client, org):
     got = client.get("/api/settings").json()["sidebar_order"]
     assert got == [f"/p{i}" for i in range(40)]
     assert client.put("/api/settings", json={"sidebar_order": got}).status_code == 200
+
+
+def test_unknown_tilde_user_is_an_invalid_files_root(client, org):
+    # Path.expanduser raises RuntimeError for a ~user that does not exist: a refused value, not a 500
+    r = client.put("/api/settings", json={"files_root": "~nosuchuser-mx-test/files"})
+    assert r.status_code == 400 and r.json()["error"] == "invalid_files_root"
+
+
+@pytest.mark.parametrize("root", ["/tmp/" + "a" * 300, "/" + "a" * 5000], ids=["long-name", "long-path"])
+def test_a_files_root_too_long_is_invalid_not_a_500(client, org, root):
+    # is_dir() lets ENAMETOOLONG through on Python 3.12
+    r = client.put("/api/settings", json={"files_root": root})
+    assert r.status_code == 400 and r.json()["error"] == "invalid_files_root"
+
+
+def test_a_hand_edited_result_line_hidden_of_the_wrong_type_never_breaks_the_settings(client, org):
+    for bad in (5, "cost", {"cost": 1}):
+        config.update_config(result_line_hidden=bad)
+        r = client.get("/api/settings")
+        assert r.status_code == 200 and r.json()["result_line_hidden"] == []
+
+
+def test_a_lone_surrogate_in_the_public_url_is_refused(client, org):
+    """Valid JSON that config.json cannot store: invalid_url, not a 500."""
+    r = client.put("/api/settings", content=b'{"public_url": "https://ui.example.com/\\ud800"}',
+                   headers={"content-type": "application/json"})
+    assert r.status_code == 400 and r.json()["error"] == "invalid_url", r.text

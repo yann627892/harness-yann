@@ -16,12 +16,19 @@ Behaviour is driven by the prompt (read from stdin, or a positional argument):
   HUGE          a 3 MB tool result, an image result and a 100 kB Write input (log clipping tests)
   AUTH_EXPIRED  (or env FAKE_CLAUDE_AUTH_EXPIRED=1) fails like an expired OAuth sign-in
   BIGCTX        the last answer reports a 150k-token context (automatic compaction tests)
+                (env FAKE_CLAUDE_WINDOW: the context window the result reports, default 1000000)
   MCPUSE:<srv>  calls the tool mcp__<srv>__ping (MCP auto-loading tests)
   MCPLOAD       runs `maxxing mcp load $FAKE_CLAUDE_MCPLOAD` (python -m maxxing) like a turn asking for a server
   APPROVE       asks the --permission-prompt-tool MCP server about a Bash call (approval tests)
+  ASKNET        (stream-json input) asks the host on the control channel to reach example.org (`can_use_tool`
+                SandboxNetworkAccess, like the sandbox) and writes the answer to $FAKE_CLAUDE_DIR/asknet.txt
   REPLY_AS x: t answers t when the turn runs in a folder named x (agent groups; the last such line wins)
   MCPINIT       the init event lists the user server Facebook-ads and the connector "claude.ai Google Drive"
   NORESULT      exits right after the init line (no result), stdin still open
+  WAITMSG       (stream-json input) waits up to $FAKE_CLAUDE_WAITMSG_S s (default 10) for a user message written
+                to stdin during the turn and folds it into the SAME turn ("Read mid-turn: <text>"), like Claude
+                Code reading a message queued while it works at its next step; a message after it is a new turn
+  WRITEFILE:<p> writes "changed by the fake\n" to <p> (relative to the turn's folder) with a Write tool call
   BGTASK:<name> starts a background command (task_started / background_tasks_changed) that ends after
                 $FAKE_CLAUDE_BG_S s (default 3): writes $FAKE_CLAUDE_DIR/bg-<name>.done, task_notification, then a
                 turn by itself ("Background task <name> finished.") - like Claude Code
@@ -31,6 +38,9 @@ result `error_during_execution`; background tasks keep running), and the process
 no background task is left.
 A `--system-prompt` that names chat sessions (short titles) gets $FAKE_CLAUDE_TITLE (default "Fake short
 title") as its `-p --output-format json` answer; FAIL / AUTH_EXPIRED in the message still fail.
+An `--append-system-prompt` about the Feedback button (the check before a feedback is sent) gets
+$FAKE_CLAUDE_FEEDBACK (default: a "send" verdict) the same way.
+A `--system-prompt` that writes a pull request answers "Title: Make two loud", then "Asked: <the first User: line>".
 Threads are remembered in $FAKE_CLAUDE_DIR (default /tmp/fake-claude-<uid>): --resume of an
 unknown id fails ("No conversation found…"), --session-id of a known id fails ("already in use").
 Every call is appended to $FAKE_CLAUDE_DIR/calls.jsonl (argv, prompt, cwd, a few env vars).
@@ -42,6 +52,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -64,7 +75,8 @@ def parse(argv: list[str]) -> dict:
                   "--input-format": "input", "--settings": "settings", "--tools": "tools",
                   "--system-prompt": "system_prompt", "--append-system-prompt": "append_system_prompt",
                   "--mcp-config": "mcp_config", "--permission-prompt-tool": "permission_prompt_tool",
-                  "--max-budget-usd": "max_budget"}
+                  "--max-budget-usd": "max_budget", "--effort": "effort", "--allowedTools": "allowed_tools",
+                  "--add-dir": "add_dir"}
     for a in it:
         if a in ("-p", "--print"):
             o["print"] = True
@@ -111,9 +123,12 @@ def _agents(sid: str, model: str, seconds: float) -> None:
 
 EMIT_LOCK = threading.Lock()
 INTERRUPT = threading.Event()
+CONTROL: queue.Queue = queue.Queue()                   # the host's control_response lines (ASKNET)
 EVENTS: queue.Queue = queue.Queue()                    # ("user", text, images) / ("bgdone", name) / ("eof",)
 BG: dict[str, str] = {}                                # background tasks running: task id -> description
 BG_LOCK = threading.Lock()
+MIDTURN = threading.Event()                            # a WAITMSG turn takes the next user message itself
+MID: queue.Queue = queue.Queue()
 
 
 def emit(ev: dict) -> None:
@@ -143,13 +158,19 @@ def _stdin_reader() -> None:
             ev = json.loads(line)
         except ValueError:
             continue
+        if isinstance(ev, dict) and ev.get("type") == "control_response":
+            CONTROL.put(ev)
+            continue
         if isinstance(ev, dict) and ev.get("type") == "control_request":
             if (ev.get("request") or {}).get("subtype") == "interrupt":
                 INTERRUPT.set()
             emit({"type": "control_response", "response": {"subtype": "success", "request_id": ev.get("request_id")}})
             continue
         got = _user_text(line)
-        if got:
+        if got and MIDTURN.is_set():
+            MIDTURN.clear()
+            MID.put(got)
+        elif got:
             EVENTS.put(("user", *got))
     EVENTS.put(("eof",))
 
@@ -220,7 +241,7 @@ def result(sid: str, model: str, text: str, ok: bool = True, errors: list | None
          "usage": usage(10, 40, 2400, 600),
          "modelUsage": {model: {"inputTokens": 10, "outputTokens": 40, "cacheReadInputTokens": 2400,
                                 "cacheCreationInputTokens": 600, "costUSD": cost,
-                                "contextWindow": 1000000}} if ok else {},
+                                "contextWindow": int(os.environ.get("FAKE_CLAUDE_WINDOW") or 1000000)}} if ok else {},
          "permission_denials": [], "uuid": str(uuid.uuid4())}
     if errors:
         r["errors"] = errors
@@ -232,8 +253,7 @@ def record(o: dict, prompt: str, images: int = 0, continued: bool = False) -> No
     with open(STORE / "calls.jsonl", "a") as f:
         f.write(json.dumps({"argv": sys.argv[1:], "prompt": prompt, "images": images, "cwd": os.getcwd(),
                             "env": {k: os.environ.get(k) for k in ("IS_SANDBOX", "CLAUDE_CODE_OAUTH_TOKEN",
-                                                                   "ANTHROPIC_API_KEY", "MX_TEST_VAR",
-                                                                   "CLAUDE_CODE_EFFORT_LEVEL",
+                                                                   "ANTHROPIC_API_KEY", "MX_TEST_VAR", "MAXXING_PORT",
                                                                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
                                                                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
                                                                    "MAXXING_SESSION", "ANTHROPIC_BASE_URL",
@@ -443,6 +463,15 @@ def turn(o: dict, sid: str, model: str, prompt: str, t0: float) -> int | None:
             print(json.dumps(result(sid, model, '["Run the tests", "Show me the diff", "Explain the change"]',
                                     t0=t0, keep=False)))
             return 0
+        if "description of a GitHub pull request" in (o.get("system_prompt") or ""):
+            asked = re.search(r"^User: (.*)$", prompt, re.M)
+            text = "Title: Make two loud\n\nAsked: " + (asked.group(1) if asked else "-") + "\nCo-Authored-By: X <x@x>"
+            print(json.dumps(result(sid, model, text, t0=t0, keep=False)))
+            return 0
+        if "Feedback button" in (o.get("append_system_prompt") or ""):
+            print(json.dumps(result(sid, model, os.environ.get("FAKE_CLAUDE_FEEDBACK", '{"verdict": "send"}'), t0=t0,
+                                    keep=False)))
+            return 0
         # a side question (fork, nothing saved) answers like a turn would
         print(json.dumps(result(sid, model, text if "--fork-session" in sys.argv else "ok", t0=t0,
                                 keep="--fork-session" not in sys.argv)))
@@ -459,6 +488,19 @@ def turn(o: dict, sid: str, model: str, prompt: str, t0: float) -> int | None:
           "model": model, "permissionMode": "bypassPermissions" if o["skip"] else (o["permission_mode"] or "default"),
           "apiKeySource": "none", "claude_code_version": VERSION.split()[0], "uuid": str(uuid.uuid4())})
     if "NORESULT" in prompt:                           # crashes mid-turn: no result line
+        return 0
+    if "HALFTURN" in prompt:                           # killed mid-turn after some work: tokens spent, no result
+        emit(msg(sid, model, [{"type": "text", "text": "Working..."}]))
+        half = re.search(r"HALFCOST=([0-9.]+)", prompt)  # like the real CLI on SIGTERM: its cost stays in the thread
+        if half:
+            f = STORE / f"{sid}.cost"
+            try:
+                before = float(f.read_text())
+            except (OSError, ValueError):
+                before = 0.0
+            STORE.mkdir(parents=True, exist_ok=True)
+            f.write_text(str(round(before + float(half.group(1)), 6)))
+            return 143                                 # its own exit after a SIGTERM
         return 0
     emit({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 40, "session_id": sid})
     emit(msg(sid, model, [{"type": "thinking", "thinking": "", "signature": "c2lnbmF0dXJl"}]))
@@ -515,6 +557,29 @@ def turn(o: dict, sid: str, model: str, prompt: str, t0: float) -> int | None:
             "parent_tool_use_id": None, "session_id": sid, "uuid": str(uuid.uuid4())})
     if "APPROVE" in prompt:
         _approve(sid, model)
+    if "WAITMSG" in prompt and o["input"] == "stream-json":
+        MIDTURN.set()
+        emit(msg(sid, model, [{"type": "text", "text": "Waiting for a message."}]))
+        try:
+            mid = MID.get(timeout=float(os.environ.get("FAKE_CLAUDE_WAITMSG_S", "10")))
+            record(o, mid[0], mid[1], continued=True)
+            emit(msg(sid, model, [{"type": "text", "text": "Read mid-turn: " + mid[0]}]))
+        except queue.Empty:
+            pass
+        MIDTURN.clear()
+    if "ASKNET" in prompt:
+        rid = "req-" + uuid.uuid4().hex[:8]
+        emit({"type": "control_request", "request_id": rid, "request": {
+            "subtype": "can_use_tool", "tool_name": "SandboxNetworkAccess", "input": {"host": "example.org"},
+            "tool_use_id": "toolu_net", "description": "Allow network connection to example.org?"}})
+        try:
+            got = CONTROL.get(timeout=float(os.environ.get("FAKE_CLAUDE_ASK_S", "20")))
+            r = got["response"]
+            answer = r["response"]["behavior"] if r.get("request_id") == rid else "wrong id"
+        except queue.Empty:
+            answer = "no answer"
+        with open(STORE / "asknet.txt", "a") as f:
+            f.write(answer + "\n")
     import re as _re
     for srv in _re.findall(r"MCPUSE:([A-Za-z0-9_-]+)", prompt):
         uid = "toolu_" + uuid.uuid4().hex[:20]
@@ -528,6 +593,17 @@ def turn(o: dict, sid: str, model: str, prompt: str, t0: float) -> int | None:
                     timeout=60)
         with open(STORE / "mcp-load.txt", "a") as f:
             f.write(f"{r.returncode} {r.stdout.strip()} {r.stderr.strip()}\n")
+    for rel in _re.findall(r"WRITEFILE:(\S+)", prompt):
+        target = os.path.abspath(rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w") as f:
+            f.write("changed by the fake\n")
+        uid = "toolu_" + uuid.uuid4().hex[:20]
+        emit(msg(sid, model, [{"type": "tool_use", "id": uid, "name": "Write",
+                               "input": {"file_path": target, "content": "changed by the fake\n"}}]))
+        emit({"type": "user", "message": {"role": "user", "content": [
+            {"tool_use_id": uid, "type": "tool_result", "content": "File written"}]}, "parent_tool_use_id": None,
+            "session_id": sid, "uuid": str(uuid.uuid4())})
     if "NOTOOL" not in prompt:
         tid = "toolu_" + uuid.uuid4().hex[:20]
         emit(msg(sid, model, [{"type": "text", "text": "Let me look at the folder."}]))

@@ -37,8 +37,6 @@ export type ClaudeAuthMethod = 'oauth_token' | 'credentials' | 'api_key' | 'gate
  *  connected gateway, "gateway:<id>" (id = the preset key). The bare "gateway" is the older form:
  *  sessions saved before several gateways existed, it means the default gateway. */
 export type ClaudeProvider = 'anthropic' | 'gateway' | `gateway:${ClaudeGatewayProvider}`
-/** `CLAUDE_CODE_EFFORT_LEVEL`: how hard the model works on each turn ("" = the model's default). */
-export type ClaudeEffort = '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 /** `ask`: what is not pre-allowed waits for the user's Allow / Deny (topics, global setting, jobs; not agents). */
 export type PermissionMode = 'bypass' | 'acceptEdits' | 'default' | 'ask'
 export type ClaudeModel = {
@@ -131,11 +129,13 @@ export type WorkspaceTree = { root: string; projects: Project[] }
 /** The pixel character of an agent: `color` = outfit (one of the accent colours, tells projects apart). */
 export type AgentAvatar = { color: string; skin: string; hair: string; hair_color: string; face: string; accessory: string }
 export type AgentAvatarOptions = Record<keyof AgentAvatar, string[]>
-export type AgentLimits = { usd_per_day: number; runs_per_hour: number; timeout_s: number; debounce_s: number }
+export type AgentLimits = { usd_per_day: number; runs_per_hour: number; timeout_s: number; debounce_s: number; /** `chat`: hours of silence after which a new conversation starts (0 = never) */ chat_idle_h?: number }
 export type AgentTrigger = { id: string; kind: 'feed'; enabled: boolean; source: string; levels: FeedLevel[]; match: string; prompt: string; hook_id?: string }
 export type AgentTriggerInput = Partial<Omit<AgentTrigger, 'kind'>> & { kind?: 'feed' }
 export type AgentThreadKind = 'note' | 'run' | 'result' | 'skip' | 'approval'
-export type AgentMessage = { id: string; at: number; kind: AgentThreadKind; text: string; trigger?: string; source?: string; session?: string; ok?: boolean; cost?: number; reason?: string; /** run: the thread message it answers (its session went on) */ reply_to?: string; /** approval / its note: the request id */ approval?: string; /** note of an approval: allow, deny, timeout, expired */ status?: string; /** run: the files sent with it (absolute paths) */ attachments?: string[] }
+export type AgentMessage = { id: string; at: number; kind: AgentThreadKind; text: string; trigger?: string; source?: string; session?: string; ok?: boolean; cost?: number; reason?: string; /** run: the thread message it answers (its session went on) */ reply_to?: string; /** approval / its note: the request id */ approval?: string; /** note of an approval: allow, deny, timeout, expired */ status?: string; /** run: the files sent with it (absolute paths) */ attachments?: string[]; /** run: typed by the owner (page, Telegram) */ owner?: boolean; /** run: it started a new conversation */ chat?: 'new'; /** result: the tools its turn used (the last 40), how many in all, its model and duration */ tools?: AgentStep[]; tools_total?: number; model?: string; duration_ms?: number; /** note of a change: the files changed */ files?: string[]; /** its text was cut: its whole length */ cut?: number; /** run of the owner: waits for the run that holds the budget */ waiting?: boolean; /** run of the owner: a voice message sent directly (its recording; `text` = its transcript once heard) */ voice?: string[]; /** its voice message could not be transcribed */ voice_error?: string }
+/** A tool a turn of an agent used, as kept in its thread. */
+export type AgentStep = { name: string; summary: string; error?: boolean }
 export type AgentRuleTool = 'Bash' | 'Write' | 'Edit' | 'WebFetch' | '*'
 /** "Refuse <tool> when it contains <match>", `reason` shown to Claude. */
 export type AgentRule = { tool: AgentRuleTool; match: string; reason: string }
@@ -145,6 +145,8 @@ export type AgentSandboxStatus = { ok: boolean; missing: string[] }
 export type AgentImportResult = Agent & { ignored: string[] }
 /** An agent = a folder projects/<p>/topics/<t>/agents/<name>/ (CLAUDE.md = its role, memory.md, agent.json). */
 export type Agent = {
+  /** answer of a save only: its first outside source (webhook, feed, mailbox) turned its sandbox on */
+  sandbox_auto?: boolean
   /** projects/<p>/topics/<t>/agents/<name>: also a session path */
   path: string
   project: string
@@ -181,6 +183,8 @@ export type Agent = {
   rules: AgentRule[]
   /** callable by Claude as a subagent from the normal sessions of its topic */
   subagent: boolean
+  /** the model of the owner's conversation ('' = `model`) */
+  chat_model?: string
   limits: AgentLimits
   triggers: AgentTrigger[]
   /** mailboxes of the E-mail page it may use (none by default) */
@@ -196,6 +200,10 @@ export type Agent = {
   last_run?: AgentMessage | null
   running_now?: number
   running_sessions?: { id: string; title: string; started?: number }[]
+  /** the conversation the owner's next message goes on in (`chat`), null = a new one */
+  chat_session?: string | null
+  /** the owner's last conversation (to read it again once a new one is due) */
+  last_chat_session?: string | null
   /** results posted after the user last opened the agent */
   thread_unread?: number
   /** approval requests of its running sessions */
@@ -212,6 +220,10 @@ export type AgentTemplate = {
   role: string
   /** what the user still has to connect */
   needs: string
+  /** the message an idea of a new agent's conversation puts in the box (My job / When / Results / Never without me) */
+  brief: string
+  /** shown first among the ideas (the others behind "More ideas") */
+  first: boolean
   avatar: AgentAvatar
   permission_mode: PermissionMode
   approvals: boolean
@@ -335,6 +347,7 @@ export type AgentInput = {
   writable?: string[]
   rules?: AgentRule[]
   subagent?: boolean
+  chat_model?: string
   limits?: Partial<AgentLimits>
   triggers?: AgentTriggerInput[]
   mail?: MailGrantInput[]
@@ -347,7 +360,7 @@ export type PatchNameBody = { name?: string; description?: string; /** Projects 
 
 /* ---------------------------------------------------------------- Sessions */
 export type SessionState = 'idle' | 'running' | 'error'
-export type SessionSource = 'web' | 'telegram' | 'cron' | 'agent'
+export type SessionSource = 'web' | 'telegram' | 'cron' | 'agent' | 'session' | 'cli'
 export type QueueItem = { text: string; attachments: number; source: 'web' | 'telegram' | 'cron' | 'system' | string; kind: string; /** A voice message sent directly (transcribed before its turn). */ voice?: boolean; client_ids?: string[] }
 /** A message sent but not in the log yet (held at the head while a summary runs first, or its turn starting). */
 export type SentItem = { text: string; attachments: string[]; source: string; voice?: string[]; client_ids?: string[] }
@@ -368,8 +381,8 @@ export type Session = {
   model: string
   /** The credential this session's turns run on (unset = the default provider). */
   provider?: ClaudeProvider
-  /** Reasoning effort of its turns ("" = the model's default). */
-  effort?: ClaudeEffort
+  /** `claude --effort` of the next turns: low | medium | high | xhigh | max, "" = Claude Code's default. */
+  effort?: Effort | ''
   real_model: string | null
   context_tokens: number | null
   /** Context window of the last turn's model (e.g. 1 000 000); null when unknown. */
@@ -388,6 +401,21 @@ export type Session = {
   plan_ready: boolean
   /** Tool calls waiting for the user's Allow / Deny (an agent with approvals; GET /api/approvals?session=). */
   approvals?: number
+  /** Git repositories its turns changed (Changes view, terminal tabs). */
+  code_repos?: string[]
+  /** Its separate copy (Code mode): its own folder and branch of the topic's repository. */
+  worktree?: SessionCopy | null
+}
+/** A session's separate copy (server: maxxing/worktrees.py). */
+export type SessionCopy = {
+  path: string
+  repo: string
+  branch: string
+  base: string
+  pr?: { number: number; url?: string; fork?: boolean; full?: string } | null
+  kept_branch?: string | null
+  removed: boolean
+  preparing: boolean
 }
 /** A tool call an agent waits on (agents with `approvals`): Allow / Deny in the session. */
 export type Approval = {
@@ -395,6 +423,8 @@ export type Approval = {
   session: string
   agent_path: string
   tool: string
+  /** agent_change: an agent's conversation asks to change its safety settings (input.description = the change) */
+  kind?: string
   /** The tool's input, long strings clipped, secrets redacted. */
   input: Record<string, unknown>
   /** One line: "Bash: git push". */
@@ -409,10 +439,20 @@ export type Approval = {
   /** The rule "Always allow" would add to the session's topic ("" = not offered: agents, multi-line commands...). */
   always_rule?: string
 }
-export type CreateSessionBody = { path: string; message?: string; title?: string; model?: string; provider?: ClaudeProvider; effort?: ClaudeEffort; attachments?: string[]; plan_mode?: boolean; /** Absolute path of a voice message sent directly. */ voice?: string; /** This page's id for the first message (see SendMessageBody). */ client_id?: string }
-export type PatchSessionBody = { title?: string; model?: string; /** "" = back to the default provider. */ provider?: string; /** "" = the model's default effort. */ effort?: ClaudeEffort; archived?: boolean; notify?: boolean; plan_mode?: boolean; favorite?: boolean; /** Move to another topic (idle sessions only). */ path?: string }
-export type SendMessageBody = { text: string; attachments?: string[]; hud?: boolean; /** Absolute path of a voice message sent directly: the server transcribes it, then sends it. */ voice?: string; /** This page's id for the message, found again in `client_ids` of its queue item and its log event (a reload mid-send checks it). */ client_id?: string }
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export type Effort = (typeof EFFORTS)[number]
+/** A chosen level, "" = Claude Code's default (the UI's Auto). */
+export type ClaudeEffort = Effort | ''
+export type CreateSessionBody = { path: string; message?: string; title?: string; model?: string; provider?: ClaudeProvider; effort?: ClaudeEffort; attachments?: string[]; plan_mode?: boolean; /** Absolute path of a voice message sent directly. */ voice?: string; /** This page's id for the first message (see SendMessageBody). */ client_id?: string; /** Work on a separate copy (Code mode). */ worktree?: { repo: string; base?: string; prepare?: string; copy_env?: boolean; remember?: boolean } }
+export type PatchSessionBody = { title?: string; model?: string; /** "" = back to the default provider. */ provider?: string; effort?: ClaudeEffort; archived?: boolean; notify?: boolean; plan_mode?: boolean; favorite?: boolean; /** Move to another topic (idle sessions only). */ path?: string }
+export type SendMessageBody = { text: string; attachments?: string[]; hud?: boolean; /** Absolute path of a voice message sent directly: the server transcribes it, then sends it. */ voice?: string; /** This page's id for the message, found again in `client_ids` of its queue item and its log event (a reload mid-send checks it). */ client_id?: string; /** The @ of the composer: the server tells Claude how to write to each. */ mentions?: Mention[] }
 export type SendMessageResult = { queued: boolean; session: Session }
+/** Who the composer's @ can name (GET /api/sessions/{id}/mentions). */
+export type MentionKind = 'session' | 'agent' | 'team'
+export type Mention = { kind: MentionKind; ref: string }
+/** A name of a sent message (log line `mentions`). */
+export type SentMention = Mention & { label: string; group?: boolean; avatar?: Partial<AgentAvatar> | null }
+export type MentionTarget = Mention & { label: string; hint: string; state?: string; avatar?: Partial<AgentAvatar> | null; group?: boolean }
 export type SessionSearchHit = { id: string; title: string; path: string; snippet: string; at: number }
 /** Follow-up messages the server proposes for an idle session (composer chips). */
 export type SessionSuggestions = { suggestions: string[] }
@@ -425,20 +465,28 @@ export type UploadResult = { files: Upload[] }
 
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number }
 export type SessionEvent =
-  | { type: 'user'; text: string; attachments: string[]; at: number; source: SessionSource; /** Audio of a voice message sent directly. */ voice?: string[]; /** The web pages' ids of the message(s) it carries (SendMessageBody.client_id). */ client_ids?: string[] }
+  | { type: 'user'; text: string; attachments: string[]; at: number; source: SessionSource; /** Audio of a voice message sent directly. */ voice?: string[]; /** The web pages' ids of the message(s) it carries (SendMessageBody.client_id). */ client_ids?: string[]; /** Added to a running turn (Add to plan): read at Claude's next step. */ injected?: boolean; /** Sent by another session's turn (`maxxing sessions send`). */ from?: { session: string; title: string }; /** The @ it names (composer menu): drawn as chips. */ mentions?: SentMention[] }
   /** Transcript of the voice message just above (or why it failed). */
   | { type: 'voice_text'; text: string; error: string | null; stopped?: boolean; at: number }
-  | { type: 'assistant'; text: string; at: number }
+  | { type: 'assistant'; text: string; at: number; /** Written by Claude Code in place of an answer, the API refused the call: why (rate_limit, server_error…). */ error?: string }
   | { type: 'thinking'; text: string; at: number }
   | { type: 'tool_use'; id: string; name: string; input: unknown; input_lines?: Record<string, number>; summary: string; at: number }
   | { type: 'tool_result'; tool_use_id: string; text: string; is_error: boolean; at: number }
-  | { type: 'init'; model: string; cwd: string; at: number }
+  | { type: 'init'; model: string; cwd: string; at: number; /** A turn of a Claude process that already ran one: its background tasks run on. */ same?: boolean }
   | { type: 'result'; ok: boolean; cost_usd: number; duration_ms: number; model: string; usage: Usage; at: number }
-  | { type: 'note'; text: string; level: 'info' | 'warn' | 'error'; at: number }
+  | { type: 'note'; text: string; level: 'info' | 'warn' | 'error'; at: number; /** The turn's process ended on a failure (its last lines). */ failed?: boolean }
+  /** What turn `n` changed in git repositories (Changes view, features/code). */
+  | ChangesEvent
   /** `ref` = `at` of a user event: hidden from the thread (or shown again). */
   | { type: 'hide'; ref: number; hidden: boolean; at: number }
   /** Background work of Claude Code (a sub-agent, a command): a partial update merged on `id`. */
   | TaskEvent
+export type ChangesEvent = {
+  type: 'changes'
+  n: number
+  repos: { root: string; name: string; branch: string | null; approx?: boolean; add: number; del: number; more?: number; files: { path: string; old: string | null; status: string; add: number; del: number; binary: boolean }[] }[]
+  at: number
+}
 export type TaskState = 'running' | 'completed' | 'failed' | 'stopped'
 export type TaskEvent = {
   type: 'task'
@@ -474,7 +522,7 @@ export type SessionEventsBackPage = {
 export type SessionStreamEvents = { events: SessionEvent[]; next: number }
 
 /* ---------------------------------------------------------------- Global bus */
-export type BusTopic = 'agents' | 'agents_layout' | 'agent-groups' | 'sessions' | 'workspace' | 'tasks' | 'crons' | 'telegram' | 'backup' | 'health' | 'extensions' | 'trash' | 'feed' | 'profile' | 'register' | 'license' | 'infra' | 'mcp' | 'team' | 'team_live' | 'approvals'
+export type BusTopic = 'agents' | 'agents_layout' | 'agent-groups' | 'sessions' | 'workspace' | 'tasks' | 'crons' | 'telegram' | 'backup' | 'health' | 'extensions' | 'trash' | 'feed' | 'profile' | 'register' | 'license' | 'infra' | 'mcp' | 'team' | 'team_live' | 'approvals' | 'open_sessions'
 
 /* ---------------------------------------------------------------- MCP servers (Settings -> MCP) */
 export type McpState = 'connected' | 'needs_auth' | 'failed' | 'pending' | 'unknown'
@@ -571,6 +619,12 @@ export type InvalidatePayload = { topics: BusTopic[] }
 export type FileEntry = { name: string; path: string; type: 'file' | 'dir'; size: number; mtime: number; mime: string }
 export type FileList = { path: string; parent: string | null; root: string; entries: FileEntry[] }
 export type FileContent = { path: string; content: string; mtime: number; size: number; mime: string; editable: boolean }
+/** An office document read by the server: text and slides as Markdown, a spreadsheet as the rows of its sheets. */
+export type FileSheet = { name: string; rows: string[][]; truncated: boolean }
+export type FileDoc = { path: string; mtime: number; size: number; truncated: boolean } & (
+  | { type: 'text' | 'slides'; markdown: string }
+  | { type: 'sheets'; sheets: FileSheet[] }
+)
 export type FileWriteBody = { path: string; content: string; expected_mtime?: number }
 export type FileWriteResult = { ok: boolean; mtime: number }
 export type FileSearchHit = { path: string; name: string; type: 'file' | 'dir' }
@@ -793,6 +847,8 @@ export type Settings = {
   tasks_page?: boolean
   /** Settings -> Features: the Git & GitHub page (/git) and its sidebar entry */
   git_page: boolean
+  /** Settings -> Features -> Sessions -> Code mode: the terminal (read-only here: POST /api/term/enable with the password, /disable). */
+  code_mode?: boolean
   /** Settings -> Features: the Infra page (/infra) and its sidebar entry */
   infra_page: boolean
   /** Settings -> Features: the Team page (/team, chats between people) and its sidebar entry */
@@ -815,8 +871,8 @@ export type Settings = {
 export type ResultField = 'model' | 'duration' | 'cost' | 'tokens' | 'cache'
 
 /* ---------------------------------------------------------------- Memory, stats, changelog */
-export type MemoryFile = { path: string; level: 'global' | 'project' | 'topic'; lines: number; bytes: number; over: boolean }
-export type MemoryInfo = { max_lines: number; files: MemoryFile[] }
+export type MemoryFile = { path: string; level: 'global' | 'project' | 'topic'; lines: number; bytes: number; over: boolean; heavy?: boolean }
+export type MemoryInfo = { max_lines: number; max_bytes?: number; files: MemoryFile[] }
 export type TokenCounts = { input: number; output: number; cache_read: number; cache_write: number; total: number; cost_usd: number; turns: number; sessions: number }
 export type TokenStats = {
   totals: TokenCounts
@@ -1107,7 +1163,7 @@ export type GitCommitDetail = {
   files_total: number
   url?: string
 }
-export type GitPull = { number: number; title: string; author: string | null; head: string | null; base: string | null; draft: boolean; url: string; updated: number }
+export type GitPull = { number: number; title: string; author: string | null; head: string | null; base: string | null; draft: boolean; url: string; updated: number; state?: 'open' | 'closed' | 'merged'; /** By someone who is not owner, member or collaborator. */ outside?: boolean; /** A review is asked from one of the server's GitHub accounts. */ review_me?: boolean }
 
 /* ---------------------------------------------------------------- Infra (server/maxxing/infra) */
 export type InfraKind = 'server' | 'site' | 'worker' | 'pages' | 'database' | 'bucket' | 'domain'

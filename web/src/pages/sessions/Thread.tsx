@@ -16,7 +16,8 @@ import type { SentItem, Session } from '@/lib/types'
 import { ItemRow, UserMessage } from './Items'
 import { onThreadDragEnd, onThreadDragStart } from './contentDrag'
 import { ErrorBoundary } from '@/components/ui/error-boundary'
-import { isShownTask, setHiddenLocal, taskStatus, turnKeys, unanswered, withoutHidden, type Item, type LogState } from './log'
+import { endingCut, setHiddenLocal, turnKeys, unanswered, withoutHidden, type Item, type LogState } from './log'
+import { runningTasks, TasksRunning } from './Tasks'
 import type { Pending, Seed } from './store'
 import { fmtElapsed } from './util'
 
@@ -236,11 +237,20 @@ export const Thread = React.forwardRef<ThreadHandle, {
   // Sent but not in the log yet (held behind a summary, or starting), from another tab or before a reload: this
   // tab has no bubble of its own for it, the server's copy is shown instead.
   const sentItems = session?.sent_items
-  const serverSent = optimistic.length || !running ? NO_SENT : sentItems || NO_SENT
+  // One whose message is already in the log (a Session older than the log, e.g. a late answer) is not shown twice.
+  const sentLeft = React.useMemo(() => {
+    if (!sentItems?.length) return NO_SENT
+    const logged = new Set(log.items.flatMap((it) => (it.kind === 'user' ? it.ev.client_ids || [] : [])))
+    const left = sentItems.filter((p) => !p.client_ids?.some((c) => logged.has(c)))
+    return left.length === sentItems.length ? sentItems : left
+  }, [sentItems, log.items])
+  const serverSent = optimistic.length || !running ? NO_SENT : sentLeft
 
   // Deleting an unanswered message: its rows slide out, then the thread drops them; "Undo" in the toast.
   const sid = session?.id
   const hideable = React.useMemo(() => unanswered(items, running), [items, running])
+  // The failed turn the thread ends on (nothing sent since, nothing running): its card offers to resume.
+  const cutKey = React.useMemo(() => (running || optimistic.length || serverSent.length ? null : endingCut(items)), [items, running, optimistic.length, serverSent.length])
   const [leaving, setLeaving] = React.useState<ReadonlySet<string>>(new Set())
   const itemsRef = React.useRef(items)
   itemsRef.current = items
@@ -332,13 +342,13 @@ export const Thread = React.forwardRef<ThreadHandle, {
                     className={cn(anim.className, leaving.has(it.key) && 'pointer-events-none translate-x-4 opacity-0 transition-[opacity,transform] duration-150 ease-in')}
                   >
                     <ErrorBoundary>
-                      <ItemRow item={it} live={running && it.kind === 'tool' && !it.result && from + i > turnStart} onHide={hideable.has(it.key) ? onHide : undefined} onEdit={onEdit && onEditItem} onFork={onFork && onForkItem} />
+                      <ItemRow item={it} live={running && it.kind === 'tool' && !it.result && from + i > turnStart} last={it.key === cutKey} onHide={hideable.has(it.key) ? onHide : undefined} onEdit={onEdit && onEditItem} onFork={onFork && onForkItem} />
                     </ErrorBoundary>
                   </div>
                 )
               })}
               {optimistic.map((p) => (
-                <UserMessage key={p.lid} text={p.text} attachments={p.attachments} voice={p.voice || undefined} pending />
+                <UserMessage key={p.lid} text={p.text} attachments={p.attachments} voice={p.voice || undefined} mentions={p.mentions} pending />
               ))}
               {serverSent.map((p, i) => (
                 <UserMessage key={`sent${i}`} text={p.text} attachments={p.attachments} source={p.source} voice={p.voice} pending />
@@ -382,28 +392,30 @@ function Elapsed({ since }: { since: number }) {
   return <span className="ml-auto shrink-0 tabular-nums">{fmtElapsed(now - since)}</span>
 }
 
-export function RunningRow({ session, log }: { session: Session; log: LogState }) {
+/** The last line of a running turn: what Claude does now, the sub-agents and background commands still running (a
+ *  click lists them; `tasks={false}` where they are listed already, the session preview), the time since the message. */
+export function RunningRow({ session, log, tasks = true }: { session: Session; log: LogState; tasks?: boolean }) {
   const t = useT()
   // Current activity: the last tool still waiting for its result, if any.
   let activity = t('sessions.working')
+  let pending: string | undefined
   for (let i = log.items.length - 1; i >= 0; i--) {
     const it = log.items[i]
     if (it.kind === 'user' || it.kind === 'result') break
     if (it.kind === 'tool') {
-      if (!it.result) activity = it.use.summary
+      if (!it.result) [activity, pending] = [it.use.summary, it.use.id]
       break
     }
   }
-  // Nothing pending in the thread but sub-agents / background commands still run: say so (the bar lists them).
-  if (activity === t('sessions.working')) {
-    const bg = Object.values(log.tasks).filter((tk) => isShownTask(tk) && taskStatus(tk, true) === 'running')
-    if (bg.length) activity = t(bg.every((tk) => tk.kind === 'agent') ? 'tasks.bar' : 'tasks.barAny', { count: bg.length })
-  }
+  const bg = React.useMemo(() => (tasks ? runningTasks(log.tasks) : []), [tasks, log.tasks])
+  // Nothing else pending (or the pending tool is the launch of one of them): the running tasks are the activity.
+  const lead = bg.length > 0 && (activity === t('sessions.working') || bg.some((tk) => tk.tool_use_id === pending))
   const since = log.lastUserAt || session.updated
   return (
-    <div className="flex h-7 items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
-      <Spinner className="size-3.5 text-primary" />
-      <span className="truncate">{activity}</span>
+    <div className="flex h-7 items-center gap-2 text-xs text-muted-foreground pointer-coarse:h-10" aria-live="polite">
+      <Spinner className="size-3.5 shrink-0 text-primary" />
+      {!lead && <span className="truncate">{activity}</span>}
+      <TasksRunning tasks={bg} lead={lead} />
       <Elapsed since={since} />
     </div>
   )

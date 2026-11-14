@@ -4,6 +4,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { arrange, type Slot } from './layouts'
+import type { SentMention } from '@/lib/types'
 
 /** What the sessions list is grouped by: `project` (projects > topics > sessions) or `session` (only the
  *  sessions, each labelled with its project › topic, most used first by default). */
@@ -127,6 +128,10 @@ type State = {
   /** Drop beside a strip column: the line shows along every session of it (top key and side); not persisted. */
   dropBeside: { top: string; side: 'left' | 'right' } | null
   setDropBeside: (v: { top: string; side: 'left' | 'right' } | null) => void
+  /** Session a dragged one would be stacked above / under (the dashed zone). In the store, not in the column: a drag
+   *  that ends without a drop there (Escape, released elsewhere) must take the zone away too. */
+  dropStack: { key: string; side: 'above' | 'below' } | null
+  setDropStack: (v: { key: string; side: 'above' | 'below' } | null) => void
   openSession: (id: string, opts?: { focus?: boolean; after?: string | null }) => string
   openNew: (path: string) => string
   close: (key: string) => void
@@ -375,7 +380,7 @@ export const useSessionsUI = create<State>()(
       toggle: (node, value) => set((s) => ({ expanded: { ...s.expanded, [node]: value ?? !s.expanded[node] } })),
       setExpanded: (nodes) => set((s) => ({ expanded: { ...s.expanded, ...nodes } })),
       setTreeHidden: (treeHidden) => set({ treeHidden }),
-      tabs: false,
+      tabs: true,
       setTabs: (tabs) => set({ tabs }),
       show: null,
       setShow: (show) => set({ show }),
@@ -384,11 +389,16 @@ export const useSessionsUI = create<State>()(
       layoutPicker: null,
       setLayoutPicker: (layoutPicker) => set({ layoutPicker }),
       dragging: null,
-      setDragging: (dragging) => set(dragging ? { dragging } : { dragging, dropBeside: null }),
+      setDragging: (dragging) => set(dragging ? { dragging } : { dragging, dropBeside: null, dropStack: null }),
       dropBeside: null,
       setDropBeside: (dropBeside) => {
         const cur = get().dropBeside
         if (cur?.top !== dropBeside?.top || cur?.side !== dropBeside?.side) set({ dropBeside })
+      },
+      dropStack: null,
+      setDropStack: (dropStack) => {
+        const cur = get().dropStack
+        if (cur?.key !== dropStack?.key || cur?.side !== dropStack?.side) set({ dropStack })
       },
     }),
     {
@@ -423,6 +433,9 @@ export const useSessionsUI = create<State>()(
       // Unknown values (older or edited storage) fall back to the defaults.
       merge: (persisted, current) => {
         const p = { ...current, ...(persisted as Partial<State>) }
+        // Tabs is the mode of a new browser. One that already stored its sessions keeps its choice; stored before
+        // the choice existed, it showed columns: it stays in Zones.
+        if (persisted && typeof (persisted as Partial<State>).tabs !== 'boolean') p.tabs = false
         if (p.listBy !== 'session') p.listBy = 'project'
         p.cols = normalizeCols(Array.isArray(p.cols) ? p.cols : [])
         if (typeof p.rowSplit !== 'number' || !(p.rowSplit >= ROW_SPLIT_MIN && p.rowSplit <= ROW_SPLIT_MAX)) p.rowSplit = 0.5
@@ -440,7 +453,7 @@ export const useSessionsUI = create<State>()(
 /* ---------------------------------------------------------------- Local "pending" messages
  * Messages sent from this tab that are not in the log yet: shown as an optimistic bubble (sent while
  * idle) or in the queue stack (sent while running), removed when the matching `user` event arrives. */
-export type Pending = { lid: string; text: string; attachments: string[]; queued: boolean; at: number; /** A voice message being sent. */ voice?: boolean }
+export type Pending = { lid: string; text: string; attachments: string[]; queued: boolean; at: number; /** A voice message being sent. */ voice?: boolean; /** The @ it names (chips until the log has it). */ mentions?: SentMention[] }
 
 type PendingState = {
   bySession: Record<string, Pending[]>

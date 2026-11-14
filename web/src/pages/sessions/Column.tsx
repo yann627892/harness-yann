@@ -4,25 +4,16 @@ import * as React from 'react'
 import { useNavigate } from 'react-router'
 import {
   Archive,
-  ArchiveRestore,
   Bot,
   Bell,
-  BellOff,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Clock,
-  Copy,
   ExternalLink,
-  PictureInPicture2,
   FolderOpen,
   GripVertical,
   Hash,
   ListChecks,
-  Minimize2,
   MoreHorizontal,
-  Sparkles,
-  Trash2,
   Upload,
   X,
   Columns2,
@@ -31,14 +22,14 @@ import {
   Quote,
   Rows2,
 } from 'lucide-react'
-import { cn, copyText } from '@/lib/utils'
-import { TouchAppButton, TouchSessionsButton } from '@/components/shell/TouchNav'
+import { cn } from '@/lib/utils'
+import { TouchSessionsButton } from '@/components/shell/TouchNav'
 import { Logo } from '@/components/shell/Logo'
 import { useQueryClient } from '@tanstack/react-query'
 import { useUI } from '@/stores/ui'
 import { openHud } from './Hud'
 import { costTip, useCostIsBilled, useResultLine } from './resultLine'
-import { useT } from '@/i18n'
+import { useT, withGroups } from '@/i18n'
 import {
   useClaudeStatus,
   useClearQueue,
@@ -53,6 +44,7 @@ import {
   useSessionSuggestions,
   useSettings,
   useSteerSession,
+  useInjectSession,
   useTakeQueue,
   useStopSession,
   useTelegram,
@@ -61,16 +53,10 @@ import {
   sessionsQuery,
 } from '@/lib/queries'
 import { errorMessage, isApiError } from '@/lib/api'
-import type { ClaudeEffort, ClaudeProvider, Session } from '@/lib/types'
+import type { ClaudeProvider, Effort, SentMention, Session } from '@/lib/types'
 import {
   Button,
   confirm,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuCheckboxItem,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
   Checkbox,
   Input,
   Label,
@@ -82,10 +68,11 @@ import {
   TooltipRoot,
   TooltipTrigger,
   useMask,
+  type ContextMenuHandlers,
+  useContextMenu,
 } from '@/components/ui'
 import { Combobox } from '@/components/ui/combobox'
-import { TaskBar } from './Tasks'
-import { forgetLog, getLog, loadEarlier, loadLog, seedEmptyLog, useLogSelect, useSessionLog, useSessionStream } from './log'
+import { endingCut, forgetLog, getLog, loadEarlier, loadLog, seedEmptyLog, useLogSelect, useSessionLog, useSessionStream } from './log'
 import { PlanChip, PlanNotice } from './Plan'
 import { ApprovalCards } from './Approvals'
 import { MaxxingControls, MaxxingMeter } from './MaxxingMeter'
@@ -95,13 +82,22 @@ import { AsidePanel, useAside } from './Aside'
 import { LayoutPicker } from './LayoutPicker'
 import { MIN_W } from './layouts'
 import { EASE_OUT, reducedMotion } from '@/lib/presence'
-import { canShift, focusComposer, groupAt, MAX_STACK, outboxMove, saveDraft, saveQuotes, seedComposer, useSessionsUI, usePending, usePendingFor, type Col, type OutboxEntry, type Seed } from './store'
+import { focusComposer, groupAt, MAX_STACK, outboxMove, saveDraft, saveQuotes, seedComposer, useSessionsUI, usePending, usePendingFor, type Col, type OutboxEntry, type Seed } from './store'
 import { Thread, type ThreadHandle } from './Thread'
 import { Composer, type ComposerHandle } from './Composer'
+import { CopyBar, CopyMark } from '@/features/code/CopyBar'
+import { NewCopy, useNewCopy } from '@/features/code/NewCopy'
 import { QuotePill } from './Quote'
 import { FileMenu } from './FileMenu'
 import { ItemContext } from './Items'
+import { CutContext, type CutActions } from './Cut'
 import { ContextGauge, ModelPicker, StateBadge } from './Widgets'
+import { useSlashCommands } from './slashCommands'
+import { SessionOptions, type OptionAction } from './SessionOptions'
+import { QUOTE_EVENT } from '@/features/code/api'
+import { isAgentPath } from '@/features/terminal/api'
+import { useTermUI } from '@/features/terminal/store'
+import type { TermPlace } from '@/features/terminal/TermDrawer'
 import { absTopicDir, fileQuote, findAgent, fmtCost, placeOptions, topicLabel, topicPathOf } from './util'
 import { AgentAvatarIcon } from '@/features/agents/Avatar'
 import { CONTENT_MIME, contentDragLeave, contentDragOver, contentDrop, useContentDrag, type Dropped } from './contentDrag'
@@ -133,11 +129,12 @@ function MobileTabs() {
 
 /* ---------------------------------------------------------------- shell */
 export function ColumnShell({ col, index, count, variant, place, children }: { col: Col; index: number; count: number; variant: ColumnVariant; place?: Place; children: React.ReactNode }) {
+  const t = useT()
   const focused = useSessionsUI((s) => s.focused === col.key)
   const focus = useSessionsUI((s) => s.focus)
   const strip = React.useContext(StripContext)
   const ref = React.useRef<HTMLElement>(null)
-  const [dropSide, setDropSide] = React.useState<'above' | 'below' | null>(null)
+  const dropSide = useSessionsUI((s) => (s.dropStack?.key === col.key ? s.dropStack.side : null))
   const isCol = variant === 'column'
   const rank = place?.i ?? 0
   const size = place?.n ?? 1
@@ -166,13 +163,13 @@ export function ColumnShell({ col, index, count, variant, place, children }: { c
         // column holds fewer than MAX_STACK
         const room = size < MAX_STACK
         const v = room && rank === size - 1 && e.clientY > r.top + r.height * 0.66 ? 'below' : room && rank === 0 && e.clientY < r.top + r.height * 0.34 ? 'above' : null
-        setDropSide(v)
+        ui.setDropStack(v ? { key: col.key, side: v } : null)
         ui.setDropBeside(v ? null : { top: groupKey, side: e.clientX < r.left + r.width / 2 ? 'left' : 'right' })
       }}
       onDragLeave={(e) => {
         if (ref.current?.contains(e.relatedTarget as Node)) return
-        setDropSide(null)
         const ui = useSessionsUI.getState()
+        if (ui.dropStack?.key === col.key) ui.setDropStack(null)
         if (ui.dropBeside?.top === groupKey) ui.setDropBeside(null)
       }}
       onDrop={(e) => {
@@ -181,7 +178,7 @@ export function ColumnShell({ col, index, count, variant, place, children }: { c
         const key = e.dataTransfer.getData('application/x-mx-col')
         const ui = useSessionsUI.getState()
         const side = dropSide ?? (ui.dropBeside?.top === groupKey ? ui.dropBeside.side : null)
-        setDropSide(null)
+        ui.setDropStack(null)
         ui.setDropBeside(null)
         if (!key || key === col.key) return
         if (side === 'below') return ui.stack(key, col.key)
@@ -215,7 +212,7 @@ export function ColumnShell({ col, index, count, variant, place, children }: { c
         <div
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize"
+          aria-label={t('shell.resize')}
           onPointerDown={(e) => strip.startColResize(place?.top ?? col.key, e)}
           onDoubleClick={() => strip.resetColWidth(place?.top ?? col.key)}
           // Just past the right edge (never over the column's own scrollbar); the strip keeps an 8 px gutter at its
@@ -227,7 +224,7 @@ export function ColumnShell({ col, index, count, variant, place, children }: { c
         <div
           role="separator"
           aria-orientation="horizontal"
-          aria-label="Resize"
+          aria-label={t('shell.resizeRows')}
           onPointerDown={strip.startRowResize}
           onDoubleClick={strip.resetRowSplit}
           className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize touch-none after:absolute after:inset-x-0 after:top-1 after:h-[3px] after:transition-colors hover:after:bg-primary/40 active:after:bg-primary/60"
@@ -275,7 +272,7 @@ function StackedComposer({ colKey, stacked, children }: { colKey: string; stacke
             useSessionsUI.getState().focus(colKey)
             requestAnimationFrame(() => focusComposer(colKey))
           }}
-          className="mx-3 mb-2 flex h-8 w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border bg-muted/40 px-3 text-left text-[13px] text-muted-foreground transition-colors animate-in hover:bg-accent hover:text-foreground"
+          className="mx-3 mb-2 flex h-8 w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border bg-muted px-3 text-left text-[13px] text-muted-foreground transition-colors animate-in hover:bg-accent hover:text-foreground"
           data-testid="composer-folded"
         >
           <PenLine className="size-3.5 shrink-0" />
@@ -380,9 +377,17 @@ function useSlimHeader(head: React.RefObject<HTMLElement | null>, stacked: boole
   return slim
 }
 
+const TermDrawer = React.lazy(withGroups(['term'], () => import('@/features/terminal/TermDrawer')))
+
 /** `agentRun`: a run of an agent shown on the Agents page - it stays where it is (no move, archive or delete: the
  *  agent manages its runs, archiving them by itself), and the archived banner is not shown. */
 export function SessionColumn({ col, sid, variant, index, count, place, agentRun }: { col: Col; sid: string; variant: ColumnVariant; index: number; count: number; place?: Place; agentRun?: boolean }) {
+  // Opened behind the session in front (another device of the user opened it, a link opened beside): the keyboard
+  // stays where the user is typing.
+  const [background] = React.useState(() => {
+    const st = useSessionsUI.getState()
+    return !!st.focused && st.focused !== col.key && st.cols.some((c) => c.key === col.key)
+  })
   const t = useT()
   const navigate = useNavigate()
   const { data: session, isError, error } = useSessionSeeded(sid)
@@ -405,6 +410,7 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
   const clearQueue = useClearQueue()
   const queuedPending = React.useMemo(() => pending.filter((p) => p.queued), [pending])
   const steer = useSteerSession()
+  const inject = useInjectSession()
   // Steer accepted: "steering…" until the queued messages start (queue empty) or 20 s at most.
   const [steerPending, setSteerPending] = React.useState(false)
   React.useEffect(() => {
@@ -436,6 +442,17 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
   const thread = React.useRef<ThreadHandle>(null)
   const composer = React.useRef<ComposerHandle>(null)
   const body = React.useRef<HTMLDivElement>(null)
+  // "Ask Claude" on lines of the Changes view (the file viewer, outside this column): a quote in this composer.
+  React.useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ sid: string; text: string }>).detail
+      if (d?.sid !== sid) return
+      composer.current?.quote(d.text)
+      composer.current?.focus()
+    }
+    window.addEventListener(QUOTE_EVENT, on)
+    return () => window.removeEventListener(QUOTE_EVENT, on)
+  }, [sid])
   const [dragFiles, setDragFiles] = React.useState(false)
 
   const notFound = (isError && isApiError(error) && error.status === 404) || deleted
@@ -480,17 +497,18 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
     if (session) trimQueued(sid, session.queue)
   }, [session?.queue, sid, trimQueued]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onSend = async (text: string, attachments: string[], clientId?: string) => {
+  const onSend = async (text: string, attachments: string[], clientId?: string, named?: SentMention[]) => {
     const add = usePending.getState().add
     const remove = usePending.getState().remove
-    const lid = add(sid, { text, attachments, queued: running })
+    const mentions = named?.map((m) => ({ kind: m.kind, ref: m.ref }))
+    const lid = add(sid, { text, attachments, queued: running, mentions: named })
     thread.current?.scrollToBottom()
     notifySent(sid)
     try {
-      const r = await send.mutateAsync({ id: sid, text, attachments, client_id: clientId })
+      const r = await send.mutateAsync({ id: sid, text, attachments, client_id: clientId, mentions })
       if (r.queued !== running) {
         remove(sid, lid)
-        add(sid, { text, attachments, queued: r.queued })
+        add(sid, { text, attachments, queued: r.queued, mentions: named })
       }
       return true
     } catch {
@@ -560,6 +578,15 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
 
   const qc = useQueryClient()
   const hudOn = useUI((s) => s.hud)
+  // The terminal drawer (Settings -> Features -> Sessions -> Code mode; never for agents): Ctrl+J, /terminal, the session's options.
+  const termOn = !!settings?.code_mode && !agentRun && !isAgentPath(path)
+  const termOpen = useTermUI((x) => !!x.bySid[sid]?.open) && termOn
+  const toggleTerm = React.useCallback((open?: boolean) => useTermUI.getState().toggle(sid, open), [sid])
+  const termPlaces = React.useMemo<TermPlace[]>(() => {
+    const out = (session?.code_repos ?? []).map((r) => ({ path: r, label: r.split('/').pop() || r }))
+    if (dir && !out.some((x) => x.path === dir)) out.push({ path: dir, label: '' }) // '' = "Topic folder" (TermDrawer)
+    return out
+  }, [session?.code_repos, dir])
   const hud = () => {
     const go = (path: string) => {
       navigate(path)
@@ -583,7 +610,7 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
     rename: (title: string) => patch.mutate({ id: sid, title }),
     model: (model: string, provider?: '' | ClaudeProvider) =>
       patch.mutate({ id: sid, model, ...(provider !== undefined ? { provider } : {}) }),
-    effort: (effort: ClaudeEffort) => patch.mutate({ id: sid, effort }),
+    effort: (effort: Effort | '') => patch.mutate({ id: sid, effort }),
     notify: () => session && patch.mutate({ id: sid, notify: !session.notify }),
     archive: () =>
       session &&
@@ -618,6 +645,95 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
     },
   }
 
+  // The card of a failed turn the thread ends on (Cut.tsx): Resume is a message like any other, and the model of
+  // the next turn is the composer's picker.
+  const cutDo = React.useRef({ send: onSend, model: actions.model })
+  cutDo.current = { send: onSend, model: actions.model }
+  const endsOnCut = useLogSelect(sid, (st) => !!endingCut(st.items))
+  const cutModel = session?.model
+  const cutReal = session?.real_model
+  const cutTokens = session?.context_tokens
+  const cutError = session?.state === 'error' ? session.error : null
+  const cutOff = !session || !!authReason
+  const cut = React.useMemo<CutActions>(
+    () =>
+      cutOff
+        ? { error: cutError }
+        : {
+            resume: (text) => void cutDo.current.send(text, []),
+            model: <ModelPicker chosen={cutModel || ''} real={cutReal} contextTokens={cutTokens} onChange={(m) => cutDo.current.model(m)} />,
+            error: cutError,
+          },
+    [cutOff, cutModel, cutReal, cutTokens, cutError],
+  )
+
+  // The composer's "/" menu: the commands of this session, then the skills of its topic.
+  const idleWithTurns = () => {
+    if (running || !session?.turns) toast.info(t(running ? 'slash.busy' : 'slash.empty'))
+    return !running && !!session?.turns
+  }
+  const commands = useSlashCommands(path, {
+    model: session?.model || '',
+    onModel: actions.model,
+    effort: session?.effort || '',
+    onEffort: actions.effort,
+    plan: !!session?.plan_mode,
+    onPlan: session ? () => patch.mutate({ id: sid, plan_mode: !session.plan_mode }) : undefined,
+    onCompact: () => idleWithTurns() && actions.compact(),
+    onHandoff: () => idleWithTurns() && void actions.handoff(),
+    onNew: path ? () => navigate(`/sessions?path=${encodeURIComponent(path)}&new=1`, { state: { mxPushed: true } }) : undefined,
+    onRename: actions.rename,
+    onTerminal: termOn ? () => toggleTerm(true) : undefined,
+  })
+
+  // The session's options: its "..." and a right click (a long press) on its header open the same window.
+  const [options, setOptions] = React.useState(false)
+  const menuCtx = useContextMenu({ disabled: !session, onOpen: () => setOptions(true) })
+  const columnActions: OptionAction[] = []
+  if (variant === 'column') {
+    columnActions.push({ key: 'detach', icon: ExternalLink, label: t('sessions.options.detach'), run: detach })
+    if (index > 0)
+      columnActions.push(
+        col.below
+          ? { key: 'unstack', icon: Columns2, label: t('sessions.options.unstack'), run: () => useSessionsUI.getState().unstack(col.key) }
+          : {
+              key: 'stack',
+              icon: Rows2,
+              label: t('sessions.options.stack'),
+              disabled: !canStackUnderPrevious(col.key),
+              run: () => {
+                const cols = useSessionsUI.getState().cols
+                const i = cols.findIndex((c) => c.key === col.key)
+                // under the last session of the strip column on the left
+                if (i > 0) useSessionsUI.getState().stack(col.key, cols[i - 1].key)
+              },
+            },
+      )
+    if (count > 1) columnActions.push({ key: 'layout', icon: LayoutGrid, label: t('sessions.options.layout'), run: () => useSessionsUI.getState().setLayoutPicker(col.key) })
+  }
+  const optionsWindow = session && (
+    <SessionOptions
+      open={options}
+      onOpenChange={setOptions}
+      session={session}
+      tgLinked={tgLinked}
+      running={running}
+      agentRun={agentRun}
+      onPlan={() => patch.mutate({ id: sid, plan_mode: !session.plan_mode })}
+      onNotify={actions.notify}
+      onCompact={actions.compact}
+      onHandoff={actions.handoff}
+      onFolder={dir ? () => navigate(`/files?path=${encodeURIComponent(dir)}`) : undefined}
+      onHud={hudOn && variant !== 'mobile' ? hud : undefined}
+      onTerminal={termOn ? () => toggleTerm(true) : undefined}
+      onArchive={actions.archive}
+      onDelete={actions.del}
+      column={columnActions}
+      // "Layouts…": the focus goes to the picker, not back to the "..." (that would close the picker)
+      keepFocus={() => useSessionsUI.getState().layoutPicker === col.key}
+    />
+  )
+
   // (a picture dragged from a thread carries a file too: that is a content drag)
   const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files') && !e.dataTransfer.types.includes(CONTENT_MIME)
   return (
@@ -625,6 +741,12 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
       <div
         ref={body}
         className="relative flex min-h-0 flex-1 flex-col"
+        onKeyDown={(e) => {
+          if (termOn && e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'j') {
+            e.preventDefault()
+            toggleTerm()
+          }
+        }}
         onDragEnter={(e) => isFileDrag(e) && setDragFiles(true)}
         onDragOver={(e) => {
           if (contentDragOver(e, col.key, sid)) return
@@ -650,126 +772,28 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
           rootLabel={t('sessions.root')}
           onClose={() => close(col.key)}
           fixedPlace={agentRun}
-          tgLinked={tgLinked}
           headRef={head}
+          headProps={menuCtx.props}
           slim={slim}
           menu={
-            <DropdownMenu>
-              <Tooltip content={t('common.more')}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon-sm" aria-label={t('common.more')} disabled={!session}>
-                    <MoreHorizontal />
-                  </Button>
-                </DropdownMenuTrigger>
-              </Tooltip>
-              <DropdownMenuContent
-                align="end"
-                className="w-60"
-                // "Layouts…": the focus goes to the picker, not back to this button (that would close the picker)
-                onCloseAutoFocus={(e) => useSessionsUI.getState().layoutPicker === col.key && e.preventDefault()}
-              >
-                {(variant === 'mobile' || slim) && (
-                  <>
-                    {/* Touch layout and short stacked session: the header keeps room for the title - Telegram lives
-                        here (on a phone plan mode is next to the title). */}
-                    {slim && (
-                      <DropdownMenuCheckboxItem checked={!!session?.plan_mode} disabled={!session} onSelect={() => session && patch.mutate({ id: sid, plan_mode: !session.plan_mode })}>
-                        {t('plan.toggle')}
-                      </DropdownMenuCheckboxItem>
-                    )}
-                    <DropdownMenuCheckboxItem checked={!!session?.notify} disabled={!session || !tgLinked} onSelect={actions.notify}>
-                      {t('sessions.notify.label')}
-                    </DropdownMenuCheckboxItem>
-                    <DropdownMenuSeparator />
-                  </>
-                )}
-                <DropdownMenuItem disabled={running || !session?.turns} onSelect={actions.compact}>
-                  <Minimize2 /> {t('sessions.menu.compact')}
-                </DropdownMenuItem>
-                <DropdownMenuItem disabled={running || !session?.turns} onSelect={actions.handoff}>
-                  <Sparkles /> {t('sessions.menu.handoff')}
-                </DropdownMenuItem>
-                {!agentRun && (
-                  <DropdownMenuItem onSelect={actions.archive}>
-                    {session?.archived ? <ArchiveRestore /> : <Archive />} {session?.archived ? t('sessions.menu.unarchive') : t('sessions.menu.archive')}
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem disabled={!dir} onSelect={() => dir && navigate(`/files?path=${encodeURIComponent(dir)}`)}>
-                  <FolderOpen /> {t('sessions.menu.openFolder')}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => copyText(sid).then((ok) => ok && toast.success(t('sessions.menu.idCopied')))}>
-                  <Copy /> {t('sessions.menu.copyId')}
-                </DropdownMenuItem>
-                {hudOn && variant !== 'mobile' && (
-                  <DropdownMenuItem onSelect={hud}>
-                    <PictureInPicture2 /> {t('hud.open')}
-                  </DropdownMenuItem>
-                )}
-                {variant === 'column' && (
-                  <>
-                    <DropdownMenuItem onSelect={detach}>
-                      <ExternalLink /> {t('sessions.menu.detach')}
-                    </DropdownMenuItem>
-                    {index > 0 && (
-                      col.below ? (
-                        <DropdownMenuItem onSelect={() => useSessionsUI.getState().unstack(col.key)}>
-                          <Columns2 /> {t('sessions.grid.unstack')}
-                        </DropdownMenuItem>
-                      ) : (
-                        <DropdownMenuItem
-                          disabled={!canStackUnderPrevious(col.key)}
-                          onSelect={() => {
-                            const cols = useSessionsUI.getState().cols
-                            const i = cols.findIndex((c) => c.key === col.key)
-                            // under the last session of the strip column on the left
-                            if (i > 0) useSessionsUI.getState().stack(col.key, cols[i - 1].key)
-                          }}
-                        >
-                          <Rows2 /> {t('sessions.grid.stack')}
-                        </DropdownMenuItem>
-                      )
-                    )}
-                    {count > 1 && (
-                      <>
-                        <DropdownMenuItem onSelect={() => useSessionsUI.getState().setLayoutPicker(col.key)}>
-                          <LayoutGrid /> {t('sessions.layout.menu')}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={!canShift(useSessionsUI.getState().cols, col.key, -1)} onSelect={() => useSessionsUI.getState().shift(col.key, -1)}>
-                          <ChevronLeft /> {t('sessions.menu.moveLeft')}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={!canShift(useSessionsUI.getState().cols, col.key, 1)} onSelect={() => useSessionsUI.getState().shift(col.key, 1)}>
-                          <ChevronRight /> {t('sessions.menu.moveRight')}
-                        </DropdownMenuItem>
-                      </>
-                    )}
-                  </>
-                )}
-                {!agentRun && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem destructive onSelect={actions.del}>
-                      <Trash2 /> {t('sessions.menu.delete')}
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Tooltip content={t('common.more')}>
+              <Button variant="ghost" size="icon-sm" aria-label={t('common.more')} aria-haspopup="dialog" disabled={!session} onClick={() => setOptions(true)}>
+                <MoreHorizontal />
+              </Button>
+            </Tooltip>
           }
+          contextMenu={optionsWindow}
           onRename={actions.rename}
-          onHud={hudOn ? hud : undefined}
-          onPlan={() => session && patch.mutate({ id: sid, plan_mode: !session.plan_mode })}
-          onNotify={actions.notify}
         />
         {session?.archived && !agentRun && (
-          <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2 border-b bg-muted px-4 py-1.5 text-xs text-muted-foreground">
             <Archive className="size-3.5" /> {t('sessions.archivedBanner')}
             <Button size="sm" variant="link" className="ml-auto h-auto text-xs" onClick={actions.archive}>
               {t('sessions.menu.unarchive')}
             </Button>
           </div>
         )}
-        <ItemContext.Provider value={React.useMemo(() => ({ filesRoot: settings?.files_root || null, models: claude?.models, running, tz: settings?.timezone, topicDir: dir, wsRoot: ws?.root || null }), [settings?.files_root, settings?.timezone, claude?.models, running, dir, ws?.root])}>
+        <ItemContext.Provider value={React.useMemo(() => ({ filesRoot: settings?.files_root || null, models: claude?.models, running, tz: settings?.timezone, topicDir: dir, wsRoot: ws?.root || null, sid, path }), [settings?.files_root, settings?.timezone, claude?.models, running, dir, ws?.root, sid, path])}>
           {notFound ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center text-sm text-muted-foreground">
               {t('sessions.deleted')}
@@ -778,10 +802,13 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
               </Button>
             </div>
           ) : (
-            <LiveThread ref={thread} sid={sid} session={session} pending={pending} onRetry={onRetry} onLoadEarlier={onLoadEarlier} onEdit={onEdit} onFork={path ? onFork : undefined} />
+            <CutContext.Provider value={cut}>
+              <LiveThread ref={thread} sid={sid} session={session} pending={pending} onRetry={onRetry} onLoadEarlier={onLoadEarlier} onEdit={onEdit} onFork={path ? onFork : undefined} />
+            </CutContext.Provider>
           )}
         </ItemContext.Provider>
-        {session?.state === 'error' && session.error && !running && (
+        {/* a failed turn says it in its own card of the thread */}
+        {session?.state === 'error' && session.error && !running && !endsOnCut && (
           <div className="mx-auto w-full max-w-(--mx-read,860px) px-3">
             <div role="alert" className="rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
               <Sensitive>{session.error}</Sensitive>
@@ -809,7 +836,32 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
         )}
         {!notFound && aside.aside && <AsidePanel aside={aside.aside} onClose={aside.close} />}
         {!notFound && <ApprovalCards session={session} />}
-        {!notFound && <TaskBar sid={sid} running={running} />}
+        {!notFound && termOpen && (
+          <React.Suspense fallback={null}>
+            <TermDrawer
+              sid={sid}
+              places={termPlaces}
+              onHide={() => {
+                toggleTerm(false)
+                composer.current?.focus()
+              }}
+              onQuote={(text) => {
+                composer.current?.quote(text)
+                composer.current?.focus()
+              }}
+            />
+          </React.Suspense>
+        )}
+        {!notFound && session?.worktree && (
+          <CopyBar
+            session={session}
+            running={running}
+            onAsk={(text) => {
+              composer.current?.bringBack({ text, quotes: [], attachments: [] })
+              composer.current?.focus()
+            }}
+          />
+        )}
         {!notFound && (
           <StackedComposer colKey={col.key} stacked={!!place && place.n >= 3}>
           <Composer
@@ -817,6 +869,8 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
             colKey={col.key}
             maxRows={place && place.row !== 'full' ? 4 : 12}
             draftKey={sid}
+            commands={commands}
+            mentionsFor={sid}
             placeholder={session?.plan_mode ? t(session.plan_ready ? 'plan.placeholderAdjust' : 'plan.placeholder') : undefined}
             suggestions={suggested?.suggestions}
             notice={session?.plan_ready && !running ? <PlanNotice session={session} onAdjust={() => composer.current?.focus()} /> : null}
@@ -839,6 +893,16 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
               })
             }
             steerPending={steerPending}
+            onInject={() =>
+              inject.mutate(sid, {
+                onSuccess: (r) => {
+                  if (r.injected) return
+                  if (r.reason === 'idle') toast.info(t('sessions.queue.steerNothing'), t('sessions.queue.steerNothingDesc'))
+                  else toast.info(t('sessions.queue.injectNo'), t(`sessions.queue.injectNo.${r.reason === 'voice' || r.reason === 'plan' || r.reason === 'summary' ? r.reason : 'unsupported'}`))
+                },
+              })
+            }
+            injecting={inject.isPending}
             onTakeQueue={async () => {
               const r = await takeQueue.mutateAsync(sid)
               usePending.getState().clearQueued(sid)
@@ -853,11 +917,11 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
             onSendVoice={onSendVoice}
             onStop={onStop}
             stopping={stop.isPending}
-            autoFocus={variant !== 'mobile'}
+            autoFocus={variant !== 'mobile' && !background}
             toolbar={
               session ? (
                 <>
-                  <ModelPicker chosen={session.model} chosenProvider={session.provider} effort={session.effort} real={session.real_model} contextTokens={session.context_tokens} onChange={actions.model} onEffort={actions.effort} />
+                  <ModelPicker chosen={session.model} chosenProvider={session.provider} effort={session.effort || ''} real={session.real_model} contextTokens={session.context_tokens} onChange={actions.model} onEffort={actions.effort} />
                   {session.plan_mode && <PlanChip session={session} />}
                 </>
               ) : (
@@ -888,11 +952,9 @@ function ColumnHeader({
   onClose,
   menu,
   onRename,
-  onNotify,
-  onHud,
-  onPlan,
-  tgLinked,
   headRef,
+  headProps,
+  contextMenu,
   slim,
   fixedPlace,
 }: {
@@ -903,60 +965,45 @@ function ColumnHeader({
   onClose: () => void
   menu: React.ReactNode
   onRename: (title: string) => void
-  onNotify: () => void
-  onHud?: () => void
-  onPlan?: () => void
-  tgLinked: boolean
   /** The place is shown, not a picker (a run of an agent stays in the agent's folder). */
   fixedPlace?: boolean
   headRef?: React.Ref<HTMLElement>
-  /** Short stacked session: one line (title, state, context, menu, close); plan mode and Telegram show only
-   *  while on and are in the menu, the picture-in-picture is in the menu, topic and cost go. */
+  /** The session's options window, opened by `menu` and by a right click / long press on the header. */
+  headProps?: ContextMenuHandlers
+  contextMenu?: React.ReactNode
+  /** Short stacked session: one line (title, state, plan / Telegram marks, context, menu, close); topic and cost go. */
   slim?: boolean
 }) {
   const t = useT()
   const billed = useCostIsBilled()
   const showCost = !useResultLine().hidden.includes('cost')
-  const notifyTip = !tgLinked ? t('sessions.notify.unavailable') : session?.notify ? t('sessions.notify.on') : t('sessions.notify.off')
   const maxxing = useMaxxingEnabled()
   if (variant === 'mobile')
     // phone / tablet: app bar (☰ logo ⋯ ⊞), then the session's title, then its topic and what it used
     return (
-      <header data-kbd-short-hide="" className="relative shrink-0 border-b bg-background px-3 pb-2 pt-[calc(0.25rem+var(--safe-top))]">
+      <header {...headProps} data-kbd-short-hide="" className="relative shrink-0 border-b bg-background px-3 pb-2 pt-[calc(0.25rem+var(--safe-top))]">
         {maxxing && <MaxxingMeter strip />}
         <div className="flex h-11 min-w-0 items-center gap-1">
           <TouchSessionsButton className="-ml-2" />
           <Logo className="min-w-0 flex-1 gap-2 [&_img]:size-6" nameClassName={maxxing ? 'max-[479px]:sr-only' : undefined} />
           <div className="flex shrink-0 items-center">
-            <TabsToggle compact />
+            <TabsToggle />
             {maxxing && <MaxxingControls compact />}
             {menu}
-            <TouchAppButton className="-mr-2" />
           </div>
         </div>
         <MobileTabs />
         <div className="flex min-h-8 min-w-0 items-center gap-2">
           {session ? <InlineTitle value={session.title} onSave={onRename} className="text-[17px] font-semibold" /> : <Skeleton className="h-5 w-48" />}
           {session && <StateBadge session={session} />}
-          {onPlan && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={t('plan.toggle')}
-              aria-pressed={!!session?.plan_mode}
-              disabled={!session}
-              onClick={onPlan}
-              className={cn('-mr-1 ml-auto shrink-0 pointer-coarse:size-10', session?.plan_mode && 'bg-primary/12 text-primary hover:bg-primary/20 hover:text-primary')}
-            >
-              <ListChecks />
-            </Button>
-          )}
         </div>
         <div data-kbd-hide="" className="mt-0.5 flex h-6 min-w-0 items-center gap-2 text-[13px] text-muted-foreground">
           {session ? (
             <>
-              <MoveSessionPicker session={session} rootLabel={rootLabel} locked={fixedPlace} />
+              <MoveSessionPicker session={session} rootLabel={rootLabel} locked={fixedPlace || (!!session.worktree && !session.worktree.removed)} />
+              <CopyMark session={session} />
               {session.source === 'cron' && <Clock className="size-3.5 shrink-0" aria-label={t('sessions.source.cron')} />}
+              <SessionMarks session={session} className="size-3.5" />
               <span className="ml-auto flex shrink-0 items-center gap-3 tabular-nums">
                 {session.cost_usd > 0 && showCost && (
                   <Tooltip content={<span className="block max-w-72 whitespace-normal">{costTip(t, billed, session.turns)}</span>}>
@@ -972,58 +1019,21 @@ function ColumnHeader({
             <Skeleton className="h-3.5 w-32" />
           )}
         </div>
+        {contextMenu}
       </header>
     )
   return (
-    <header ref={headRef} data-col-head data-kbd-short-hide="" className={cn('shrink-0 border-b bg-background/95 px-3', slim ? 'py-0.5' : 'py-1.5', variant !== 'column' && 'pt-[calc(0.375rem+var(--safe-top))]')}>
+    <header {...headProps} ref={headRef} data-col-head data-kbd-short-hide="" className={cn('mx-bar shrink-0 border-b bg-background/95 px-3', slim ? 'py-0.5' : 'py-1.5', variant !== 'column' && 'pt-[calc(0.375rem+var(--safe-top))]')}>
       <div className="flex h-9 min-w-0 items-center gap-1 pointer-coarse:h-10">
         {variant === 'column' && <DragGrip colKey={col.key} />}
         {session ? <InlineTitle value={session.title} onSave={onRename} /> : <Skeleton className="h-4 w-40" />}
         {session && <StateBadge session={session} />}
         <div className="ml-auto flex shrink-0 items-center">
           {slim && session && (
-            <span className="mr-1 flex">
+            <span className="mr-1 flex items-center gap-1.5">
+              <SessionMarks session={session} className="size-3.5" />
               <ContextGauge ring tokens={session.context_tokens} window={session.context_window} model={session.model} realModel={session.real_model} />
             </span>
-          )}
-          {onHud && !slim && (
-            <Tooltip content={t('hud.open')}>
-              <Button variant="ghost" size="icon-sm" aria-label={t('hud.open')} onClick={onHud}>
-                <PictureInPicture2 />
-              </Button>
-            </Tooltip>
-          )}
-          {onPlan && (!slim || session?.plan_mode) && (
-            <Tooltip content={session?.plan_mode ? t('plan.toggleOff') : t('plan.toggleOn')}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={t('plan.toggle')}
-                aria-pressed={!!session?.plan_mode}
-                disabled={!session}
-                onClick={onPlan}
-                className={cn(session?.plan_mode && 'bg-primary/12 text-primary hover:bg-primary/20 hover:text-primary')}
-              >
-                <ListChecks />
-              </Button>
-            </Tooltip>
-          )}
-          {(!slim || session?.notify) && (
-          <Tooltip content={notifyTip}>
-            <span>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={notifyTip}
-                aria-pressed={!!session?.notify}
-                disabled={!session || !tgLinked}
-                onClick={onNotify}
-                className={cn(session?.notify && 'text-primary')}
-              >
-                {session?.notify ? <Bell /> : <BellOff />}
-              </Button>
-            </span>
-          </Tooltip>
           )}
           {menu}
           {variant === 'column' && (
@@ -1038,12 +1048,14 @@ function ColumnHeader({
       <div data-kbd-hide="" className={cn('flex h-5 min-w-0 items-center gap-2 text-[11px] text-muted-foreground', slim && 'hidden')}>
         {session ? (
           <>
-            <MoveSessionPicker session={session} rootLabel={rootLabel} locked={fixedPlace} />
+            <MoveSessionPicker session={session} rootLabel={rootLabel} locked={fixedPlace || (!!session.worktree && !session.worktree.removed)} />
+              <CopyMark session={session} />
             {session.source === 'cron' && (
               <Tooltip content={t('sessions.source.cron')}>
                 <span className="inline-flex shrink-0 items-center"><Clock className="size-3" /></span>
               </Tooltip>
             )}
+            <SessionMarks session={session} className="size-3" />
             <span className="ml-auto flex shrink-0 items-center gap-2.5 tabular-nums">
               {session.cost_usd > 0 && showCost && (
                 <Tooltip content={<span className="block max-w-72 whitespace-normal">{costTip(t, billed, session.turns)}</span>}>
@@ -1059,7 +1071,27 @@ function ColumnHeader({
           <Skeleton className="h-3 w-28" />
         )}
       </div>
+      {contextMenu}
     </header>
+  )
+}
+
+/** What is on for this session, shown and not clickable (they are switched in its options window). */
+function SessionMarks({ session, className }: { session: Session; className?: string }) {
+  const t = useT()
+  return (
+    <>
+      {session.plan_mode && (
+        <Tooltip content={t('plan.toggle')}>
+          <span className="inline-flex shrink-0 items-center text-primary" aria-label={t('plan.toggle')}><ListChecks className={className} /></span>
+        </Tooltip>
+      )}
+      {session.notify && (
+        <Tooltip content={t('sessions.notify.on')}>
+          <span className="inline-flex shrink-0 items-center" aria-label={t('sessions.notify.on')}><Bell className={className} /></span>
+        </Tooltip>
+      )}
+    </>
   )
 }
 
@@ -1196,14 +1228,14 @@ function MoveSessionPicker({ session, rootLabel, locked }: { session: Session; r
 }
 
 /** One part of the session's place (project or topic) as a badge; hovering it explains what it is. */
-export function WhereBadge({ kind, name, description, dir, hint, generic, children }: { kind: 'project' | 'topic' | 'agent'; name: string; description?: string; dir?: string | null; hint: string; /** The word itself (page subtitle): no name, no folder in the card. */ generic?: boolean; children?: React.ReactNode }) {
+export function WhereBadge({ kind, name, description, dir, hint, children }: { kind: 'project' | 'topic' | 'agent'; name: string; description?: string; dir?: string | null; hint: string; children?: React.ReactNode }) {
   const t = useT()
   return (
     <TooltipRoot delayDuration={350}>
       <TooltipTrigger asChild>
-        <span className="inline-flex h-[18px] min-w-0 items-center gap-1 rounded-md border bg-muted/50 px-1.5 text-[11px] font-medium text-foreground/80 max-md:h-5 max-md:text-xs" data-testid={generic ? `where-word-${kind}` : `where-${kind}`} tabIndex={generic ? 0 : undefined}>
+        <span className="inline-flex h-[18px] min-w-0 items-center gap-1 rounded-md border bg-muted px-1.5 text-[11px] font-medium text-foreground/80 max-md:h-5 max-md:text-xs" data-testid={`where-${kind}`}>
           {children}
-          <span className="truncate">{generic ? name : <Sensitive length={8}>{name}</Sensitive>}</span>
+          <span className="truncate"><Sensitive length={8}>{name}</Sensitive></span>
         </span>
       </TooltipTrigger>
       <TooltipContent side="bottom" align="start" className="block w-72 rounded-lg border bg-popover p-3 text-popover-foreground font-normal">
@@ -1211,13 +1243,11 @@ export function WhereBadge({ kind, name, description, dir, hint, generic, childr
           {kind === 'project' ? <FolderOpen className="size-3" /> : kind === 'agent' ? <Bot className="size-3" /> : <Hash className="size-3" />}
           {t(kind === 'project' ? 'where.project' : kind === 'agent' ? 'where.agent' : 'where.topic')}
         </span>
-        {!generic && (
-          <span className="mt-1 block text-sm font-semibold">
-            <Sensitive length={8}>{name}</Sensitive>
-          </span>
-        )}
+        <span className="mt-1 block text-sm font-semibold">
+          <Sensitive length={8}>{name}</Sensitive>
+        </span>
         {description && <span className="mt-0.5 block text-xs text-muted-foreground"><Sensitive length={20}>{description.replace(/[*`_]+/g, '')}</Sensitive></span>}
-        <span className="mt-2 block text-xs leading-relaxed">{t(kind === 'project' ? 'where.projectHelp' : kind === 'agent' ? 'where.agentHelp' : generic ? 'where.topicHelpAny' : 'where.topicHelp')}</span>
+        <span className="mt-2 block text-xs leading-relaxed">{t(kind === 'project' ? 'where.projectHelp' : kind === 'agent' ? 'where.agentHelp' : 'where.topicHelp')}</span>
         {dir && <span className="mt-2 block truncate font-mono text-[11px] text-muted-foreground"><Sensitive length={16}>{dir}</Sensitive></span>}
         <span className="mt-2 block border-t pt-2 text-[11px] text-muted-foreground">{hint}</span>
       </TooltipContent>
@@ -1237,8 +1267,10 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
   const [title, setTitle] = React.useState('')
   const [model, setModel] = React.useState('')
   const [provider, setProvider] = React.useState<'' | ClaudeProvider>('')
-  const [effort, setEffort] = React.useState<ClaudeEffort>('')
+  const [effort, setEffort] = React.useState<Effort | ''>('')
   const [planMode, setPlanMode] = React.useState(false)
+  const copy = useNewCopy(col.path)
+  const newCommands = useSlashCommands(col.path, { model, onModel: setModel, effort, onEffort: setEffort, plan: planMode, onPlan: () => setPlanMode((p) => !p) })
   const composer = React.useRef<ComposerHandle>(null)
   const [dragFiles, setDragFiles] = React.useState(false)
   const mask = useMask()
@@ -1268,7 +1300,7 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
   const onSend = async (text: string, attachments: string[], clientId?: string) => {
     if (made.current) return toMade(made.current, text, attachments, { client_id: clientId })
     try {
-      const s = await create.mutateAsync({ path: col.path, message: text, client_id: clientId, title: title.trim() || undefined, model: model || undefined, provider: provider || undefined, effort: effort || undefined, attachments, plan_mode: planMode || undefined })
+      const s = await create.mutateAsync({ path: col.path, message: text, client_id: clientId, title: title.trim() || undefined, model: model || undefined, provider: provider || undefined, effort: effort || undefined, attachments, plan_mode: planMode || undefined, worktree: copy.value })
       made.current = s.id
       seedEmptyLog(s.id)
       usePending.getState().add(s.id, { text, attachments, queued: false })
@@ -1286,7 +1318,7 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
     try {
       const up = await uploadAttachment(col.path, file)
       if (made.current) return toMade(made.current, '', [], { voice: up.path })
-      const s = await create.mutateAsync({ path: col.path, title: title.trim() || undefined, model: model || undefined, provider: provider || undefined, effort: effort || undefined, plan_mode: planMode || undefined, voice: up.path })
+      const s = await create.mutateAsync({ path: col.path, title: title.trim() || undefined, model: model || undefined, provider: provider || undefined, effort: effort || undefined, plan_mode: planMode || undefined, voice: up.path, worktree: copy.value })
       made.current = s.id
       seedEmptyLog(s.id)
       usePending.getState().add(s.id, { text: '', attachments: [], queued: false, voice: true })
@@ -1358,7 +1390,6 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
             {variant === 'mobile' && <TouchSessionsButton className="-ml-2" />}
             {variant === 'column' && <DragGrip colKey={col.key} />}
             <span className="truncate px-1 text-sm font-semibold max-md:flex-1 max-md:text-[15px]">{t('sessions.new.title')}</span>
-            {variant === 'mobile' && <TouchAppButton className="-mr-2" />}
             {variant === 'column' && (
               <Tooltip content={t('sessions.closeColumn')}>
                 <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label={t('sessions.closeColumn')} onClick={() => close(col.key)}>
@@ -1397,6 +1428,7 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
                 <span className="text-xs text-muted-foreground">{t('plan.newHint')}</span>
               </span>
             </label>
+            <NewCopy c={copy} title={title} id={`copy-${col.key}`} />
             <p className="text-[13px] text-muted-foreground">{t('sessions.new.hint')}</p>
           </div>
         </div>
@@ -1405,6 +1437,7 @@ export function NewSessionColumn({ col, variant, index, count, place }: { col: E
           colKey={col.key}
           draftKey={`new:${col.path}`}
           topicPath={col.path}
+          commands={newCommands}
           disabledReason={!valid ? t('sessions.new.pickTopic') : claude && !claude.auth.ok ? t(claude.auth.method ? 'sessions.composer.authExpired' : 'sessions.composer.noAuth') : null}
           onSend={onSend}
           checkSent={checkSent}

@@ -7,7 +7,7 @@ import { Check, CheckCheck, ShieldQuestion, X } from 'lucide-react'
 import { useDecideApproval, useSessionApprovals } from '@/lib/queries'
 import type { Approval, Session } from '@/lib/types'
 import { fmtDuration } from '@/lib/format'
-import { useT } from '@/i18n'
+import { tDyn, useT, type TFn } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { Button, Input, Sensitive } from '@/components/ui'
 import { ToolInput, toolDiff } from './Items'
@@ -33,6 +33,21 @@ export function ApprovalCards({ session }: { session: Session | undefined }) {
   )
 }
 
+/** One line of an agent's safety change from the server ("sandbox: on -> off", "domains: + a.com"): its field and the
+ *  words on / off / (none) in the page's language, the values themselves as they are. */
+function changeLine(t: TFn, line: string): string {
+  const at = line.indexOf(': ')
+  if (at < 0) return line.replace(' -> ', ' → ')
+  const key = line.slice(0, at)
+  const word = (v: string) => (v === 'on' || v === 'off' ? tDyn(t, `agents.change.${v}`, v) : v === '(none)' ? tDyn(t, 'agents.change.none', v) : v)
+  const rest = line.slice(at + 2)
+  const vals = /^[+-] /.test(rest) ? rest : rest.split(' -> ').map(word).join(' → ')
+  // one line per mailbox: `mail <account>: …`
+  const field = key.startsWith('mail ') ? `${tDyn(t, 'agents.change.mail', 'mail')} ${key.slice(5)}` : tDyn(t, `agents.change.${key}`, key)
+  const out = t('agents.change.line', { field, change: vals })
+  return out.includes(vals) ? out : `${field}: ${vals}` // '' while the agents texts download
+}
+
 /** One waiting request: the tool and its input, Allow / Deny with an optional message (also in an agent's thread and
  *  in the window of the Office). `plain`: no frame nor title (the window has its own). */
 export function ApprovalCard({ approval: a, className, plain }: { approval: Approval; className?: string; plain?: boolean }) {
@@ -41,7 +56,8 @@ export function ApprovalCard({ approval: a, className, plain }: { approval: Appr
   const [message, setMessage] = React.useState('')
   const [choice, setChoice] = React.useState<'allow' | 'deny' | 'always' | null>(null)
   const Icon = toolIcon(a.tool)
-  const name = a.tool.startsWith('mcp__') ? a.tool.split('__').slice(2).join('__') || a.tool : a.tool
+  const change = a.kind === 'agent_change'          // an agent's own safety settings: one line per change
+  const name = change ? t('approval.agentChange') : a.tool.startsWith('mcp__') ? a.tool.split('__').slice(2).join('__') || a.tool : a.tool
   const diff = React.useMemo(() => toolDiff(a.tool, a.input), [a.tool, a.input])
   const left = useSecondsLeft(a.expires)
   const send = (decision: 'allow' | 'deny', always = false) => {
@@ -64,7 +80,15 @@ export function ApprovalCard({ approval: a, className, plain }: { approval: Appr
       </div>
       <div className={cn('grid min-w-0 gap-2', !plain && 'px-2.5 py-2')}>
         <Sensitive block>
-          <ToolInput name={a.tool} input={a.input} diff={diff} display={null} />
+          {change ? (
+            <ul className="grid gap-0.5 font-mono text-[12px]" data-testid="approval-agent-change">
+              {String(a.input.description || '').split('; ').map((x, i) => (
+                <li key={i} className="break-words">{changeLine(t, x)}</li>
+              ))}
+            </ul>
+          ) : (
+            <ToolInput name={a.tool} input={a.input} diff={diff} display={null} />
+          )}
         </Sensitive>
         {a.clipped && <p className="text-xs text-warning">{t('approval.clipped')}</p>}
         <div className="flex min-w-0 flex-wrap items-center gap-2">
