@@ -1,8 +1,10 @@
 # This fork
 
-`yann627892/harness-maxxing-yann` is Harness Maxxing plus three features kept on top of upstream
-(`makushingu/harness-maxxing`). It follows upstream `stable` closely: every update is a merge, not a rebase, so
-`maxxing update` on the server gets upstream's versions **and** these features.
+**Harness Yann** (`yann627892/harness-yann`) is an unofficial fork of Harness Maxxing
+(`makushingu/harness-maxxing`) plus three features kept on top of upstream. It follows upstream `stable` closely:
+every update is a merge, not a rebase, so `maxxing update` on the server gets upstream's versions **and** these
+features. `NOTICE.md` states the filiation and what the Fair Source license allows; the repository, its releases
+and any listing must not use the names "Harness Maxxing" or "Maxxing" beyond saying the work is based on them.
 
 Branches: `stable` and `gateway-providers` are the same commit (the server updates from `stable`). Never push to
 `origin` (403): push to `fork`.
