@@ -406,6 +406,30 @@ def add_topic_allowed_tool(path: str, rule: str) -> list[str]:
 _allowed_lock = config.ProcessLock("topic-allowed-tools")
 
 
+def folder_browser(path: str) -> dict:
+    """The `browser` block {enabled?, profile?} of a project's or a topic's .maxxing.json ({} when none)."""
+    try:
+        raw = _folder_meta(topic_dir(path)).get("browser")
+    except ValueError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def set_folder_browser(path: str, block: dict | None) -> None:
+    """Write (or remove, with an empty block) the `browser` block of a project's or a topic's .maxxing.json."""
+    folder = topic_dir(path)
+    meta = _folder_meta(folder)
+    if block:
+        meta["browser"] = block
+    else:
+        meta.pop("browser", None)
+    _forget(folder / META_FILE)
+    if meta:
+        config.write_json(folder / META_FILE, meta)
+    else:
+        (folder / META_FILE).unlink(missing_ok=True)
+
+
 def check_permission_mode(value: str) -> str:
     v = (value or "").strip()
     if v and v not in PERMISSION_MODES:
@@ -643,10 +667,12 @@ def _delete(prefix: str, kind: str) -> None:
     sessions = _ensure_idle(prefix)
     from . import agents
     inside = agents.under(prefix) if kind in ("project", "topic") else [prefix] if kind == "agent" else []
+    hooks = agents.hook_ids(inside)                 # read while their agent.json is still there
     dest = move_to_trash(root() / prefix, label=f"{kind}-{prefix.rsplit('/', 1)[-1]}", kind=kind)
     from .sessions import service
     service.trash_sessions([s["id"] for s in sessions], dest.parent / (dest.name + ".sessions"))
     agents.to_trash(inside, dest)                   # their thread and state go with them (back with a restore)
+    agents.drop_hooks(hooks)                        # their webhook URLs stop answering
     if kind in ("project", "topic"):                # its agents' cron jobs and Telegram threads go too
         agents.deleted_with(prefix, inside)
     if kind == "project":                           # its agent groups' conversations go to the Trash with it

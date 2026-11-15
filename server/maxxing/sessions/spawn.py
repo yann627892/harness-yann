@@ -17,12 +17,12 @@ import threading
 import time
 from pathlib import Path
 
-from .. import config
+from .. import config, cpu
 
 SERVER_DIR = Path(__file__).resolve().parent.parent.parent      # …/server
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TUNING_ENV = ("CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_PROMPT_CACHE_TTL",
-              "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "FORCE_PROMPT_CACHING_5M",
+              "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "CLAUDE_CODE_SUBAGENT_EFFORT", "FORCE_PROMPT_CACHING_5M",
               "ENABLE_PROMPT_CACHING_1H", "DISABLE_PROMPT_CACHING", "ENABLE_TOOL_SEARCH",
               "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "BASH_MAX_OUTPUT_LENGTH",
               "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")  # never secrets: shown in `ps`
@@ -205,6 +205,63 @@ FOREGROUND_AGENTS = ("Subagents (Agent tool): run them in the foreground, always
 # there is nothing to report, then the job sends nothing on Telegram (crons.is_silent). Other jobs keep a full answer.
 CRON_SILENT = ("This turn was started by a scheduled job. If there is nothing worth reporting this time, answer "
                "exactly [SILENT] and nothing else: no report is then sent.")
+
+
+# Every level's CLAUDE.md imports its memory (`@memory.md`), but Claude Code follows an import from outside the
+# working folder only once the user approved it by hand in that folder (hasClaudeMdExternalIncludesApproved), which
+# a turn started by Harness never does: the memory of the levels above was never read. It is passed with the turn.
+UPPER_MEMORY = ("The CLAUDE.md files above this folder import their memory (`@memory.md`); Claude Code does not load "
+                "those imports in this turn, so here is what they hold, with the same standing as these CLAUDE.md "
+                "files (as written when this turn started):")
+UPPER_MEMORY_MAX = 12_000       # characters of one level's memory.md (the memory skill keeps them far shorter)
+
+
+def _includes_approved(cwd: Path) -> bool:
+    env = base_env()
+    own = env.get("CLAUDE_CONFIG_DIR")
+    try:
+        f = Path(own) / ".claude.json" if own else Path(env.get("HOME") or Path.home()) / ".claude.json"
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return bool(d["projects"][str(cwd)].get("hasClaudeMdExternalIncludesApproved"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def _has_facts(text: str) -> bool:
+    """False for a memory.md nobody wrote in yet: headings, comments and the lines of the workspace template only."""
+    try:
+        blank = set((config.TEMPLATES_DIR / "workspace" / "memory.md").read_text(encoding="utf-8").splitlines())
+    except OSError:
+        blank = set()
+    body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    return any(ln.strip() and not ln.startswith("#") and ln not in blank for ln in body.splitlines())
+
+
+def upper_memory(cwd: str, root: str) -> str:
+    """The memory.md of the levels above the working folder, up to the workspace (project and workspace for a topic;
+    the topic too for an agent), for `--append-system-prompt`. "" outside the workspace, when there is none, or when
+    Claude Code loads them itself (imports approved for this folder)."""
+    try:
+        here, top = Path(cwd).resolve(), Path(root or "/").resolve()
+        if top == Path("/") or here == top or top not in here.parents or _includes_approved(here):
+            return ""
+    except OSError:
+        return ""
+    out, d = [], here.parent
+    while True:
+        try:
+            if "@memory.md" in (d / "CLAUDE.md").read_text(encoding="utf-8", errors="replace"):
+                text = (d / "memory.md").read_text(encoding="utf-8", errors="replace").strip()
+                if len(text) > UPPER_MEMORY_MAX:
+                    text = text[:UPPER_MEMORY_MAX] + "\n[... cut: read the file]"
+                if _has_facts(text):
+                    out.append(f"Contents of {d / 'memory.md'}:\n\n{text}")
+        except OSError:
+            pass
+        if d == top:
+            break
+        d = d.parent
+    return "\n\n".join([UPPER_MEMORY] + out[::-1]) if out else ""
 
 
 def agents_args(cfg: dict, extra: str = "") -> list[str]:
@@ -393,7 +450,7 @@ def _start_unit(sid: str) -> str:
         cmd = ["systemd-run", "--collect", "--quiet", "--unit", unit,
                "--description", f"Harness Maxxing turn {sid}",
                "--property", "KillMode=mixed", "--property", "TimeoutStopSec=15", *memory_properties(),
-               *hardening_properties(),
+               *hardening_properties(), *cpu.turn_slice_args(),       # CPU priorities: turns after the UI
                "--working-directory", str(SERVER_DIR), *sets, "--", *_runner_cmd(sid)]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:

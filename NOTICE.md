@@ -1,7 +1,7 @@
 # Notice
 
 **Harness Yann** is an unofficial fork of [Harness Maxxing](https://github.com/makushingu/harness-maxxing),
-based on upstream `2.0.0-alpha.151` (commit `dd4c7a473`). It is **not** Harness Maxxing, is not maintained by
+based on upstream `2.0.0-alpha.156` (commit `b3a157c8d`). It is **not** Harness Maxxing, is not maintained by
 the Harness Maxxing authors, and its name is not a claim on theirs. The application itself keeps the name
 Harness Maxxing, as the software it is.
 

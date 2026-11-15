@@ -1,11 +1,12 @@
 [project]
 name = "claude-maxxing"
-version = "2.0.0a151"
+version = "2.0.0a156"
 description = "Self-hosted control room for Claude Code"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
+  "websockets>=13",                 # the browser of Claude (maxxing/browser: DevTools over a unix socket)
   "httpx>=0.27",
   "python-multipart>=0.0.9",
   "watchfiles>=0.21",           # inotify wake-ups of the session streams (sessions/wake.py)

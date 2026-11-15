@@ -101,6 +101,7 @@ class AgentIn(BaseModel):
     subagent: Optional[bool] = None
     chat_model: Optional[str] = Field(default=None, max_length=80)   # its model ("" = model)
     mail: Optional[list[dict]] = Field(default=None, max_length=10)    # mailboxes of the E-mail page (mail/access.py)
+    browser: Optional[dict] = None          # its own browser (maxxing/browser): {enabled, web, sites, profile, ask, wait_min, downloads}
 
 
 def _fields(body: AgentIn) -> dict:
@@ -129,6 +130,7 @@ class RunIn(BaseModel):
     model: Optional[str] = Field(default=None, max_length=80)     # a new conversation's model (the owner's pick)
     effort: Optional[str] = Field(default=None, max_length=20)    # a new conversation's effort (the owner's pick)
     voice: Optional[str] = None          # a voice message sent directly (under <agent>/attachments/): transcribed after
+    call: Optional[str] = Field(default=None, pattern=r"^[a-z]{2,3}$")  # said on a voice call, in that language
 
 
 class WebhookIn(BaseModel):
@@ -308,13 +310,15 @@ def run_agent(project: str, topic: str, name: str, body: RunIn):
         raise HTTPException(e.status, detail={"error": e.code, "message": e.message}) from None
     if files and not text and not voice:
         text = "See the attached files."
+    if len(text) > agents.TASK_MAX:
+        raise HTTPException(413, detail={"error": "too_long", "message": agents.SKIP_TEXT["too_long"]})
     if not text and not voice and not body.reply_to:
         # Run now (no words): a run of its routine, like a schedule's - never a message of the conversation
         return agents.fire(path, trigger="manual", source=agents.RUN_NOW_SOURCE)
     try:                       # typed by the user: an instruction, not outside data (no markers)
         return agents.fire(path, trigger="manual", prompt=text, source="manual", reply_to=body.reply_to or None,
                            attachments=files or None, model=(body.model or "").strip() or None,
-                           effort=(body.effort or "").strip() or None, voice=voice)
+                           effort=(body.effort or "").strip() or None, voice=voice, call=body.call or None)
     except Exception as e:     # SessionError (bad model...)
         raise HTTPException(getattr(e, "status", 500),
                             detail={"error": getattr(e, "code", "run_failed"), "message": str(e)}) from None

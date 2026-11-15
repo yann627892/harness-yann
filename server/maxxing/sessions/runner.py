@@ -10,8 +10,8 @@ session's queue turn after turn, then exits:
   3. runs `claude -p --input-format stream-json --output-format stream-json --verbose [--model M] <flags>`
      with `--session-id <csid>` on a fresh thread, `--resume <csid>` afterwards. The prompt goes
      through stdin as a user message (no argv size limit, no option parsing of a leading "-"); stdin stays
-     open until the turn is really over (a `result` and no background task left), so a steer can reach
-     the same process;
+     open until the turn is really over (the `result` of the prompt, no background task left, and none that
+     just ended: Claude then starts a turn by itself - `_Proc.settle`), so a steer can reach the same process;
   4. copies every stream-json line into the log (with an `mx_at` timestamp added, tool outputs
      clipped by clip.py) and keeps
      cost / real model / context size / last assistant text in the meta;
@@ -168,18 +168,31 @@ class _Proc:
     oom_before: int | None = None
     stream: bool = True                                # stream-json input: messages can be added while it runs
     turn_done: bool = False                            # a `result` came since Claude last started working
+    owed: bool = False                                 # a prompt was written, the `result` of its turn has not come
+    own_at: float | None = None                        # (monotonic) such a prompt waits behind a turn Claude started
+                                                       # by itself, whose `result` came then
+    task_at: float = 0.0                               # (monotonic) a background task ended / such a turn ended:
+                                                       # Claude may start a turn by itself right after
     tasks: set[str] = field(default_factory=set)       # background tasks still running (Bash, agents, Monitor...)
     interrupt_at: float | None = None                  # monotonic time the interrupt request was sent
     inits: int = 0                                     # turns this process started (`init` lines)
 
     def track(self, ev: dict) -> None:
         t, st = ev.get("type"), ev.get("subtype")
+        had = len(self.tasks)
         if t == "result":
-            self.turn_done = True
+            if (ev.get("origin") or {}).get("kind") == "task-notification":
+                # the turn Claude started by itself when a background task ended (also one a previous process
+                # left, told at the resume) - not the answer to a prompt written meanwhile: that turn comes next
+                self.task_at = time.monotonic()
+                self.own_at = self.task_at if self.owed else None
+                self.turn_done = not self.owed
+            else:
+                self.turn_done, self.owed, self.own_at = True, False, None
         elif t != "system":
             return
         elif st == "init":                             # Claude starts a turn (also by itself, when a task ends)
-            self.turn_done = False
+            self.turn_done, self.own_at = False, None
             self.inits += 1
         elif st == "background_tasks_changed" and isinstance(ev.get("tasks"), list):
             self.tasks = {str(x.get("task_id")) for x in ev["tasks"] if isinstance(x, dict)}
@@ -188,6 +201,22 @@ class _Proc:
         elif st == "task_notification" or (st == "task_updated"
                                            and str((ev.get("patch") or {}).get("status")) in TASK_ENDED):
             self.tasks.discard(str(ev.get("task_id")))
+        if len(self.tasks) < had:
+            self.task_at = time.monotonic()
+
+    def sent(self) -> None:
+        """A prompt was written to Claude: the turn is over at ITS result."""
+        self.turn_done, self.owed, self.own_at = False, True, None
+
+    def settle(self) -> bool:
+        """True when Claude is not about to start a turn by itself (a background task that ends makes it start one
+        a moment later). Until then its input stays open: closed, that turn would still run - it may even start new
+        background tasks - but no message could be added to it, and a steer could only kill the whole process."""
+        now = time.monotonic()
+        if self.own_at is not None and now - self.own_at >= TASK_SETTLE_S:
+            # the prompt's own turn never started: it was read inside Claude's turn, which answered it
+            self.turn_done, self.owed, self.own_at = True, False, None
+        return now - self.task_at >= TASK_SETTLE_S
 
     def alive(self) -> bool:
         return self.p.poll() is None
@@ -438,6 +467,9 @@ class Runner:
         from maxxing import gateway                     # which side this session's turns run on
         self.provider = gateway.provider_of(meta)
         model = (meta.get("model") or agent.get("model") or cfg.get("default_model") or "").strip()
+        if agent.get("manager") and not plan:           # the owner's conversation with an agent: like a session of
+            # its topic, not the mode of its runs (the agent folder's path would give the agent's own mode back)
+            mode = effective_mode({**meta, "permission_mode": "", "path": agents.topic_of(meta.get("path") or "")}, cfg)
         approval: list[str] = []                        # the agent asks before risky tools: Allow / Deny in the UI
         ask = mode == "ask"                             # the topic's mode `ask`: the same, for any session
         if ask:
@@ -462,22 +494,26 @@ class Runner:
             "timeout": _approval_timeout(agent.get("approval_timeout_s") or cfg.get("approval_timeout_s"))}
         mcp_plan = mcp_auto.plan(self.sid, cfg, meta, cwd, item.get("text") or "")   # MCP servers this turn needs
         copy = _copy_note(meta, cwd)
+        web = browser_args(self.sid, str(meta.get("path") or ""), agent) if not plan else []
+        memory = spawn.upper_memory(cwd, cfg.get("workspace") or "")   # the levels above: never loaded otherwise
         allow = [] if agent or mode != "default" else workspace_allowed(meta.get("path") or "")
         effort = str(meta.get("effort") or "").strip()
         from maxxing import pcbridge                    # not at import: the runner starts with stdlib-only modules
 
         def argv(mcp: mcp_auto.Plan) -> list[str]:
-            hint = "\n\n".join(x for x in (mcp.hint, spawn.CRON_SILENT if item.get("silent_ok") else "", copy) if x)
+            hint = "\n\n".join(x for x in (mcp.hint, spawn.CRON_SILENT if item.get("silent_ok") else "", copy,
+                                           memory) if x)
             b = [spawn.claude_bin(), "-p", "--output-format", "stream-json", "--verbose"]
             b += spawn.permission_args(mode)[0] + spawn.settings_args(cfg, agent.get("settings"), allow)
-            b += spawn.agents_args(cfg, "\n\n".join(x for x in (agent.get("system_note"), hint) if x))
+            b += spawn.agents_args(cfg, "\n\n".join(x for x in (agent.get("system_note"), hint,
+                                                                  BROWSER_NOTE if web else "") if x))
             if not agent:                               # a topic's agents with `subagent` on: callable from its sessions
                 from maxxing import agent_format
                 b += agent_format.subagents_args(meta.get("path") or "")
             b += ["--model", model] if model else []
             b += ["--effort", effort] if effort in spawn.EFFORTS else []
             b += agent.get("args") or []
-            return b + pcbridge.mcp_config_args() + mcp.args + approval
+            return b + pcbridge.mcp_config_args() + mcp.args + approval + web
         base = argv(mcp_plan)
         env = spawn.claude_env(meta.get("env") or {}, mode, agent.get("keys") if agent else None, self.provider)
         env["MAXXING_SESSION"] = self.sid               # `maxxing mcp load` run by the turn finds its session
@@ -538,6 +574,8 @@ class Runner:
                 self._write_line(line)
         if approval:                                   # nobody can use an answer any more
             approval_mcp.expire(approvals_dir(), session=self.sid)
+        if web:                                        # the browser is no longer this turn's
+            browser_done(self.sid)
         if a.saw_init:
             store.update(self.sid, fresh=False)
         if a.stopped and self.interrupted and not a.timed_out:
@@ -690,7 +728,7 @@ class Runner:
             return
         with store.edit(self.sid) as m:
             q = m.get("queue") or []
-            if m.get("cron") or m.get("plan_ready") or any(x.get("kind") in ("compact", "handoff") for x in q):
+            if store.unattended(m) or m.get("plan_ready") or any(x.get("kind") in ("compact", "handoff") for x in q):
                 return
             try:
                 base = int(m.get("base_tokens") or 0)  # what a fresh thread costs anyway (CLAUDE.md, memory...)
@@ -751,6 +789,7 @@ class Runner:
         if self.stop_flag.is_set():                    # stop arrived while starting
             self._kill_child()
         pr.stdin.send(prompt)
+        pr.sent()
         if not pr.stream:                              # plain text prompt: Claude reads to EOF
             pr.stdin.close()
         return self._read(pr, a, timeout_s, hold)
@@ -758,7 +797,8 @@ class Runner:
     def _attempt_in(self, pr: _Proc, prompt: str, timeout_s: object, csid: str, prev_total: float) -> Attempt:
         """The steered message, written to the claude process the interrupted turn ran in."""
         a = Attempt(csid=csid, prev_total=prev_total, t0=time.time(), saw_init=True)
-        pr.turn_done, pr.interrupt_at = False, None
+        pr.interrupt_at = None
+        pr.sent()
         if not pr.stdin.send(prompt):                  # closed meanwhile: the reading ends with the process
             a.stderr = "Claude's input was closed before the message could be sent."
         return self._read(pr, a, timeout_s, hold=False)
@@ -822,12 +862,14 @@ class Runner:
                     return a                       # (stderr: reported once, when the process ends)
                 if self.inject_pending and (a.saw_init or not hold):   # (a resume that may still fail: wait)
                     self._inject_step(pr)
-                if pr.stream and pr.turn_done and not pr.tasks and not pr.stdin.closed:
+                settled = pr.settle()
+                if pr.stream and pr.turn_done and not pr.tasks and settled and not pr.stdin.closed:
                     pr.stdin.close()                   # the turn is over: Claude exits (as with a text prompt)
-                elif pr.stream and pr.turn_done and pr.tasks and not pr.stdin.closed and pr.alive() \
+                elif pr.stream and pr.turn_done and not pr.stdin.closed and pr.alive() \
                         and not self.stop_flag.is_set() and time.monotonic() - looked >= 1.0:
-                    # Claude answered, only background tasks run (a dev server may never end): a message sent
-                    # meanwhile goes to the same process at once instead of waiting in the queue for the tasks.
+                    # Claude answered, only background tasks run (a dev server may never end) or the last one
+                    # just ended: a message sent meanwhile goes to the same process at once instead of waiting
+                    # in the queue for the tasks.
                     looked = time.monotonic()
                     if self._queued():
                         for h in a.held:
@@ -1012,9 +1054,9 @@ class Runner:
             auth_err = _auth_error(a, ok)
             if auth_err:
                 err = auth_err
-                claude_auth.record(False, auth_err, "turn", self.provider)
+                claude_auth.record(False, auth_err, "turn", None, self.provider)
             elif ok and a.result is not None:
-                claude_auth.record(True, None, "turn", self.provider)
+                claude_auth.record(True, None, "turn", res.get("credential_expires_at"), self.provider)
         cost = a.turn_cost if a.turn_cost is not None else res.get("total_cost_usd")
         with store.edit(self.sid) as m:
             if a.thread_total is not None and a.csid:
@@ -1142,6 +1184,8 @@ def build_prompt(item: dict) -> str:
         text = (text + "\n\n" if text else "") + "Attached files:\n" + "\n".join(f"- {p}" for p in files)
     if item.get("hud"):
         text = HUD_PREFACE + text
+    if item.get("call"):
+        text = CALL_PREFACE.format(lang=item["call"]) + text
     if item.get("plan_approved"):
         text = PLAN_APPROVED_PREFACE + text
     if item.get("steer"):
@@ -1320,6 +1364,54 @@ def workspace_allowed(path: str) -> list[str]:
         return []
 
 
+BROWSER_NOTE = ("The Harness Browser is available (mcp__maxxing-browser__* tools) for pages that need JavaScript, a "
+                "sign-in or clicks. Read pages with WebFetch, curl or an API first: they are faster and cheaper. It "
+                "is a browser of your own (this session's, or this agent's): you see only its tabs, with the "
+                "sign-ins of its profile. The user can watch it and may open tabs in it too: leave those as they "
+                "are; they see it with Watch above the message box (Regarder in French). When a page needs the user (a captcha, a sign-in, a "
+                "code), call ask_human, never ask for a password in the chat. If the browser says "
+                "its exit is offline, stop using it and say so.")
+
+
+def browser_args(sid: str, path: str, agent: dict) -> list[str]:
+    """The Harness Browser for this turn (maxxing/browser): `--mcp-config <file>` with its tools + ask_human, and
+    its tools pre-allowed (they are what the owner turned on) unless the turn asks before everything (outside text).
+    [] when the browser is off for this folder. Never raises. Mutates agent["args"] to merge --allowedTools."""
+    try:
+        from maxxing import browser
+        on = browser.active_for(path)
+        if not on:
+            return []
+        from maxxing.browser import turns
+        # a sandboxed run: only its domains (read once here); the owner's conversation and sessions: any public site
+        sites = browser.agent_sites(on[0]) if agent.get("sandbox") else None
+        args = turns.mcp_args(sid, on[0], on[1]["id"], on[2], sites)
+    except Exception:  # noqa: BLE001 - a turn must never fail because of the browser
+        return []
+    if agent.get("approvals_forced"):
+        return args
+    tool = f"mcp__{browser.MCP_NAME}"
+    extra = list(agent.get("args") or [])
+    if "--allowedTools" in extra:
+        i = extra.index("--allowedTools") + 1
+        extra[i] = f"{extra[i]},{tool}"
+        agent["args"] = extra
+        return args
+    return args + ["--allowedTools", tool]
+
+
+def browser_done(sid: str) -> None:
+    try:
+        from maxxing import browser_mcp
+        from maxxing.browser import turns
+        turns.end_turn(sid)
+        from maxxing import browser
+        if browser.asks_dir().is_dir():
+            browser_mcp.expire(browser.asks_dir(), session=sid)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def effective_mode(meta: dict, cfg: dict) -> str:
     """Permission mode of a turn: the session's own (set by its cron), else its topic's, else the global setting."""
     from .. import workspace
@@ -1367,6 +1459,11 @@ PLAN_APPROVED_PREFACE = ("[The user validated your plan: plan mode is off, you c
                          "did.]\n\n")
 
 
+CALL_PREFACE = ("[Said by the user on a voice call (speech-to-text, language: {lang}): your answer is read out to "
+                "them. Do the work as usual, then answer in that language, short and easy to say: the result first, "
+                "plain sentences, no tables, no code, no lists, no paths or URLs unless asked, one question at a "
+                "time. The transcript may have small errors: read it for its meaning. To change the call itself (voice, speed, "
+                "on this server or cloud, the pause before it answers): Settings -> Voice -> Voice mode.]\n\n")
 HUD_PREFACE = ("[Sent from the HUD: a small floating window over the user's screen that shows your final answer "
                "and the images whose absolute paths you write in it. Lead with the result and keep it short. "
                "The attached images included in this message are already in front of you: do not Read those. "
@@ -1400,7 +1497,7 @@ def _idle_compact(m: dict, item: dict, cfg: dict, now: float, window: object = N
     if (item.get("kind") or "user") != "user" or item.get("source") in ("system", "cron") or item.get("steer") \
             or item.get("plan_approved"):
         return None
-    if m.get("fresh", True) or m.get("cron") or m.get("plan_ready"):
+    if m.get("fresh", True) or store.unattended(m) or m.get("plan_ready"):
         return None
     away = now - last
     hours = f"{away / 3600:.0f} h" if away >= 5400 else f"{away / 60:.0f} min"
@@ -1416,6 +1513,7 @@ STDOUT_GRACE_S = float(os.environ.get("MAXXING_STDOUT_GRACE_S") or 10)
 # MAXXING_STREAM_INPUT=0 = the old way (text prompt, stdin closed at once; a steer kills the turn).
 STREAM_INPUT = os.environ.get("MAXXING_STREAM_INPUT", "1") != "0"
 INTERRUPT_WAIT_S = float(os.environ.get("MAXXING_INTERRUPT_WAIT_S") or 15)
+TASK_SETTLE_S = float(os.environ.get("MAXXING_TASK_SETTLE_S") or 8)   # see _Proc.settle
 TASK_ENDED = ("completed", "failed", "killed", "stopped", "cancelled", "error")
 
 

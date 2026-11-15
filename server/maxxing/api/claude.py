@@ -78,7 +78,7 @@ def run_test(model: str | None = None, source: str = "test", timeout_s: int = TE
     b = _resolved_bin()
     if not b:
         out["error"] = "Claude Code is not installed"
-        return _remember(out, source, provider)
+        return _remember(out, source, None, provider)
     cwd = config.state_dir("claude-test")
     try:
         r = subprocess.run([b, "-p", "--output-format", "json", "--model", model], input=TEST_PROMPT,
@@ -86,10 +86,10 @@ def run_test(model: str | None = None, source: str = "test", timeout_s: int = TE
                            env=spawn.claude_env(None, "default", provider=provider))
     except subprocess.TimeoutExpired:
         out.update(ms=int((time.time() - t0) * 1000), error=f"No answer within {timeout_s} s")
-        return _remember(out, source, provider)
+        return _remember(out, source, None, provider)
     except OSError as e:
         out.update(error=str(e))
-        return _remember(out, source, provider)
+        return _remember(out, source, None, provider)
     out["ms"] = int((time.time() - t0) * 1000)
     try:
         data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
@@ -103,17 +103,17 @@ def run_test(model: str | None = None, source: str = "test", timeout_s: int = TE
             out["model"] = next(iter(mu))
     else:
         out["error"] = (text or r.stderr or r.stdout or f"exit code {r.returncode}").strip()[-400:]
-    return _remember(out, source, provider)
+    return _remember(out, source, data.get("credential_expires_at"), provider)
 
 
-def _remember(out: dict, source: str, provider: str | None = None) -> dict:
+def _remember(out: dict, source: str, ends: object = None, provider: str | None = None) -> dict:
     """Record the outcome. A background check only flips the state on a real sign-in error
     (a timeout or a network glitch is not "signed out"); an explicit test always does."""
     err = out.get("error")
     if out["ok"]:
-        claude_auth.record(True, None, source, provider)
+        claude_auth.record(True, None, source, ends, provider)
     elif source == "test" or claude_auth.detect(err):
-        claude_auth.record(False, claude_auth.detect(err) or err, source, provider)
+        claude_auth.record(False, claude_auth.detect(err) or err, source, ends, provider)
     return out
 
 

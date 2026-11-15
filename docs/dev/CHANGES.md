@@ -5,6 +5,345 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
+## 2.0.0-alpha.156 - 2026-11-15
+
+- Voice mode hardening (Radar check): `tts.synth` waits at most `SYNTH_TIMEOUT_S` (30 s, `select`) for the Piper
+  worker, then stops it (`504 tts_timeout`) instead of holding `tts._lock` and the call; `voicecall.settings()`
+  resets a non-string value of a hand-edited `voice_call`. Browser: a hang up while a call starts closes what it
+  opened (mic, peer connection; `VoiceCall` `attempt` counter, `closed` checks after each await); OpenAI's open
+  waits at most 15 s and fails on ICE failure (no reconnection stuck), its level meter's AudioContext is closed;
+  Gemini's setup waits at most 15 s, a reconnection resets `muted` / captions, the mic buffer is capped while
+  disconnected; a call whose connection cannot be renewed is hung up (`VoiceEvents.ended`).
+- Voice mode on an agent's page: `VoiceCall` gets `callKey` (`agent:<path>`, the call's own key for `/call/start`;
+  `sid` = `chat_session`, '' before the first message, followed when a new conversation starts) and `stream` (the
+  call follows that session's log). `RunIn.call` -> `agents.fire(call=)` -> `send_message` / `create_session(call=)`
+  (and kept by `owner_wait`).
+- Wording only: `sessions.queue.inject` "Add to task", `sessions.msg.injected` "added to the running task" +
+  `sessions.msg.injectedTip` (Items.tsx tooltip); no API change.
+- Voice mode (`voicecall.py`, `tts.py`, `tts_worker.py`, `api/voice.py` `/call*` `/tts*` `/said`, web
+  `features/voice/{VoiceCall,VoiceCallSettings}.tsx` + `features/voice/call/*`, i18n group `vmode`). Config key
+  `voice_call` (see API.md#voice-mode). Design after two tries: (1) a small model that answered and rewrote requests
+  (`@ask: <request>`) answered from its own knowledge, rephrased in English and switched language; (2) every
+  sentence sent to the session with canned acknowledgements was slow and robotic ("I'm taking it into account" on
+  each fragment, sentences cut after 0.9 s of silence). Now: the voice converses (`talker_model`, default sonnet;
+  `claude -p --input-format stream-json --include-partial-messages --tools ""` per call, cwd `<state>/claude-titles`)
+  and decides with a bare `@ask` / `@stop` line (`reply_parts`: an "@" line is never said, an echo of the bracketed
+  lines is dropped); `@ask` hands over `_handover(c)` = the user's own sentences since the last hand-over (earlier
+  ones only when they answered a question of the voice, small talk left out, `MAX_PENDING` 4). Each message to the
+  voice: `[Work: <state line>]` + `[Language: xx]` + the sentence, or `[Work finished|failed|in progress]`.
+  Without a model: `classify` (Whisper hallucinations, noise, stop words after "non / ok / attends", language
+  requests = a speak verb right before the language name), `is_echo` (60 % of the words of the sentence the voice was
+  saying), `sort` (one language per call; the first sentence is transcribed in "auto" and sets it, `settled`). If the
+  voice fails, a sentence is handed over anyway with a phrase of `PHRASES`. Messages carry `call: <lang>`
+  (`MessageIn.call`, queue item `call`, kept by `_merged`, `runner.CALL_PREFACE`); said while the session works ->
+  `/inject`. Browser (`call/local.ts`), one barge-in behaviour (no `turn_mode`): a sound over the voice ducks it
+  (`DUCK_VOLUME` 0.3), 0.8 s of speech well over the echo (`CONFIRM_MS`, `CONFIRM_FRAMES`; `DUCK_MAX_MS` 3 s) pauses
+  it, quiet again within `DUCK_QUIET_MS` = it was noise; `empty` (noise, `is_echo`, `_BACKCHANNEL` words said over
+  the voice: "ouais", "hm", "ok"...) says the cut sentence again from its start; tap = `interrupt()`. End of a
+  sentence after `silence_ms` (default 1800). Nothing new is played while the user speaks or while their transcript
+  is pending (`hearing`); a reply not started yet is aborted when the user goes on (the server keeps what was not
+  handed over, and a cut reply makes the next message start with "[They went on before your reply ended…]"); ends of turns wait for the voice to be
+  free, the end of a stopped turn is not told (`muteNext`). Progress (`VoiceCall.tsx`): every 3 s, when the session
+  works, the call did nothing for 15 s (then 25 s) and the log moved: `/turn` `outcome=progress` (`note` = last
+  assistant text, `tool`). Cloud (`call/cloud.ts` `Relay`): the provider's transcription is kept (pending) and sorted
+  by `/call/sort` (stop, noise); `ask_session()` (no argument) sends the pending words.
+  Reconnection: `/call/start` `resume` = a new token for the same call; Gemini's setup has `sessionResumption` (the
+  browser keeps the last `sessionResumptionUpdate.newHandle` and reconnects on `goAway` or a close, with the handle,
+  without it after a refusal, then with `Relay.recap()` = the last 16 lines); OpenAI reconnects on a failed peer
+  connection (or 4 s disconnected) or a closed data channel and is given the recap. A tap on a Gemini call mutes the
+  reply under way to its `turnComplete` (Live has no cancel); OpenAI: `response.cancel` + `output_audio_buffer.clear`. Piper (piper-tts, GPL) lives
+  in its own venv under `<state>/voice/tts`, run apart; `tts_worker.py` is executed by that venv's Python (`-I`),
+  never imported. Cloud tokens only (OpenAI client_secrets, Gemini auth_tokens with the full
+  `bidiGenerateContentSetup`, so a client cannot change the instructions or tools); the browser talks to the provider
+  directly (WebRTC / WebSocket). Mic capture by ScriptProcessor (an AudioWorklet from a Blob is refused by the app's
+  script-src). Not done: approvals by voice, Telegram.
+- Voice mode, local: `tts.VOICES` = id -> {model, path, speaker?, lang, name} (several voices in one Piper model,
+  e.g. upmc Pierre/Jessica; worker request gains `speaker`; old id `fr_FR-upmc-medium` aliased); `pick_voice` only
+  uses the chosen voice for its language. `voice_call.local_speed` (0.8-1.5, default 1.15). The first sentence
+  of a call is transcribed in any language and sets the call's language (forced into a wrong one, Whisper
+  translates: the interface language is only a guess); then transcribed in the call's language; when the mean `avg_logprob` is below `voice.WRONG_LANGUAGE_LOGPROB` (-0.4; right language about
+  -0.2, wrong -0.45 to -0.85 with `small`; `voice.text_language` corrects a French run that copied English), the
+  other `call_languages()` (voice setting, browser language sent to `/call/start`, server language, en) are tried and
+  the best kept (`transcribe_file(among=...)`; `detect_language` cost +1.3 s on every sentence). Barge-in ("call"
+  mode): while speaking, the threshold follows the echo heard by the mic (`max(0.07, floor*2.5, echo*1.6)`, 4 frames)
+  instead of a fixed 0.32.
+- Web: `features/composer/MessageBox.tsx` = the shared shell of every message box (`MessageBox`: slots `above`, `menu`,
+  `top`, `backdrop`, `toolbar`, `actions`, `voice`, `send`, `reason`, `closed`, `boxProps`, `compact`,
+  `widthClassName`; `TuckedCard` / `TuckedHead` = the cards tucked under the top of the box, rise and sink, last
+  content kept 220 ms; `CloseButton`, `StopButton`). `AttachmentChip` + `Att` moved to `features/composer/AttachmentChip.tsx`
+  (re-exported by `pages/sessions/Composer`; `progress < 0` = no progress known, "…"), `insertAtCaret` to
+  `features/composer/text.ts` (re-exported by `features/agents/attach`). Users: `pages/sessions/Composer` (no visible
+  change), the agent box (`AgentPage` `Composer`: toolbar `ModelPicker` + `CompactGauge`, actions New conversation +
+  Stop of the chat session via `useStopSession`, reply = `TuckedCard`; the separate `agent-chat-bar` is gone), the group
+  box (`GroupPage`: recipients in `top`, the `@` list in `menu`), the Team box (`team/Chat` `Composer`: poll in
+  `toolbar`, reply / edit = `TuckedCard`, `VoiceButton` dictation, Enter = newline on `pointer: coarse` like the other
+  boxes). `attach.tsx`: `AttachList` / `AttachButton` removed (the shell draws them).
+- Web: `CompactGauge` (`pages/sessions/Widgets.tsx`, replaces `ContextGauge`) in the toolbar of the session and agent
+  boxes, removed from the session header. Threshold `compactAt(auto_compact_tokens, window)` mirrors
+  `runner._auto_compact` (setting raised to 100k, `resume.fit`: min(limit, max(window - 70k, window / 2))); off = the
+  model's window. Wide / narrow from the toolbar's `@container` (`@md`). Tooltip texts `cgauge.*` in the `composer` i18n group.
+
+## 2.0.0-alpha.155 - 2026-11-15
+
+- Web: `lib/updateReload.ts` (`isChunkError`, `reloadForUpdate()`: reload at most once a minute, guard
+  `sessionStorage['mx-chunk-reload']`) shared by `vite:preloadError` (main.tsx), `ErrorBoundary.componentDidCatch` and
+  `RouteError` (a lazy route whose chunk is gone after an update: React Router caught it before, no reload). The
+  chunk fallback is neutral (`Sparkles`, tone default, role status), texts `error.updated` / `updatedDesc` / `updating`.
+
+## 2.0.0-alpha.154 - 2026-11-15
+
+- `agent_guard._probe()` runs its bwrap + nested `unshare --user` in a transient unit (`systemd-run --wait
+  --collect`, `spawn.hardening_properties()`), like the turns, unless `MAXXING_SPAWN=direct` or no systemd-run.
+  Run in the service process, the install's drop-in `10-hardening.conf` (`ProtectKernelTunables=yes`) made bwrap
+  fail on `--proc /proc` ("Can't mount proc"): `available()` said `missing: ["user namespaces"]` on every
+  install although turn units, without that hardening, sandboxed fine. Test
+  `test_the_sandbox_is_tried_in_a_unit_like_the_turns`.
+- `claude_auth.record(..., ends)`: the runner (`res["credential_expires_at"]`) and the test / background check
+  (`api/claude.run_test`, `--output-format json`) pass Claude Code's `credential_expires_at` (2.1.318+, ISO date,
+  present only with a stored claude.ai sign-in; seen on 2.1.325: `"2026-11-18T21:05:20.730Z"`). Kept as `ends`
+  (epoch) in claude-auth.json, only for the `credentials` method; a call that says nothing clears it (older CLI).
+  `status()` gains `ends_at`; `ending(status)` gives the local date within `ENDS_WARN_S` (10 days) -> health issue
+  `claude_login_ends` (warn, server text, no web change) and doctor `claude_auth` WARN. Follows `_relevant`: after
+  the credentials file is rewritten (a token refresh outside a turn, a new login) the date is unknown until the
+  next real call.
+- `agent_cost.PRICES`: rows `fable-5-2` / `mythos-5-2` (8, 40, 0.2, 10), `fable-5-1` / `mythos-5-1` (10, 50,
+  0.25, 12.5), `sonnet-5-5` (cache read 0.1), before the family rows (first match wins). Haiku 5.5 over 100k
+  tokens of prompt (5x) is still priced at the low rate.
+- `spawn.TUNING_ENV` + `CLAUDE_CODE_SUBAGENT_EFFORT`; `claude_models.FALLBACK` -> `claude-fable-5-2`.
+
+## 2.0.0-alpha.153 - 2026-11-15
+
+- Owner's conversation with an agent (`manager_turn`): `runner` computed its mode with `effective_mode({**meta,
+  "permission_mode": ""})`, but `meta.path` is the agent folder, and `workspace.topic_permission_mode` of an agent
+  path returns the agent's own mode (`agent.json`). An agent in `acceptEdits` / `default` (all sandboxed agents:
+  `agent_guard.mode`) ran its conversation in that mode, without the approval tool (`approvals` False): Bash and
+  every MCP tool not in `allowed_tools` were refused ("haven't granted it yet" / "requires approval"). The
+  conversation now passes `path = agents.topic_of(path)`: the topic's mode, else the global one (bypass by default).
+  Runs unchanged. Test: `test_the_conversation_takes_the_topics_mode_not_the_agents`.
+- `agents.MANAGER_FREE`: the manager note of an agent without sandbox now says that what the owner asks needs no
+  approval and that its runs keep their settings (`MANAGER_BOX` already said it for a sandboxed one).
+- Runner, Claude's input closed too early (messages waiting, inject refused, steer killing the process). Two
+  sequences of the real CLI: (A) a `--resume` after a kill first prints the notification of a background task the
+  previous process left and runs an empty turn for it (`init`, `result` with `origin.kind` "task-notification",
+  `num_turns` 0), THEN the prompt's turn: that first `result` set `turn_done` with no task left -> stdin closed
+  before the prompt's turn started; (B) the last background task ends while only tasks ran (`turn_done`): stdin
+  closed at `background_tasks_changed: []`, a moment before the `init` of the turn Claude starts by itself, which
+  may start new tasks (the process then lives on with a closed input). Now `_Proc.sent()` marks a prompt as owed:
+  a "task-notification" result does not end the turn while one is (`own_at`: if no `init` follows within
+  `TASK_SETTLE_S`, 8 s, `MAXXING_TASK_SETTLE_S`, the prompt was read inside that turn: over); `_Proc.settle()`
+  keeps stdin open `TASK_SETTLE_S` after a tracked task ended or such a result; a queued message is handed to the
+  process whenever `turn_done` and stdin is open (no longer only while tasks run). A turn without background
+  work ends as before, at once. Fake claude: `STALETASK`, `FAKE_CLAUDE_BG_THEN`, `FAKE_CLAUDE_BG_S_<name>`, the
+  own turn's result carries `origin`; tests set `MAXXING_TASK_SETTLE_S=1`. Tests `test_steer_background.py`,
+  `test_inject.py`.
+
+## 2.0.0-alpha.152 - 2026-11-15
+
+- Harness Browser: `rules.json` blocks the `DOMStorage` and `Storage` domains (a turn could read or write any
+  site's local storage of the shared profile by origin, without opening it; `IndexedDB` / `CacheStorage` were already
+  blocked).
+- Harness Browser: a profile naming a gone connection no longer makes every `browser._save` fail (`clean_profile`
+  no longer checks `exit`; `set_profile(..., new_exit=True)` checks a new value; `ensure_project_profile` copies
+  `main`'s as it is, `new_exit=False`). Before, settings, profiles and a project's first profile all failed with 400
+  and turns started without the browser.
+- Compaction of agents: `store.unattended(m)` = `cron` flag and not a conversation (`env.MAXXING_AGENT_CHAT == "1"` or
+  `env.MAXXING_AGENT_GROUP`); `runner._auto_compact`, `runner._idle_compact` and `resume.candidate` use it instead of
+  `m["cron"]`. The owner's conversation and a member's group session are created with `cron=True` (no Telegram
+  mirror, `agents.tidy`), a flag that only dropped at their 2nd message (`service._enqueue` `reset_cron`): their 1st
+  turn was never auto-compacted. Runs keep the flag and are never compacted; the archive rule and
+  `telegram.gateway.is_human` still read `cron`.
+- `agents.on_turn_end`: a turn whose `last_turn.kind` is in `HARNESS_TURNS` (`compact`, `handoff`, `seed`) is costed
+  (`charge_unbilled`) and releases its budget hold, then only drains the owner's waiting messages: no `result` in the
+  thread, no `agent_rooms.on_turn_end`, no feed alert, no Telegram (before: the summary and the seed turn's reply were
+  posted as two results; in a group, a member's next message queued behind its summary could take the summary as its
+  answer). Same filter as `telegram.gateway`. Tests: `tests/test_agent_compact.py`.
+- Terminal (`maxxing/terminal.py`): `_signal()` used by `resize` and `_kill`: `os.kill(pid)` while
+  `getpgid(pid) == getpgrp()` (`setsid -c` has not run yet: the child is still in the server's group), `killpg`
+  after. Before, a terminal closed in its first milliseconds sent SIGHUP + SIGTERM to the server's whole group (seen
+  as a full test suite ending silently in `test_terminal.py`).
+- Agents benchmark of 2026-11-14 (tests `test_agents_bench_fixes.py`):
+  - `agent_guard.available()` runs `_probe()` (bwrap + a nested `unshare --user`) once the binaries are there:
+    `missing` gains `apparmor` (Ubuntu's `bwrap-userns-restrict` loaded: its `unpriv_bwrap` child profile denies the
+    capabilities Claude Code's `apply-seccomp` needs) or `user namespaces`. `setup()` (`sandbox-setup` only) calls
+    `drop_distro_profile()`: link in `/etc/apparmor.d/disable/` + `apparmor_parser -R`. `_bwrap_profile_loaded()`
+    matches by name (`:glycin:bwrap` no longer counts).
+  - `spawn.upper_memory(cwd, workspace)`: the `memory.md` of the levels above the turn's folder whose `CLAUDE.md`
+    imports it, appended to the turn's single `--append-system-prompt` (runner `hint`). Skipped outside the
+    workspace, for a file without facts (`_has_facts`: headings, comments, template lines) and when
+    `projects[cwd].hasClaudeMdExternalIncludesApproved` is set in `.claude.json` (Claude Code loads them itself).
+    We do not set that flag ourselves: Claude Code rewrites the file, and it would also follow any other import.
+  - `agent_guard.settings()`: `topic_read()` (`Read(//<topic>/**)`) allowed for sandboxed agents and for the new
+    branch "no sandbox, acceptEdits / default" (deny: the topic's `.env`, `topic_edit_denied()` when `writable`;
+    allow: `FREE_CLI` = `Bash(maxxing agents:*)`, `Bash(maxxing feed:*)` unless approvals). `add_dirs()` no longer
+    needs the sandbox. `check_cli`: `OWNER_ONLY` (`sessions new|send`, `cron run|restore`) refused in an agent turn
+    that is not the manager.
+  - `agents`: snapshots keep the text of `agent.json` (`agent`, <= 100 kB) and fingerprint `WATCHED_FILES`
+    (+ `.mcp.json`, `.claude/settings*.json`); `on_turn_end` -> `_pop_snapshot` / `_changed_since` / `_put_back`
+    (not for the manager's turns); the note has `restored: ["agent.json"]`. `owner_at` is now stamped by `_save()`
+    (every server write of `agent.json`: webhook, mailbox removal... no longer taken for the run's edit).
+  - The waiting queue (`owner_wait` in the agent state) also takes the busy starts of `manual` / `telegram` /
+    `agent:*` triggers that are not the owner's message: items with `auto: true`, `text` (cut at `EVENT_MAX`) and
+    `depth`; their thread message has `waiting` without `owner` and does not count in `_runs_last_hour`. `fire`
+    answers `{started: true, waiting: true}` (CLI: `waiting <path>…`, exit 0). Crons and `wait=True` callers are
+    unchanged.
+  - `TASK_MAX` = 100 000 characters of `prompt`: reason `too_long` (skip in the thread), `POST …/run` -> 413.
+  - `workspace._delete`: `agents.hook_ids()` before the move, `agents.drop_hooks()` after (a restored agent's
+    webhook trigger is "dead": `agents webhook` gives it a new URL).
+  - `agent_format.parse_md`: `bypassPermissions` -> `acceptEdits`, listed in `ignored`. Templates `uptime`,
+    `orders`, `sales`, `mail-sort`: `model: haiku` (`agent_templates.fields`).
+  - Left as they are, on purpose: a limit under its minimum is still cut (tested behaviour), any model name is
+    accepted (gateways), unknown PATCH fields are ignored, the generic webhook takes plain text, group turns skip a
+    busy member.
+- Git page: `GitNav` (second sidebar) lists the repositories under each source again (`RepoRow`, a `<Link>` so the
+  peeked list and the touch drawer close on a pick); a source head is a plain button that folds its section
+  (`mx-git-folded` in localStorage), not a page: `SourceCards` / `LocalRow` / `GithubRow` and `?source=` / `?account=`
+  are gone, `/git` without `?repo=` is `GitHome` (one line, plus the connect card or the refused keys when GitHub
+  needs them; a button to the list on touch); the refresh button is in `PageList`'s `actions`. No new route; text
+  keys `git.pick`, `git.list` added, 7 keys of the cards removed.
+  `commitUrl(sha, github, pushed)` (GitGraph.tsx) is the one rule for "this commit is on GitHub" (`pushedShas` for a
+  clone): the row's short id, the context menu and `CommitDetail`'s new `url` prop use it.
+- Git: `GitSessionDialog` (features/git/NewSession.tsx) starts a session from the Git page or a ` ```git ` block:
+  `POST /api/sessions` without a message, then `prefillDraft` (as "Work on this PR" does), so no route is added and
+  Code mode is not needed. `GitGraph` takes `clones` (paths on the server) and has the item in its branch / commit
+  menu (commits now have the menu without GitHub too); `RepoRow` gets a menu with `useContextMenu({ links: true })`.
+  The topic proposed: the one holding a clone, else `mx-git-topic` (localStorage), else the inbox. Text keys
+  `git.session.*` (group `git`).
+- `gitview.overview()` leaves out the repositories under a `THROWAWAY` folder (`tmp`, `temp`, `scratch`);
+  `local_repos()` still finds them (pull request sessions, `codediff.prune`) and `resolve()` opens them by their path.
+  `_marker()` skips a `.git` file that is not a `gitdir:` pointer. `github_graph` pages the default branch
+  (`page`, 100 a page) up to `limit` and says `truncated` when the last page came back full.
+- Agents, owner's conversation (`agents.manager_turn`): `run_settings(manager=True)` returns `sandbox: False`,
+  `approvals: False` (no `--permission-prompt-tool`), settings = `agent_guard.chat_settings` for a sandboxed agent
+  (no `sandbox` block; `permissions.deny` = Read/Edit of the vault and private paths + Edit of `locked_paths` except
+  its CLAUDE.md; its rules hook) else `settings()`; the runner gives it the topic's mode (`effective_mode` without the
+  session's `permission_mode`, i.e. not the agent's). `agent_guard.sandboxed_turn()` / `sandboxed_session()` are None
+  for it (the `maxxing` CLI limits of a sandboxed turn do not apply; `_manages` still limits `agents` to itself).
+  `settings()` lost `manager=` and `MANAGER_SAFE`; `MANAGER_BOX` now says the runs are sandboxed. Runs unchanged.
+- CPU priorities (`maxxing/cpu.py`, stdlib only; config `cpu_priorities`, default true; INTERNALS "CPU priorities"):
+  `maxxing-live.slice` (CPUWeight/IOWeight 1000) / `maxxing-turns.slice` (100) / `maxxing-jobs.slice` (30, its text =
+  `jobs_slice_text` = MemoryMax + weights). `cmd_core.ensure_cpu_slices(jobs)` (init, after `ensure_jobs_slice`; PUT
+  /api/settings when `cpu_priorities` changes) writes the two new slices + the server drop-in
+  `claude-maxxing.service.d/30-cpu-priority.conf` (`Slice=maxxing-live.slice`, taken at the next restart, never
+  restarted) atomically when changed, daemon-reload, then `set-property --runtime` on the slices whose cgroup exists;
+  off = weights 100, files kept. Uninstall removes them. Paths: `cpu.SLICE_DIR` (conftest points it to tmp_path for
+  every test), `cpu.CGROUP_ROOT`, `cpu.PRESSURE_PATH`.
+- Turn units: `spawn._start_unit` adds `cpu.turn_slice_args()` (`--slice maxxing-turns.slice` when on and the slice
+  file exists). Claude jobs' turns stay there (not in the jobs slice: its MemoryMax budget is unchanged).
+- `cpu.set_level(unit, "live"|"normal"|"background") -> bool`: `systemctl set-property --runtime <unit> CPUWeight=
+  IOWeight=`, no-op when off / not root / no systemd (for the watched browser).
+- `maxxing heavy CMD…` (`cmd_heavy.py`, registered in `commands.py`): `os.execvp` of `cpu.heavy_argv()` =
+  `systemd-run --scope --quiet --collect --slice=maxxing-jobs.slice --unit=maxxing-heavy-[session-<sid8>-|cron-<id>-]<pid>.scope`
+  (MAXXING_SESSION / MAXXING_CRON_ID), else `nice -n 10 ionice -c3`; 127 when the command is not found.
+  `maxxing video render [DIR] [--id] [--out]` (`cmd_video.render`) = `npx remotion render <entry> <id> <out>` through it.
+- GET `/api/system/cpu` = `cpu.snapshot()` (cached 3 s): PSI `some` + top 6 units by cgroup `cpu.stat` `usage_usec`
+  delta (previous sample kept in memory, 0.5 s sample when none or older than 30 s; Docker containers merged), named
+  by `cpu.describe()` (session title / agent name from the sessions store, job name from crons, heavy scopes,
+  `maxxing-br-*`/`maxxing-pc-*` = browser) with their level. Health payload: `cpu_pressure`, `cpu_waiting`
+  (avg10 >= 20); issue `cpu_pressure` when `cpu.note_pressure` saw avg60 >= 40 for 10 min (reset after a 5 min gap
+  without reading), naming the top unit; it goes to the feed like the others (`health_feed`).
+- Doctor `cpu_priorities`: slice files / drop-in out of date -> WARN `maxxing init`; on but the server not yet in its
+  slice -> INFO (restart).
+- Web: CPU meter of `StatusBlock` = popover `CpuWho` / `CpuPanel` (`useCpu`, every 3 s while open; i18n group
+  `cpuwho`), amber + "waiting" when `cpu_waiting`; RAM / disk stay links. `mood.cpuWaiting` before `mood.cpuHot`,
+  `mood.issue.cpuPressure`; Settings -> System `CpuCard` (switch); showcase `cpu`.
+- Template `CLAUDE.md`: rows `maxxing video … render` and `maxxing heavy` (upgrade note
+  `docs/upgrade/2.0.0a150.md`: renumber it if the version is taken). Skill `video-motion-design` and
+  the Remotion README render with `maxxing video render`.
+- Tests: `test_cpu_priorities.py` (slice texts, init on/off + runtime weights, doctor, turn slice, `set_level`, heavy
+  command line + exec, video render, pressure parsing + alert, unit names, cgroup top, endpoint + setting);
+  `test_settings.py::test_get_defaults` has `cpu_priorities`.
+
+- Harness Browser (`maxxing/browser/`, never released before: it lived on a research branch; API.md "Harness
+  Browser", INTERNALS "maxxing.browser", user doc 33). Config `browser_feature` (default false) + `config.json ->
+  browser` = `{ask, wait_min, downloads, idle_min, tab_sleep_min, max_tabs, max_active_profiles (3, 1..8),
+  exit_wait_s (180, 0..900), search (google|duckduckgo|bing), profiles: [{id, name, exit: "direct"|<exit id>, on_exit_down:
+  wait|vps, project: "" | "projects/<name>"}] (<= 40, `main` always first, not deletable; one per project, see below), exits: [{id, name, type: proxy {url, user} | tailscale
+  {node, login_server} | wireguard {}}] (<= 10)}`; `browser.clean_settings(raw, strict)`. Exit secrets in the vault
+  `BROWSER_EXIT_<ID>` (`expose: false`). Owners: `browser: {enabled?, profile?}` in a project's / topic's
+  `.maxxing.json` (`workspace.folder_browser` / `set_folder_browser`) and agent.json (`agents._clean_browser`,
+  `browser` in `SECURITY_FIELDS`: off is safer, the rest is asked); `browser.resolve` = `enabled` topic ->
+  project -> true (`SESSIONS_DEFAULT`; an agent's never inherited, false unless set); `SHARED_PROJECTS` (general, system)
+  use `main` ("General"): no profile of their own, an older one loses its `project`, `profile` = an agent's own choice when it exists, else its project's.
+  **One profile per project** (`project` field): `ensure_project_profile` (from `main`'s exit/on_exit_down,
+  named after the project) at the first `active_for`, at `GET /owner` of an enabled folder, and for every project with
+  an agent at `GET /api/browser`; `DELETE` refused (`409 project`) while the project exists; `GET /profiles/{pid}` = `{profile, browser, gone, agents, person, temporary (replays.sessions: actions with a `nav` "session:*"), actions, asks}`; ProfileRow adds `gone`, `agents`; `profile: "own"` and a
+  project's / topic's `profile` are read as "its project's". `GET /owner` adds `project`, `project_profile`, `sites`.
+  **Sites**: a profile has no list (a profile's `web` / `sites` of before are dropped; Chromium policy without
+  `URLAllowlist`, no restart on a change). Any public site for every turn and the person, except a sandboxed agent's
+  run (not its owner's conversation, which is not sandboxed): `browser.agent_sites(owner)` = its `domains` (None = any
+  public site, `[]` = nothing), read once by the runner (`browser_args`, `agent["sandbox"]`) into the turn file
+  (`turns/<sid>.json` `sites`; `turns.sites_of`, a file without it reads the agent), then `Turn.sites`: checked on a
+  tool's `url` (`Pool.call`), in its `/cdp` relay (`Page.navigate` / `Target.createTarget`) and after each tool call
+  (`Pool._keep_to`: a tab of its navigator outside them -> `about:blank`, Claude told; `Watcher.cdp_navigate`). A
+  refusal for the list only (`rules.off_domains`) posts a feed event (`browser/domains.py`: source `agents`, ref
+  `browsersite:<agent>|<host>`, action `add` -> `domains.add`, dedupe per agent, host and day). Live view:
+  `DomainBar` (PATCH the agent's `domains`). `rules.page_refusal` keeps refusing this server, local networks, raw IPs,
+  `file:` and browser pages for all. `GET /api/browser`: `navigators()` once, `navs.agents_on(s)` reads each agent
+  once (`browser.agent_profile`). Navigator ids: `me`, `agent:<path>`, `session:<sid>` (an old `me-N` tab falls back
+  to `me`). Web: `MyBrowser.tsx` (the page without `?live=1`), `EmptyCard`.
+- Modules: `exits.py` (exits, `Runtime` up/down state + 30 s watcher, `Tailscale` = own userspace `tailscaled`, `WireGuard` =
+  `wireproxy`, units `maxxing-bx-<install>-<eid>`, `test()` via ip-api.com + 2 MB download, `wait_down` / `set_resume` /
+  `_resume_waiters`, `feed_action`), `pool.py` (one Chromium per profile, `max_active_profiles`, `exit_ready`, a
+  chrome-devtools-mcp per turn; `control[nav]`, `create` one tab at a time per profile, `navigators()`, `move_nav`,
+  `drop_nav`, `_close_sessions`: a session's navigator closed after `idle_min` unused), `navs.py` (navigators `me` (its
+  profile in `<state>/browser/navigators.json`), `agent:<path>`, `session:<sid>`; one window per navigator: `window.open` from a page of it, else `newWindow`), `live.py` (a `Screen`
+  per navigator watched; up to `INFLIGHT` = 3 frames on their way per viewer, `{"t":"got"}` sent on arrival,
+  adaptive JPEG quality 30..70 on the queueing (trip minus fastest trip), `?q=auto|high|low`; the tab shown is
+  `Target.activateTarget`-ed; `Watcher.dialog` / `chooser` from `Page.javascriptDialogOpening` /
+  `fileChooserOpened` (interception on for its sessions), viewer events `{"t":"copy"}` -> `{"t":"copied", text}`,
+  `{"t":"dialog", accept, text}`, `{"t":"chooser"}` = cancel; `give_files`), `unit.py` (unit
+  `maxxing-br-<install>-<pid>`, `set_level` -> `cpu.set_level`, `cpu.turn_slice_args()`, `--lang` /
+  `--accept-lang` from `config.language`, `TZ` from `config.timezone`; `run/<pid>/uploads` emptied at each start), `proxy.py` (upstream through the exit by checked IP, 502 + marked down when it fails),
+  `tabs.py` (tabs carry `nav`; `claim` / `assign`; `by` = who opened it), `view.py` (a turn's tools see only their
+  navigator: events filtered, foreign auto-attach detached, `getTargets` filtered, foreign targets refused,
+  `createTarget` made by the server), `relay.py`, `rules.py`
+  (`address(text, engine)`: an address or a search, `SEARCH_ENGINES` google | duckduckgo | bing = settings `search`,
+  default google; `DOM.setFileInputFiles` allowed only for files
+  under `rules.UPLOAD_ROOTS` = `/mxrun/uploads/` (+ the real folder in direct mode),
+  `Page.setInterceptFileChooserDialog` allowed),
+  `cdm.py`, `asks.py`, `replays.py`, `turns.py`; `browser_mcp.py` (stdlib, per turn) + `runner.browser_args`.
+  Removed v3 notions (research branch only): tab scopes `me` / `topic:` / `project:` / `agent:`, "Share with",
+  filtering by scope in the relay, `profile: keep|fresh`, global `web` / `sites`.
+- State `<state>/browser/`: `profiles/<pid>/`, `run/<pid>/`, `tabs/<pid>.json`, `actions/<pid>.jsonl`,
+  `asks/<id>.json`, `turns/<sid>.json` + `.mcp.json`, `exits/<eid>/`, `waiting.json` (`[{session, owner, exit,
+  profile, at, resume}]`); tools `<state>/tools/tailscale-<v>/`, `wireproxy-<v>/` (pinned sha256). Migration
+  (`browser.migrate()`, at startup and each profile start): `profiles/harness` -> `profiles/main`, `tabs.json` ->
+  `tabs/main.json`; top-level `web` / `sites` dropped.
+- Routes (`api/browser.py`): `GET /api/browser`, `PUT /settings`, `POST /setup {exits?}`, `/profiles` (POST, GET / PUT
+  / DELETE `{pid}`, `{pid}/open|stop|sleep|forget`, `{pid}/tabs`, `{pid}/tabs/{key}/show`, DELETE `{pid}/tabs/{key}`),
+  `{pid}/open {nav?}`, `{pid}/tabs {url?, nav?}`, `{pid}/picture?nav=&w=` (JPEG of that navigator's tab; 204 when not
+  running, never starts it), `PUT /navigators/me {profile}`, `{pid}/files?nav=` (multipart `files`, <= 50 MB each: for the page's open file chooser, 409 without one;
+  `pool.stage`), `/exits` (POST, PUT / DELETE `{eid}`, `{eid}/test` incl. `direct`, GET / POST `{eid}/tailscale`), GET / PUT
+  `/owner` (`inherit: [...]`), `POST /waiting/{sid} {action: resume|retry|dismiss}`, `/asks`, `/live-token`, WS
+  `/live?t=&profile=&nav=&q=`, `GET /api/browser` adds `navigators`, loopback `POST /mcp/{sid}` and WS `/cdp/{pid}`. Sessions list: `browser_asks`,
+  `browser_exit` (`sessions/service.py`). Feed: ref `browserexit:<eid>` (`feed.HANDLERS`), actions `retry`, `resume`.
+- `pool.public` adds `dialog {type, message, default}` and `chooser {multiple}`. Claude's `upload_file`:
+  `pool.claude_file` (a file of the turn's topic / project folder, <= 50 MB) copied by `pool.stage` into the uploads
+  folder, `filePath` rewritten.
+- Exits are checked by themselves while looked at: `GET /api/browser` calls `Runtime.refresh_seen(exits)` - in the
+  background, one at a time per exit, an exit not checked for `SEEN_FRESH` (60 s) gets `check()`, and when it is up
+  with no good test younger than `RETEST_EVERY` (1 h; a failed one: 60 s) `test(eid, speed=False)` (no 2 MB
+  download); `direct` too. Tests persist in `<state>/browser/exit-tests.json`; `exits[].checking` / `direct.checking`.
+- CLI `cmd_browser.py`: `maxxing browser enable|disable` (`browser_feature`; `enable` runs `unit.setup` first when
+  something is missing, exit 1 and stays off if it still is) | `setup [--exits] | status [--json] | settings [...] [--max-profiles N] |
+  profile add|set|rm | exit test ID|direct | set PATH on|off|inherit [--profile ID|own|inherit] | show [--json] |
+  forget ID`; `agent_guard.BROWSER_OWNER_ONLY` refuses `set profile forget setup settings enable disable` in agent turns. Skill `maxxing-browser` (turn it on, sign-ins, what to check when its tools are missing, troubleshooting); `BROWSER_NOTE` names Watch and forbids asking for a password in the chat.
+- Web: Settings section `browser` (`features/browser/BrowserSettings.tsx`, lazy with its i18n group; `?profile=`,
+  `?exit=<id>|new|direct`, `?new=profile`; `?live=1` / `?nav=` / `?session=` = the live view in a window over it);
+  `/browser?…` redirects there (`BrowserMoved`, also the links of notifications). My browser = one window for the app
+  (`open.ts` `openMyBrowser` / `useMyBrowserOpen`, `MyBrowserWindow` mounted by `AppShell` once asked): the sidebar's
+  browser line (shown whenever the feature is on), Ctrl+K `act:browser`, Settings -> Browser. `BrowserWindow` up to
+  96vw x 92dvh. No sidebar page any more (`nav.ts`). Files: `features/browser/{BrowserSettings, BrowserPanel, BrowserFeature, ProfileSettings, Exits, SessionBrowser,
+  LiveView, QuickMenu, BrowserWindow, MyBrowserWindow, AgentBrowserCard, profiles, open}` (`QuickMenu` = the ⋮ of the live view; picture choice in
+  `localStorage` `mx.browser.quality`) (`AgentBrowserCard` in the agent's info panel: a
+  picture every 2 s while visible and running); project and topic menus -> **Browser...** (`Tree.tsx`), agent settings section `browser`; sidebar
+  line in `HealthIndicator.tsx`. i18n group `browser` (`groups.ts`) loaded with Settings -> Browser, elsewhere on its first
+  key (`ON_DEMAND` in `test_web_i18n_groups.py`). Showcase `browser` (Settings -> Features, `data-tour="browser-feature"`).
+- Template: help index row `33-browser.md` (upgrade note `docs/upgrade/2.0.0a150.md` step 2).
+- Tests: `test_browser.py` (settings and migration, profiles, owners and inheritance, exits + vault, proxy through an
+  upstream, waiting for a down exit, live pacing, routes, CLI); `test_settings.py::test_get_defaults` has
+  `browser_feature`.
+
 ## 2.0.0-alpha.151 - 2026-11-14
 
 - Chips: one component `web/src/features/chips/Chip.tsx` (`Chip`, `ChipData` kinds session/agent/team/group/all/

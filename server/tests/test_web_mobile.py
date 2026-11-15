@@ -165,3 +165,64 @@ def test_the_links_under_a_git_block_are_big_enough_to_tap():
     for m in (code, page, github):
         assert m and "pointer-coarse:min-h-10" in m[1].split()
     assert "pointer-coarse:min-w-10" in github[1].split()
+
+
+def test_the_error_of_a_browser_exit_breaks_inside_the_card():
+    src = (WEB / "features" / "browser" / "Exits.tsx").read_text()
+    err = re.search(r"exit\.state === 'down' && <span className=\"([^\"]*)\">· \{exit\.error\}", src)
+    assert err and {"min-w-0", "[overflow-wrap:anywhere]"} <= set(err[1].split())
+
+
+def test_the_name_of_a_browser_profile_takes_the_width_of_a_phone():
+    src = (WEB / "features" / "browser" / "ProfilePage.tsx").read_text()
+    field = re.search(r'className="([^"]*)"\s+data-testid="browser-profile-name"', src)
+    assert field and {"w-full", "sm:w-56", "pointer-coarse:h-10"} <= set(field[1].split()) and "w-56" not in field[1].split()
+
+
+def test_the_links_of_the_browser_settings_are_big_enough_to_tap():
+    browser = WEB / "features" / "browser"
+    settings = (browser / "BrowserSettings.tsx").read_text()
+    add = re.search(r"function AddRow[^\n]*\n  const cls = '([^']*)'", settings)
+    back = re.search(r'<Link to=\{BROWSER_SETTINGS\} className="([^"]*)"', settings)
+    more = re.search(r'<button type="button" className="([^"]*)" onClick=\{\(\) => setMore\(!more\)\}',
+                     (browser / "BrowserFeature.tsx").read_text())
+    ts = re.findall(r'<button type="button" className="([^"]*)" onClick=\{\(\) => (?:setAdvanced\(true\)|set\.mutate\(\{ id: exit\.id, action: \'logout\' \}\))\}',
+                    (browser / "Exits.tsx").read_text())
+    assert add and back and more and len(ts) == 2
+    for cls in (add[1], back[1], more[1], *ts):
+        assert "pointer-coarse:min-h-10" in cls.split()
+
+
+def test_a_confirmation_with_a_long_name_stays_on_the_screen():
+    src = (WEB / "components" / "ui" / "alert-dialog.tsx").read_text()
+    content = re.search(r"'mx-glass fixed z-50 grid ([^']*)'", src)
+    title = re.search(r"<AD\.Title className=\{cn\('([^']*)'", src)
+    assert content and "grid-cols-[minmax(0,1fr)]" in content[1].split()
+    assert title and "[overflow-wrap:anywhere]" in title[1].split()
+
+
+def test_the_audio_player_with_a_long_name_stays_on_the_screen():
+    src = (WEB / "features" / "files" / "MediaPlayer.tsx").read_text()
+    root = re.search(r"cn\('(relative grid w-full max-w-lg [^']*)', className\)\} tabIndex=\{0\}", src)
+    assert root and "grid-cols-[minmax(0,1fr)]" in root[1].split()
+
+
+def test_a_settings_card_with_a_long_title_stays_on_the_screen():
+    src = (WEB / "pages" / "settings" / "sections" / "ui.tsx").read_text()
+    head = re.search(r'<div className="([^"]*)">\s*\{title && <h3 className=\{cn\(\'([^\']*)\'', src)
+    assert head and {"min-w-0", "grid-cols-[minmax(0,1fr)]"} <= set(head[1].split())
+    assert "[overflow-wrap:anywhere]" in head[2].split()
+
+
+def test_the_browser_panel_with_a_long_profile_name_stays_on_the_screen():
+    src = (WEB / "features" / "browser" / "BrowserPanel.tsx").read_text()
+    root = re.search(r'<div className="([^"]*)" data-testid="browser-panel">', src)
+    assert root and "grid-cols-[minmax(0,1fr)]" in root[1].split()
+    line = re.search(r"<p className=\"([^\"]*)\">\{t\('browser\.panel\.projectProfile'", src)
+    assert line and "break-words" in line[1].split()
+
+
+def test_the_profile_settings_link_of_the_browser_panel_is_big_enough_to_touch():
+    src = (WEB / "features" / "browser" / "BrowserPanel.tsx").read_text()
+    link = re.search(r'<Link to=\{`/settings/browser\?[^`]*`\} className="([^"]*)">', src)
+    assert link and {"pointer-coarse:inline-flex", "pointer-coarse:min-h-10"} <= set(link[1].split())

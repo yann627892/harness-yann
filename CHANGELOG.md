@@ -3,7 +3,7 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
-## 2.0.0-alpha.151 - 2026-11-14
+## 2.0.0-alpha.156 - 2026-11-15
 
 ### Added by this fork (not upstream)
 
@@ -29,6 +29,171 @@ Changed:
 - **Intelligence on a gateway model.** Claude Code caps a level the model does not support at the highest one it
   does; models it does not recognise as effort-capable (most gateway models) may ignore it. The level still stays
   on the session and shows next to the model name.
+
+New:
+- **Voice mode: talk with Harness out loud.** The new button in the bar of a session (or in the box of an agent) starts a call: a voice
+  answers you at once, hands real work to the session in your own words (the same Claude, files and tools), tells
+  you now and then what it is doing and reads the outcome out when it is done; what you add while it works joins
+  the work in progress, and "stop" stops it. Speak to cut the voice: it lowers its volume at once, stops when it is
+  sure it is you, and says its sentence again if it was only noise or a "yeah"; what you add right after your
+  sentence gets one answer for the whole. The pause before your sentence ends is yours to set; a short tone tells
+  you when a call connects and when it ends. One language per call, yours.
+  By default the voice runs on your server (free, private, several French and English voices and their speed); in
+  Settings -> Voice you can switch to a realtime voice from OpenAI or Gemini on your own key, which Harness finds in
+  the Keys vault; a long cloud call goes on by itself when the provider renews its connection.
+
+Improved:
+- **One message box everywhere.** Sessions, agents, agent groups and Team chats now share the same box: the same
+  look, the same keys, the same file chips, Send in the same place. Each keeps its own tools: the model in a session or
+  with an agent, the recipients in a group, polls in Team. With an agent, **Stop** and **New conversation** sit next to
+  Send; replying to a run or to a Team message shows as a card on top of the box; Team gets dictation.
+- **Compaction gauge.** Next to the model, in the message box of a session or an agent: how close the conversation is
+  to its next automatic compaction (a bar with the tokens when there is room, a ring with the percentage on a phone
+  or in a narrow column). It replaces the context gauge of the session header.
+- **Clearer words for a message added to a running task**: the button is now **Add to task** and the message is
+  marked *added to the running task*, with a tip saying what it means (it was "added to the plan").
+
+## 2.0.0-alpha.155 - 2026-11-15
+
+Fixed:
+- **An app left open over an update reloads by itself.** Opening the phone app (or a tab left open) after the server
+  was updated showed a red error asking to reload; it now loads the new version by itself, and when it cannot, a
+  calm "Harness was updated" screen offers Reload.
+
+## 2.0.0-alpha.154 - 2026-11-15
+
+Added:
+- **Claude: you are told before the sign-in of your server ends.** A sign-in made with `claude` then `/login` on
+  the server now has an end date, and every session stops on that day. Ten days before, the bell (and Telegram)
+  and `maxxing doctor` give the date and what to do: sign in again, or paste a long-lived token in Settings ->
+  Claude. Needs Claude Code 2.1.318 or newer (it updates by itself); a token or an API key is not concerned.
+- **Sub-agents can run at their own effort**: `CLAUDE_CODE_SUBAGENT_EFFORT` (Claude Code 2.1.316+) set on the
+  service now reaches the sessions, like the other Claude tuning variables.
+
+Fixed:
+- **Agents: a turn cut short on Fable 5.2, Fable 5.1 or Sonnet 5.5 is counted at its real price.** The estimate
+  used the price of the first Fable (10 $ / 50 $ per million tokens, cache reads 1 $) for every Fable: Fable 5.2
+  costs 8 $ / 40 $ and its cache reads 0.20 $, so such a turn weighed up to five times too much on the agent's
+  daily budget.
+- Before the list of models is first read from Anthropic, the Fable offered is Fable 5.2.
+- **Agents: no more false "The sandbox cannot run on this server" warning.** Since 2.0.0-alpha.152 the check ran
+  inside the Harness service, whose own protections stop it, so every sandboxed agent showed the red banner
+  ("Missing: user namespaces") while its runs worked. The check now runs where the runs do.
+
+## 2.0.0-alpha.153 - 2026-11-15
+
+Fixed:
+- **Agents: your conversation with an agent is really free again.** An agent in **accept edits** or **default**
+  (every Protected agent runs in accept edits) took that mode into your conversation too: its commands and its
+  MCP tools were refused there, with nobody to ask, so it could not do what you had just asked. Your conversation
+  now runs in the mode of the agent's topic, like any session of that topic, as intended; its runs keep their own
+  mode, sandbox and approvals. The agent is also told, in your conversation, that what you ask needs no approval.
+- **Sessions: a message sent while background work runs reaches the task, "Add to plan" works again there.** When
+  the last background command or sub-agent of a turn ended, Claude started a short turn by itself - and sometimes
+  new background work - but the task could no longer receive anything: a message waited until all of it was over,
+  **Add to plan** did nothing or said the message "could not be added to the running turn", and **Steer** (or
+  sending with it) stopped the task and its background work to start again. Same after such a stop: nothing could be
+  added to the whole next turn. The message now goes to the running task in both cases, and the background work
+  goes on.
+
+## 2.0.0-alpha.152 - 2026-11-15
+
+New:
+- **Git: start a session from a repository, a branch or a commit.** Right click a repository in the list of the
+  Git page, a branch label or a commit of a graph (long press on a phone; also in the ` ```git ` blocks of a
+  conversation): **New session…** asks for the project and topic, then opens a session there with what you
+  clicked already typed in the message box (the repository and where it is cloned on the server, the branch or
+  the commit). Nothing is sent: you write what Claude should do. The topic of the clone is proposed when the
+  clone is inside one, else the topic you picked last time. A repository of the list also has **Open on GitHub**
+  and **Copy the GitHub link**.
+- **CPU priorities: what you watch goes first.** When the processor is full (a video render, a big build, several
+  sessions), the interface comes first, then your sessions and agents, then scheduled jobs and heavy work - which
+  slows down a little, never stops. On by default (Settings -> System); nothing changes while the processor has room.
+  Click the CPU meter at the bottom of the sidebar to see who takes the processor; it turns amber and says "waiting"
+  when programs wait for it, and a processor full for 10 minutes becomes a health alert. [Show me](#show:cpu)
+- **`maxxing heavy <command>` and `maxxing video render`.** Long renders, encodes and builds started this way run
+  with the background priority, with the same output and exit code; Remotion videos render this way.
+- **Harness Browser: a browser on your server for Claude and you.** For sites without an API, Claude opens pages,
+  clicks and fills forms in a Chromium of your server, and you watch it live, take over for a captcha or a sign-in
+  and hand back. Off until you turn it on (Settings -> Features -> Harness Browser); then every session has it (a project
+  or a topic can say no: its menu -> **Browser...**) and an agent once you turn it on in its settings. **Settings -> Browser** has **your browser** (also
+  opened from the sidebar's Browser line or Ctrl+K, in a window over any page), the **profiles** and the **connections**. **Each project has its own profile** (sign-ins, connection), made by
+  itself: its sessions and its agents share it, so you sign in once for all of them; add more profiles to keep an
+  agent apart. A profile's page shows its agents' browsers live (**Persistent**) and a journal of the browsers its
+  sessions opened (**Temporary**, closed once the session no longer uses them); an agent's info panel shows its
+  browser at the top, with its profile under it. Each browser only sees its own tabs. The **⋮** of the live view
+  changes the profile, the connection, the search engine and the picture (smooth or sharp) without leaving the page.
+  **Connections** send a profile's pages out by your phone (Tailscale), a rented proxy or a WireGuard box instead of
+  the server's data-center address, which some sites block; the eye next to a profile's connection shows the address
+  the sites see. When a connection is down, the profile waits and you get a notification - never the server's address
+  behind your back - and Claude goes on once it is back. The address bar searches (Google, DuckDuckGo or Bing) what is not an address; copy, paste, the page's messages
+  and its file buttons work from the live view; the browser speaks your language and keeps your time zone. The live
+  view keeps up with a slow connection. It opens any public site, never your server or your local network; the runs of
+  an agent in its sandbox open only its domains, the same as its commands, and a site they were refused comes as a
+  notification with **Add this domain**. An asleep browser shows a small window in its
+  project's colour. **My browser** shows its picture, its profile and its connection, and opens with a click. Ask a session to turn it on (`maxxing browser enable`) or why it has no browser: the skill `maxxing-browser` guides it. [Show me](#show:browser)
+
+Changed:
+- **Git: the repositories are in the list on the left.** The second sidebar of the Git page now lists the
+  repositories themselves, one after the other, under **On this server** and under each GitHub account: one click
+  opens a repository, and you go from one to the next without coming back to a page of cards (those pages are
+  gone: nothing is shown beside the list until you pick a repository). Each line shows what there is to do
+  (commits to push ↑ or to pull ↓, files changed, private, cloned here), the list's search filters it, and a
+  click on **On this server** or on an account folds its repositories. The refresh button is in the head of the
+  list.
+- **Git: a commit links to GitHub.** In a graph (the Git page and the ` ```git ` blocks of a conversation), the
+  short id of a commit that is on GitHub is a link to it, and the details of a commit of a server's clone have the
+  **GitHub** link too (before, only a right click offered it).
+- **Agents: when you talk with an agent, it is not limited and asks nothing.** Your conversation with an agent now
+  runs like a session of its topic: no sandbox and no approvals, even when the agent is protected, because you just
+  asked. Its runs (schedules, webhooks, e-mail, notifications, another agent, **Run now**) keep its sandbox, its
+  domains and **Ask before risky actions**, as before. In the conversation it still sees only its own keys, never
+  reads the vault, and a change of its safety settings still waits for your OK.
+
+Fixed:
+- **Agents: a long conversation is summarized from its first answer on, like a session.** The conversation with an
+  agent (and an agent's part in a group) followed the compaction rules of Settings -> Claude only from your second
+  message: a first answer that filled the context was not summarized. The runs of an agent (a schedule, a webhook)
+  are still never summarized.
+- **Agents: the summary of a long conversation no longer shows up as the agent's answer.** When Harness summarized
+  a conversation with an agent, the summary (and a short reply to it) appeared in the agent's flow as two answers,
+  and on Telegram when the agent writes there. They are now kept out, like in a session; their cost still counts in
+  the agent's daily budget.
+- **Code mode: closing a terminal right after opening it no longer risks stopping Harness.** In the first
+  instant of a terminal, its shell is not yet apart from the server: closing or resizing it then could send the
+  stop signal to the server too. It now goes to the shell alone until the terminal has its own group.
+- **Agents: the sandbox is tried for real.** On recent Ubuntu versions, the system's own AppArmor profile over
+  bubblewrap made every command of a Protected agent fail, while the agent page, `maxxing doctor` and `maxxing
+  agents sandbox-setup` said the sandbox was ready. The check now starts it, says what is wrong, and `maxxing agents
+  sandbox-setup` (as root) repairs it and prints how to undo it.
+- **Memory: the project's and the workspace's memory are read again.** Claude Code only loaded the `memory.md` of
+  the session's own folder: the memory of the levels above (project and workspace; the topic's too for an agent)
+  was never read, in sessions as in agents' runs. Harness now passes it with each turn.
+- **Agents: an agent in "accept edits" can work without the sandbox.** It could neither read its topic's files nor
+  write in its writable folders. It now reads its topic, writes in its folder and its writable folders, and can hand
+  work to another agent or post to the feed. A Protected agent reads its topic with Claude's own tools too, and a
+  run started by outside text no longer asks for each file it reads there.
+- **Agents: a run no longer gives itself rights.** A run that changed its own settings (`agent.json`: budget, keys,
+  permissions) kept them for its next runs. The file is now put back as it was and the conversation says so;
+  changes of its `.mcp.json` and `.claude/settings.json` are reported too. A run can no longer start a session or a
+  scheduled job with your rights (`maxxing sessions new|send`, `maxxing cron run|restore`).
+- **Agents: a run asked while another holds the budget waits.** `maxxing agents run`, **Run now** and work handed
+  by another agent were refused ("the rest of today's budget is held by the run in progress"); they now wait and
+  start when that run ends.
+- **Agents: smaller fixes.** Deleting an agent removes its webhook (its URL kept answering); a task is 100,000
+  characters at most (a huge text was sent, and paid, whole); an imported Claude Code agent file that asks for
+  bypass is created in accept edits; the ready-made agents that only check or sum up (uptime, orders, sales, mail
+  sorting) run on the small model, about 18 times cheaper per run; `maxxing agents create` warns about a key that
+  is not in the vault.
+- **Git: test repositories no longer fill "On this server".** A repository left in a `tmp`, `temp` or `scratch`
+  folder (the trial clones a session or an audit makes) was listed like a project, at the top when it was the most
+  recent: names like `r3` on `master` nobody recognised. They are no longer listed (a graph of such a
+  repository still opens by its path), and an empty `.git` file, as some tools leave in their cache, no longer
+  shows as a repository in error.
+- **Git: the GitHub side of a repository stopped at about 100 commits, without "Show more".** The history of the
+  default branch is now read as far as the page asks (200, then up to 1,000 with **Show more**).
+
+## 2.0.0-alpha.151 - 2026-11-14
 
 New (upstream):
 - **Chips for names and commands.** When you pick someone from the `@` menu (a session, an agent, a Team contact or

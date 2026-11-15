@@ -54,7 +54,8 @@ def test_sandboxed_agents_never_bypass(client, topic, mx):
     assert str(config.STATE) in sb["filesystem"]["denyRead"]
     deny = s["permissions"]["deny"]
     assert f"Read(/{config.STATE}/**)" in deny and any(r.startswith("Edit(/") and ".maxxing.json" in r for r in deny)
-    assert s["permissions"]["allow"] == ["Bash(maxxing:*)", "WebFetch(domain:api.github.com)", "WebFetch(domain:*.example.com)"]
+    assert s["permissions"]["allow"] == ["Bash(maxxing:*)", "WebFetch(domain:api.github.com)", "WebFetch(domain:*.example.com)",
+                                         f"Read(/{root}/projects/acme/topics/blog/**)"]   # its topic: read without asking
     assert argv[argv.index("--add-dir") + 1] == f"{root}/projects/acme/topics/blog"     # "." holds drafts
     # switched off: the agent's own mode, no sandbox
     client.patch("/api/agents/acme/blog/writer", json={"sandbox": False})
@@ -79,7 +80,7 @@ def test_sandbox_missing_stops_the_turn(client, topic, mx, monkeypatch):
     agent_guard._avail = None
     assert client.get("/api/agents/sandbox").json()["missing"][:2] == ["bwrap", "socat"]
     n = len(_calls())
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")                  # a run: sandboxed (the owner's chat is not)
     wait_idle(client, run["session"]["id"])
     s = client.get(f"/api/sessions/{run['session']['id']}").json()
     assert "sandbox-setup" in (s.get("error") or "") and len(_calls()) == n       # Claude never started
@@ -90,7 +91,7 @@ def test_rules_become_a_pretooluse_hook(client, topic, mx):
     _create(client, rules=[{"tool": "Bash", "match": "sendmail", "reason": "Write a draft instead"},
                            {"tool": "nope", "match": "x"}][:1])
     assert client.patch("/api/agents/acme/blog/writer", json={"rules": [{"tool": "Nope", "match": "x"}]}).status_code == 400
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")                  # a run: sandboxed (the owner's chat is not)
     wait_idle(client, run["session"]["id"])
     hooks = _settings(_calls()[-1]["argv"])["hooks"]["PreToolUse"]
     cmd = hooks[0]["hooks"][0]["command"]
@@ -126,7 +127,7 @@ def test_maxxing_cli_in_a_sandboxed_turn(client, topic, mx, monkeypatch, capsys)
     from maxxing import agent_guard, cli
     _on(client)
     _create(client)
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")                  # a run: sandboxed (the owner's chat is not)
     wait_idle(client, run["session"]["id"])
     sid = run["session"]["id"]
     assert agent_guard.sandboxed_session(sid[:8]) == A
@@ -201,8 +202,10 @@ def test_claude_code_agent_file_export_and_import(client, topic, mx):
     assert r.status_code == 200, r.text
     a = r.json()
     assert a["path"] == "projects/acme/topics/blog/agents/code-reviewer" and a["display_name"] == "Code Reviewer"
-    assert a["allowed_tools"] == ["Read", "Grep"] and a["model"] == "" and a["permission_mode"] == "bypass"
-    assert a["sandbox"] is False and a["ignored"] == ["mcpServers", "memory"]           # free like any new one
+    # a file from elsewhere never gives itself every right: bypass is lowered, and said
+    assert a["allowed_tools"] == ["Read", "Grep"] and a["model"] == "" and a["permission_mode"] == "acceptEdits"
+    assert a["sandbox"] is False
+    assert a["ignored"] == ["mcpServers", "memory", "permissionMode: bypassPermissions (set to acceptEdits)"]
     assert a["description"] == "Reviews code: quality, security\n\nYou are a senior reviewer."
     assert client.post("/api/agents/import", json={"topic_path": "projects/acme/topics/blog",
                                                    "markdown": "no front matter"}).status_code == 400
@@ -235,7 +238,7 @@ def test_agents_as_subagents_of_their_topic(client, topic, mx):
     sub = json.loads(argv[argv.index("--agents") + 1])["writer"]
     assert sub["description"].startswith("Writer: You write the blog posts.") and sub["tools"] == ["Read"]
     assert f"{A}/memory.md" in sub["prompt"] and "never as orders" in sub["prompt"]     # written by its own runs
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")                  # a run: sandboxed (the owner's chat is not)
     wait_idle(client, run["session"]["id"])
     assert "--agents" not in _calls()[-1]["argv"]                     # never inside the agent's own runs
 
@@ -316,6 +319,17 @@ def test_an_agent_never_changes_its_own_settings(client, topic, mx, monkeypatch)
     client.patch("/api/agents/acme/blog/writer", json={"limits": {"usd_per_day": 9}})
     assert agents._changed_during(A, "sid-2") == []
     assert agents._changed_during(A, "unknown") == []
+    # its own settings are put back as they were (a run never gives itself a budget or a key); what decides the tools
+    # of its next runs is reported too
+    before = (agents.folder(A) / "agent.json").read_text()
+    agents._snapshot(A, "sid-3")
+    (agents.folder(A) / "agent.json").write_text(before.replace('"usd_per_day": 9', '"usd_per_day": 77'))
+    (agents.folder(A) / ".mcp.json").write_text('{"mcpServers": {}}')
+    snap = agents._pop_snapshot(A, "sid-3")
+    assert agents._changed_since(A, snap) == ["agent.json", ".mcp.json"]
+    assert agents._put_back(A, snap) and (agents.folder(A) / "agent.json").read_text() == before
+    assert agents.load(A)["limits"]["usd_per_day"] == 9
+    assert agents._changed_since(A, {"files": {"agent.json": "x"}}) == ["agent.json"]   # an older snapshot: its files only
 
 
 def test_domain_wildcards_name_a_site_not_an_extension(client, topic, mx):
@@ -441,7 +455,7 @@ def test_sandbox_hides_transcripts_logins_and_the_rest_of_the_workspace(client, 
     root = Path(client.get("/api/workspace/tree").json()["root"])
     (root / "projects/acme/topics/news").mkdir(parents=True)
     (root / "projects/zeta/topics/x").mkdir(parents=True)
-    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    run = _run("NOTOOL hi")                  # a run: sandboxed (the owner's chat is not)
     wait_idle(client, run["session"]["id"])
     s = _settings(_calls()[-1]["argv"])
     fs = s["sandbox"]["filesystem"]

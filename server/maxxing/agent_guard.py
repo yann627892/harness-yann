@@ -45,6 +45,9 @@ profile bwrap-maxxing /usr/bin/bwrap flags=(unconfined) {
 """
 USERNS_SYSCTL = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
 APPARMOR_PROFILES = Path("/sys/kernel/security/apparmor/profiles")
+DISTRO_FILE = Path("/etc/apparmor.d/bwrap-userns-restrict")     # Ubuntu's own profile over bubblewrap...
+DISTRO_OFF = Path("/etc/apparmor.d/disable/bwrap-userns-restrict")
+DISTRO_CHILD = "unpriv_bwrap"                                   # ...and the profile of what bwrap starts
 
 # `maxxing` sub-commands a sandboxed agent turn may run (anything else is refused): its own work, nothing that
 # changes the server (a cron or an MCP server would run outside the sandbox).
@@ -64,7 +67,9 @@ _avail: tuple[float, dict] | None = None
 
 
 def available(fresh: bool = False) -> dict:
-    """{ok, missing: [...]} - what the sandbox needs on this server (cached 60 s)."""
+    """{ok, missing: [...]} - what the sandbox needs on this server (cached 60 s). The binaries being there is not
+    enough: a bubblewrap that cannot nest a user namespace (an AppArmor profile over it) fails every command of a
+    sandboxed turn, so one is really started (_probe)."""
     global _avail
     if _avail and not fresh and time.time() - _avail[0] < 60:
         return _avail[1]
@@ -75,6 +80,8 @@ def available(fresh: bool = False) -> dict:
         missing.append("linux")
     elif _userns_restricted() and not _bwrap_profile_loaded():
         missing.append("apparmor")
+    elif "bwrap" not in missing and not _probe():
+        missing.append("apparmor" if _distro_profile_loaded() else "user namespaces")
     out = {"ok": not missing, "missing": missing}
     _avail = (time.time(), out)
     return out
@@ -87,11 +94,46 @@ def _userns_restricted() -> bool:
         return False
 
 
+def _profiles() -> list[str]:
+    return APPARMOR_PROFILES.read_text().splitlines()
+
+
 def _bwrap_profile_loaded() -> bool:
     try:
-        return any("bwrap" in ln for ln in APPARMOR_PROFILES.read_text().splitlines())
+        # by its name: a profile of another namespace (":glycin:bwrap") is not over /usr/bin/bwrap
+        return any(ln.startswith("bwrap") for ln in _profiles())
     except OSError:
         return APPARMOR_FILE.is_file()             # profiles list unreadable (not root): trust the file
+
+
+def _distro_profile_loaded() -> bool:
+    """The distribution's own profile over bubblewrap (Ubuntu's bwrap-userns-restrict): what bwrap starts runs as
+    `unpriv_bwrap`, without capabilities in its user namespace, so Claude Code's sandbox cannot nest its own."""
+    try:
+        return any(ln.split(" ")[0] == DISTRO_CHILD for ln in _profiles())
+    except OSError:
+        return False
+
+
+def _probe() -> bool:
+    """What Claude Code's sandbox does first, in small: a user namespace inside bubblewrap's. False = every command
+    of a sandboxed turn would fail there. True when it cannot be tried (no `unshare`): the run says it then.
+    Tried where the turns run: in a transient unit like theirs (spawn), not in this process - the service's own
+    hardening (ProtectKernelTunables) keeps bubblewrap from mounting /proc, which turn units never have."""
+    import subprocess
+    if not shutil.which("unshare"):
+        return True
+    cmd = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-user", "--unshare-pid",
+           "--die-with-parent", "--", "unshare", "--user", "--map-root-user", "true"]
+    if os.environ.get("MAXXING_SPAWN") != "direct" and shutil.which("systemd-run"):
+        from .sessions import spawn
+        cmd = ["systemd-run", "--wait", "--quiet", "--collect", "--description", "Harness Maxxing sandbox check",
+               *spawn.hardening_properties(), "--", *cmd]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=20)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def setup() -> list[str]:
@@ -105,10 +147,38 @@ def setup() -> list[str]:
         env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
         subprocess.run(["apt-get", "install", "-y", "-q", *pkgs], check=True, env=env, stdout=subprocess.DEVNULL)
         done.append("installed " + ", ".join(pkgs))
+    if _distro_profile_loaded() and not _probe() and drop_distro_profile():
+        done.append(f"AppArmor profile {DISTRO_FILE} switched off (it kept the sandbox from starting; "
+                    f"back: rm {DISTRO_OFF} && apparmor_parser -r {DISTRO_FILE})")
     if load_profile():
         done.append(f"AppArmor profile {APPARMOR_FILE}")
     available(fresh=True)
     return done
+
+
+def drop_distro_profile() -> bool:
+    """Switch the distribution's profile over bubblewrap off (root, `sandbox-setup` only: never by itself), the way
+    AppArmor documents it: a link in disable/ and the profile unloaded. True = done now."""
+    import subprocess
+    if not DISTRO_FILE.is_file():
+        return False
+    DISTRO_OFF.parent.mkdir(exist_ok=True)
+    made = not DISTRO_OFF.exists()
+    if made:
+        DISTRO_OFF.symlink_to(DISTRO_FILE)
+    try:
+        subprocess.run([_parser(), "-R", str(DISTRO_FILE)], check=True)
+    except (OSError, subprocess.SubprocessError):
+        if made:                                    # never half done: off at the next boot but still loaded now
+            DISTRO_OFF.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def _parser() -> str:
+    """apparmor_parser lives in /usr/sbin, which is not on every PATH (a unit, a cron, a sudo without -i)."""
+    return (shutil.which("apparmor_parser") or shutil.which("apparmor_parser", path="/usr/sbin:/sbin")
+            or "apparmor_parser")
 
 
 def load_profile() -> bool:
@@ -119,7 +189,7 @@ def load_profile() -> bool:
     if not _userns_restricted() or _bwrap_profile_loaded():
         return False
     APPARMOR_FILE.write_text(APPARMOR_PROFILE)
-    subprocess.run(["apparmor_parser", "-r", str(APPARMOR_FILE)], check=True)
+    subprocess.run([_parser(), "-r", str(APPARMOR_FILE)], check=True)
     return True
 
 
@@ -438,29 +508,20 @@ def mode(requested: str) -> str:
     return requested if requested in ("default", "acceptEdits", "plan") else "acceptEdits"
 
 
-# What the owner's conversation does without asking in its sandbox (read, search the web, its domains' pages): the
-# approvals it keeps are for what matters (leaving the sandbox, another site, a safety change, a mail to send).
-# The deny rules (secrets, its settings) still win over these.
-MANAGER_SAFE = ("Read", "Glob", "Grep", "WebSearch")
-
-
-def settings(path: str, a: dict, approvals: bool = False, manager: bool = False) -> dict:
+def settings(path: str, a: dict, approvals: bool = False, chat: bool = False) -> dict:
     """The `--settings` part of an agent turn: sandbox (when on) and the hook of its rules. approvals: the turn asks
     before risky tools (the agent's setting, or forced for an outside event): Claude Code would let every sandboxed
     command through without asking (`autoAllowBashIfSandboxed`), and `maxxing` too if pre-allowed, so neither is.
-    manager: the owner's conversation (agents.run_settings): it writes its role (CLAUDE.md), its sandboxed commands,
-    `maxxing` and the edits in its folders do not ask, and a command can leave the sandbox once the owner allows it
-    (Claude Code's `dangerouslyDisableSandbox`: a normal permission prompt, i.e. an approval)."""
+    The owner's conversation with the agent is never sandboxed (chat_settings); chat: that conversation, which the
+    walls of an agent in acceptEdits / default without sandbox do not apply to either."""
     out: dict = {}
     folder = config.workspace() / path
     if a.get("sandbox"):
         write = [str(folder)] + writable_dirs(path, a)
         secrets = secret_paths() + private_paths(path)
         locked = locked_paths(path)
-        if manager:
-            locked = [p for p in locked if p != str(folder / "CLAUDE.md")]
-        out["sandbox"] = {"enabled": True, "allowUnsandboxedCommands": manager, "failIfUnavailable": True,
-                          "autoAllowBashIfSandboxed": manager or not approvals, "excludedCommands": ["maxxing:*"],
+        out["sandbox"] = {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
+                          "autoAllowBashIfSandboxed": not approvals, "excludedCommands": ["maxxing:*"],
                           "filesystem": {"denyRead": secrets + [p for p in home_wall() if p not in secrets], "allowRead": read_back(),
                                          "allowWrite": write,
                                          "denyWrite": locked},
@@ -472,19 +533,57 @@ def settings(path: str, a: dict, approvals: bool = False, manager: bool = False)
             deny += [f"Read(/{g})", f"Edit(/{g})"]
         for p in locked:                                # its settings and role: the owner's, never the agent's
             deny.append(f"Edit(/{p + '/**' if p.endswith(('/.claude', '/attachments')) else p})")
-        # the manager's own role: not denied (another agent's folder still is, a new one asks: outside its folders)
-        deny += [r for r in topic_edit_denied(path) if r not in deny
-                 and not (manager and r == f"Edit(/{folder.parent}/*/CLAUDE.md)")]
+        deny += [r for r in topic_edit_denied(path) if r not in deny]
         # an excluded command still needs a permission to run outside the sandbox (else it runs inside, where the
         # server state is hidden): `maxxing` is allowed, check_cli limits what it does; with approvals it is asked
         out["permissions"] = {"deny": deny,
-                              "allow": ([] if approvals and not manager else ["Bash(maxxing:*)"])
+                              "allow": ([] if approvals else ["Bash(maxxing:*)"])
                               + [f"WebFetch(domain:{d})" for d in a.get("domains") or []]
-                              + ([f"Edit(/{p}/**)" for p in write] + list(MANAGER_SAFE) if manager else [])}
+                              + topic_read(path)}
+    elif not chat and a.get("permission_mode") in ("acceptEdits", "default"):
+        # no sandbox, and not free (bypass): Write/Edit reach its `writable` folders (--add-dir), so the files that
+        # are the owner's keep off them as in the sandbox; the topic is read without asking, its .env files excepted
+        topic = folder.parent.parent
+        deny = [f"Read(/{topic}/{g})" for g in ENV_GLOBS]
+        if a.get("writable"):
+            deny += topic_edit_denied(path)
+        out["permissions"] = {"deny": deny, "allow": topic_read(path) + ([] if approvals else list(FREE_CLI))}
     if a.get("rules"):
         cmd = hook_command(path)
         out["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd}]}]}
     return out
+
+
+def chat_settings(path: str, a: dict) -> dict:
+    """The `--settings` of the owner's conversation with a sandboxed agent: no sandbox, no approvals (the owner is
+    talking), but the files tools still keep off its secrets and its settings (a safety change goes through
+    `maxxing agents set`, which asks the owner); its role (CLAUDE.md) is its own to write; its rules hook stays."""
+    out = settings(path, {**a, "sandbox": False}, chat=True)
+    folder = config.workspace() / path
+    deny: list[str] = []
+    for p in secret_paths() + private_paths(path):
+        g = p + "/**" if not Path(p).is_file() and not p.endswith((".json", ".jsonl")) and "*" not in p \
+            and not Path(p).name.startswith(".env") else p
+        deny += [f"Read(/{g})", f"Edit(/{g})"]
+    for p in locked_paths(path):
+        if p != str(folder / "CLAUDE.md"):
+            deny.append(f"Edit(/{p + '/**' if p.endswith(('/.claude', '/attachments')) else p})")
+    out["permissions"] = {"deny": deny}
+    return out
+
+
+# Without a sandbox and without bypass (acceptEdits, default), a command asks, i.e. is refused when nobody answers:
+# these `maxxing` ones are let through, so the agent can still hand work over and post to the feed (check_cli says
+# which of them an agent turn may run, and on whom).
+FREE_CLI = ("Bash(maxxing agents:*)", "Bash(maxxing feed:*)")
+
+
+def topic_read(path: str) -> list[str]:
+    """`permissions.allow`: the files tools read the agent's topic without asking (its work is there; the deny rules
+    of the secrets and private paths still win). Else a turn that is not in bypass is refused each file outside its
+    own folder, and one started by outside text asks for every one of them."""
+    topic = (config.workspace() / path).parent.parent
+    return [f"Read(/{topic}/**)"]
 
 
 def hook_command(path: str) -> str:
@@ -496,9 +595,8 @@ def hook_command(path: str) -> str:
 
 
 def add_dirs(path: str, a: dict) -> list[str]:
-    """`--add-dir` for the `writable` folders: acceptEdits then lets Write/Edit work there too."""
-    if not a.get("sandbox"):
-        return []
+    """`--add-dir` for the `writable` folders: acceptEdits then lets Write/Edit work there too (with or without the
+    sandbox: without it and without bypass, they are the only way the agent writes in its topic)."""
     topic = (config.workspace() / path).parent.parent
     dirs = writable_dirs(path, a)
     if "." in (a.get("writable") or []):            # the whole topic: Write/Edit keep to it (topic_edit_denied)
@@ -598,10 +696,12 @@ def agent_turn() -> dict:
 
 
 def sandboxed_turn() -> str | None:
-    """The agent path when this process belongs to a sandboxed agent turn (its systemd unit), else None."""
+    """The agent path when this process belongs to a sandboxed agent turn (its systemd unit), else None. The owner's
+    conversation with that agent is not one: it runs outside the sandbox (agents.run_settings)."""
     meta = turn_meta()
     p = (meta or {}).get("path") or ""
-    return p if p and _sandboxed(p) else None
+    from . import agents
+    return p if p and _sandboxed(p) and not agents.manager_turn(meta) else None
 
 
 def _sandboxed(p: str) -> bool:
@@ -614,8 +714,10 @@ def sandboxed_session(sid8: str) -> str | None:
     from .sessions import store
     for sid in store.list_ids():
         if sid.startswith(sid8):
-            p = (store.read(sid) or {}).get("path") or ""
-            if _sandboxed(p):
+            meta = store.read(sid) or {}
+            p = meta.get("path") or ""
+            from . import agents
+            if _sandboxed(p) and not agents.manager_turn(meta):
                 return p
     return None
 
@@ -624,6 +726,11 @@ def sandboxed_session(sid8: str) -> str | None:
 AGENT_OWNER_ONLY = {"create", "cron", "webhook", "watch", "on", "off", "silent", "loud", "set", "import", "sandbox-setup", "group"}
 # ...but the owner's conversation with an agent (its manager) runs these on that agent itself
 AGENT_MANAGER = {"cron", "webhook", "watch", "on", "off", "silent", "loud", "set", "show", "run"}
+
+
+# ...and so is what starts something with the owner's rights outside the agent's guards (a session of any topic,
+# a scheduled job now): an agent hands work to another agent (`maxxing agents send`), which keeps its own
+OWNER_ONLY = {"sessions": {"new", "send"}, "cron": {"run", "restore"}}
 
 
 def _manages(turn: dict, words: list[str], argv: list[str]) -> bool:
@@ -658,6 +765,9 @@ def in_the_sandbox() -> bool:
     return not (config.STATE / "config.json").exists()
 
 
+BROWSER_OWNER_ONLY = {"set", "profile", "forget", "setup", "settings", "enable", "disable"}
+
+
 def check_cli(argv: list[str]) -> str | None:
     """Why `maxxing <argv>` is refused in an agent turn, else None."""
     words = [a for a in argv if not a.startswith("-")]
@@ -677,10 +787,18 @@ def check_cli(argv: list[str]) -> str | None:
         return (f"`maxxing agents {words[1]}` is not allowed in an agent turn: an agent never changes agents (its own "
                 "triggers, settings or role included). Say what should change in your answer; the owner applies it "
                 "from the agent page or a session.")
+    if turn["path"] and words[0] == "browser" and len(words) > 1 and words[1] in BROWSER_OWNER_ONLY:
+        return (f"`maxxing browser {words[1]}` is not allowed in an agent turn: its browser settings belong to the "
+                "owner. Say what should change in your answer (the owner's conversation asks for its browser "
+                "with `maxxing agents set <itself> browser.enabled=true`: a request the owner allows).")
+    cmd, sub = words[0], (words[1] if len(words) > 1 else "")
+    if turn["path"] and not turn.get("manager") and sub in OWNER_ONLY.get(cmd, ()):
+        return (f"`maxxing {cmd} {sub}` is not allowed in an agent run: it would start work with the owner's rights, "
+                "outside this agent's budget and guards. Hand it to another agent (`maxxing agents send`) or say "
+                "what should be done in your answer.")
     path = sandboxed_turn()
     if not path:
         return None
-    cmd, sub = words[0], (words[1] if len(words) > 1 else "")
     allowed = CLI_ALLOWED.get(cmd, set())
     if allowed is None or sub in (allowed or set()):
         return None

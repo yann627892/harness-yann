@@ -48,7 +48,7 @@ Single source of truth between `server/` and `web/`. Change it here first, then 
 | POST | `/api/onboarding/complete` | – | `{ok, jobs_enabled:[cron_id]}` (Claude signed in: the default jobs created off until then - Memory compaction - are turned on, once) |
 
 ## Claude
-| GET | `/api/claude/status` | – | `{installed, version, auth:{ok, method:"oauth_token"\|"credentials"\|"api_key"\|"gateway"\|null, detail, checked_at:float\|null, error:string\|null}, gateway:{provider:"zen"\|"zen_go"\|"openrouter"\|"custom", name, base_url, models:{opus,sonnet,haiku,test}}\|null, gateways:[{id,provider,name,base_url,models,default:bool}], anthropic:{connected:bool, method:"oauth_token"\|"credentials"\|"api_key"\|null, detail}, default_provider:"anthropic"\|"gateway:<id>", default_model, permission_mode, auto_compact_tokens, idle_compact_tokens, idle_compact_after_s, smart_resume_tokens, protect_secrets:bool, short_titles:bool, short_titles_model:bool, suggestions:bool, auto_update:{enabled:bool, checked_at:float\|null, latest:string\|null, last:{from, to, at:float, ok:bool, error:string\|null}\|null}, models:[{id,label,provider:"anthropic"\|"gateway:<id>",context_window:int\|null}]}` (`context_window`: as last reported by Claude Code on this server, null if never seen; `gateway` = the default LLM gateway (older clients), null = none; `gateways` = every connected gateway, `default` marks the one new sessions use; `anthropic` = the stored subscription token / API key or the CLI's own sign-in; all of them can be connected at once - each entry of `models` carries the credential its turns run on, and `default_provider` is the side of new sessions and background calls) |
+| GET | `/api/claude/status` | – | `{installed, version, auth:{ok, method:"oauth_token"\|"credentials"\|"api_key"\|"gateway"\|null, detail, checked_at:float\|null, error:string\|null, ends_at:float\|null}, gateway:{provider:"zen"\|"zen_go"\|"openrouter"\|"custom", name, base_url, models:{opus,sonnet,haiku,test}}\|null, gateways:[{id,provider,name,base_url,models,default:bool}], anthropic:{connected:bool, method:"oauth_token"\|"credentials"\|"api_key"\|null, detail}, default_provider:"anthropic"\|"gateway:<id>", default_model, permission_mode, auto_compact_tokens, idle_compact_tokens, idle_compact_after_s, smart_resume_tokens, protect_secrets:bool, short_titles:bool, short_titles_model:bool, suggestions:bool, auto_update:{enabled:bool, checked_at:float\|null, latest:string\|null, last:{from, to, at:float, ok:bool, error:string\|null}\|null}, models:[{id,label,provider:"anthropic"\|"gateway:<id>",context_window:int\|null}]}` (`context_window`: as last reported by Claude Code on this server, null if never seen; `gateway` = the default LLM gateway (older clients), null = none; `gateways` = every connected gateway, `default` marks the one new sessions use; `anthropic` = the stored subscription token / API key or the CLI's own sign-in; all of them can be connected at once - each entry of `models` carries the credential its turns run on, and `default_provider` is the side of new sessions and background calls) |
 | POST | `/api/claude/auth` | `{kind:"oauth_token"\|"api_key"\|"gateway", value, provider?, base_url?}` | stores the secret then runs a test call → `{ok, error?}`; 400 `invalid` if `value` is shorter than 10 characters or not printable ASCII without spaces; `gateway`: `provider` = `zen`\|`zen_go`\|`openrouter`\|`custom` (default custom), `base_url` = the endpoint (the preset's when omitted; required for `custom`; https only, http on a private address; Claude Code appends `/v1/messages` itself) |
 | DELETE | `/api/claude/auth` | `?kind=gateway\|anthropic&id=<gateway id>` | removes the stored token/key/gateway; `kind`: only that side (the others stay connected), omitted: everything; `id` picks one gateway (`zen`, `zen_go`, `openrouter`, `custom`), omitted with `kind=gateway`: every gateway |
 | POST | `/api/claude/test` | `?provider=anthropic\|gateway:<id>` | `{ok, model, ms, error?}` (real one-line call; `provider`: the side to test, omitted = the default one; bare `gateway` = the default gateway) |
@@ -59,9 +59,9 @@ current method (success → `ok`, `checked_at`; a sign-in error such as "OAuth s
 key" → `ok:false`, `error`). A new `claude /login` (credentials file rewritten) or a new token clears an old
 failure. With no recent result the server verifies in the background (`claude -p`, cheapest model, 60 s timeout)
 at startup and at most every 6 h; a background timeout/network error does not mark the sign-in as failed.
-`checked_at:null` = configured but not verified yet.
+`checked_at:null` = configured but not verified yet. `ends_at` = when a stored `claude` sign-in ends (epoch; null for a token or a key, or when Claude Code did not say).
 
-`models` = the newest model of each family read from Anthropic once a day (`claude_models`; before the first read claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-fable-5-1) + ids observed in logs; connected gateways (`maxxing/gateway.py`, INTERNALS.md) with no Anthropic credential replace the built-ins with their own ids (claude-sonnet-5-5, anthropic/claude-opus-5.5, …); with several credentials connected each entry carries its provider (`provider`: "anthropic" | "gateway:<id>") and the picker lists every side. Two gateways may serve the same id: each keeps its own row.
+`models` = the newest model of each family read from Anthropic once a day (`claude_models`; before the first read claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-fable-5-2) + ids observed in logs; connected gateways (`maxxing/gateway.py`, INTERNALS.md) with no Anthropic credential replace the built-ins with their own ids (claude-sonnet-5-5, anthropic/claude-opus-5.5, …); with several credentials connected each entry carries its provider (`provider`: "anthropic" | "gateway:<id>") and the picker lists every side. Two gateways may serve the same id: each keeps its own row.
 
 ## Workspace
 | GET | `/api/workspace/tree` | – | `{root, projects:[Project]}` |
@@ -296,7 +296,7 @@ health problems itself every 60 s (not `cron_failed` nor
 | DELETE | `/api/backup` | – | forget repo + token (`409 busy` while a backup or restore runs) |
 
 ## Settings & secrets
-| GET / PUT | `/api/settings` | `{timezone, language:"en"\|"fr", public_url, files_root, presentation_default?, usage_widget:bool, git_page:bool, infra_page:bool, mail_page:bool, maxxing_mode:bool, memory_max_lines:int, result_line_hidden:["model"\|"duration"\|"cost"\|"tokens"\|"cache"], donation_hidden:bool}` (`donation_hidden`: hides the donation links of What's new, Feedback and Settings -> License for every browser, default false; the Support card of Settings -> About stays) (`result_line_hidden`: parts of the line under each answer that are hidden, default `[]`, unknown values = 422, stored in canonical order) (`git_page`: the Git page `/git` and its sidebar entry, default false) (`maxxing_mode`: beta, Maxxing mode of the Sessions page - its switch, meter, driver and Alt+M -, default false) (`memory_max_lines`: 0 = no limit, else 50-5000, default 200) — a new `timezone` also switches the server zone (`timedatectl`, cron restarted); PUT ignores the fields equal to the stored config (neither checked nor applied: the web app sends the whole object) |
+| GET / PUT | `/api/settings` | `{timezone, language:"en"\|"fr", public_url, files_root, presentation_default?, usage_widget:bool, git_page:bool, infra_page:bool, mail_page:bool, maxxing_mode:bool, memory_max_lines:int, cpu_priorities:bool, result_line_hidden:["model"\|"duration"\|"cost"\|"tokens"\|"cache"], donation_hidden:bool}` (`donation_hidden`: hides the donation links of What's new, Feedback and Settings -> License for every browser, default false; the Support card of Settings -> About stays) (`result_line_hidden`: parts of the line under each answer that are hidden, default `[]`, unknown values = 422, stored in canonical order) (`git_page`: the Git page `/git` and its sidebar entry, default false) (`maxxing_mode`: beta, Maxxing mode of the Sessions page - its switch, meter, driver and Alt+M -, default false) (`memory_max_lines`: 0 = no limit, else 50-5000, default 200) (`cpu_priorities`: CPU weights of the server / turns / jobs slices, default true; a change rewrites the slices at once, `cmd_core.ensure_cpu_slices`) — a new `timezone` also switches the server zone (`timedatectl`, cron restarted); PUT ignores the fields equal to the stored config (neither checked nor applied: the web app sends the whole object) |
 | PUT | `/api/settings/look` | `{theme:"dark"\|"light"\|"system", accent:"blue"\|"clay"\|"violet"\|"green"\|"amber"\|"rose", tint?:"neutral"\|"tinted"}` | `{ok, look}` · sent by the web app 600 ms after a change of theme / accent / tint (config `look`) · `422` bad value |
 | GET / PUT | `/api/settings/profile` | `{name ≤32, color: "clay"\|"blue"\|"violet"\|"green"\|"amber"\|"rose"\|"teal"\|"zinc", emoji}` | `Profile` `{name, color, emoji, photo, photo_url}` (bus `profile`; PUT keeps the photo; `photo` = 16 hex of the photo's SHA-256, `""` = none) · `400 invalid_color\|invalid_emoji\|invalid_name` (a lone surrogate in `name` or `emoji` is refused) |
 | GET / PUT / DELETE | `/api/settings/profile/photo` | PUT: the image bytes (JPEG, PNG or WebP by their first bytes, ≤ 512 KB; the UI sends a 256 px square) | GET the photo (`?v=` = version, cached for good); PUT / DELETE `Profile` · `400` `too_large` / `not_an_image` / `empty` (`maxxing/profile_photo.py`; Team contacts get the new version) |
@@ -384,8 +384,41 @@ VoiceStatus = {settings:{engine:"off"|"local"|"groq"|"openai", model:"tiny"|"bas
 Telegram: voice notes and video notes in a session thread (not audio files: attachments) are downloaded, transcribed, echoed as
 `🎤 <transcript>` and sent to the session as the user message (attachment = the audio file). Engine off → a hint.
 
+## Voice mode
+A call in a session: a voice talks with the user and hands real work to the session. The voice converses itself (small
+talk, news of the work, what the last answer said) and decides when the session works; then the session gets **the
+user's own words**, never a rewrite, through the usual send route with `call: <language>` (`POST
+/api/sessions/{id}/messages`: the turn's prompt gets `runner.CALL_PREFACE`, "answer short and easy to say, in that
+language", not shown in the log); while the session works the browser then calls `POST /api/sessions/{id}/inject` so
+the message joins the running turn. Without any model the server sets aside noise and what Whisper makes up on silence,
+the voice's own echo, "stop" (stops the work at once) and language requests (`voicecall.classify` / `sort`), and keeps
+one language per call (set by the first sentence, heard in any language; then changed on request or when a whole
+sentence of 3 words or more is clearly in another one). The end of each turn of the session is given to the voice to
+tell, and news of a long one now and then. Cloud voices get the same rules as tools (`ask_session` takes no argument:
+the browser sends the provider's transcription of the user; `session_status`, `stop_session`, `read_last_answer`);
+their transcriptions are sorted by `/call/sort`.
+```
+CallStatus = {settings:{mode:"local"|"cloud", provider:"openai"|"gemini"|null, openai_key, gemini_key (vault names|null),
+    openai_model, openai_voice, gemini_model, gemini_voice, talker_model:"haiku"|"sonnet" (default sonnet), local_voice:"auto"|<voice id>,
+    local_speed:0.8-1.5 (default 1.15), silence_ms:800-5000 (default 1800)},   // local_voice is used for sentences in its own language only
+  provider,            // used in cloud mode: chosen, else the only one with a key
+  keys:{openai|gemini:{found:[vault names that look like its key], using:name|null}},
+  local:{ready, reason:"stt"|"tts"|null, tts:{ready, voices:[ids installed], catalogue:[{id, name, lang}], install:{state, error}}},
+  cloud:{ready, reason:"choose"|"choose_key"|"no_key"|null}, ready, voices:{openai, gemini, local}, speed_range:[0.8, 1.5], silence_range:[800, 5000]}
+```
+| GET | `/api/voice/call` | – | `CallStatus` |
+| PUT | `/api/voice/call/settings` | partial settings (`provider: ""` = none) | `CallStatus` · `400 invalid_*` |
+| POST | `/api/voice/call/start` | `{session, language?, resume?}` (`resume`: cloud reconnection of the same call, Gemini's resumption handle or empty) (the interface language: listened for first, then English) | local: `{mode:"local", call, language, silence_ms}` (starts the voice: `claude -p --input-format stream-json`, no tools, kept for the call, max 3, hung up after 10 min idle; phrases said without it generated ahead); the key never leaves the server · `409 local_not_ready\|cloud_not_ready` · `502 bad_key\|provider_error` |
+| POST | `/api/voice/call/{call}/turn` | multipart: `audio` (WAV) or `text` = a sentence of the user, with `context` (the session's state line), `busy`, `saying` (the sentence the voice was saying when the user started: a transcript made mostly of its words is its echo); or `event` (the answer of an ended turn) + `outcome:"answer"\|"failed"\|"done"`; or `outcome:"progress"` + `note` (the running turn's last text) / `tool` (its last tool) | NDJSON stream: `{heard, kind:"ask"\|"stop"\|"lang"\|"empty", language}` first for a sentence (`empty`: nothing follows), `{action:{type:"ask", request}}` (`request` = the user's own words since the last hand-over, with the voice's question when they answered one) or `{action:{type:"stop"}}`, `{say, url, seconds}` per sentence (WAV, `/api/voice/said/<name>`, in the call's language), `{error, code}` (the voice failed: a sentence of the user is handed over anyway), `{language}` (changed), `{done, empty?}` |
+| POST | `/api/voice/call/sort` | `{text, language, expecting?}` | `{kind, language}` — the same sorting, for a sentence transcribed by a cloud voice |
+| POST | `/api/voice/call/{call}/end` | – | `{ok}` |
+| GET | `/api/voice/tts` | – | Piper status `{ready, engine, voices, catalogue, install}` |
+| POST | `/api/voice/tts/install` | `{voices?}` | starts the install in `<state>/voice/tts` (own venv, GPL program run apart: `tts_worker.py` keeps the voices loaded) -> the status, `install.state` "running" |
+| GET | `/api/voice/said/{name}` | – | a generated sentence (`audio/wav`, kept 10 min) |
+
 ## System
-| GET | `/api/system/health` | – | `{ok, issues:[{level, code, text}], cpu_pct, load, mem:{total,avail}, disk:{total,free,pct}, uptime_s, claude_auth, claude_auth_error, claude_checked_at, backup_age_h, failed_logins_1h, at}` (each issue also has `id` and `seen`; issue `claude_auth`: "Claude is not connected" or "Claude sign-in expired…") (cached 30 s, `?force=1`) |
+| GET | `/api/system/health` | – | `{ok, issues:[{level, code, text}], cpu_pct, cpu_pressure:{avg10,avg60,avg300}|null, cpu_waiting, load, mem:{total,avail}, disk:{total,free,pct}, uptime_s, claude_auth, claude_auth_error, claude_checked_at, backup_age_h, failed_logins_1h, at}` (each issue also has `id` and `seen`; issue `claude_auth`: "Claude is not connected" or "Claude sign-in expired…"; issue `cpu_pressure`: CPU pressure `avg60 >= 40` for 10 min, naming the top unit) (cached 30 s, `?force=1`) |
+| GET | `/api/system/cpu` | – | `{enabled, pressure:{avg10, avg60, avg300}\|null, waiting, top:[{unit, kind, name, label, level, pct}], at}` - CPU priorities (`cpu_priorities`) and the units using the processor most (`maxxing/cpu.py`): `pressure` = `some` line of `/proc/pressure/cpu` (null without PSI), `waiting` = `avg10 >= 20`, `top` = 6 units from their cgroup `cpu.stat` (`pct` of the whole machine; Docker containers in one row), `kind` harness / session / agent / heavy / job / browser / docker / other, `level` live / normal / background / other (cached 3 s, `?force=1`; the first call samples 0.5 s) |
 | POST | `/api/system/health/seen` | `{id, seen=true}` | the health above, fresh - marks a current issue as seen (or not): it stops counting in the sidebar dot until its text changes (numbers left out of the `id`) or for 24 h; marks in `<state>/health-seen.json` · `404 not_found` |
 | GET | `/api/system/services` | – | `[{name, label, active:bool, enabled:bool, since:float\|null, state}]` (claude-maxxing, caddy, tailscaled, cron + config `services_extra`; units not installed are omitted; one `systemctl show` call, cached 10 s, dropped by a service action) |
 | POST | `/api/system/services/{name}/{start\|stop\|restart}` | – | `{ok}` (self restart deferred 2 s) |
@@ -425,7 +458,7 @@ INTERNALS.md#agents); its path is a session path. Every trigger goes through `ag
 | DELETE | `/api/agents/{p}/{t}/{a}` | – | `{ok}`: folder + sessions to the Trash, its cron jobs deleted, its thread, state and Telegram thread dropped · `409 has_running_sessions` |
 | GET | `/api/agents/{p}/{t}/{a}/thread?limit=100&before=<at>` | – | `{messages: [AgentMessage]}` oldest first (the Activity tab) |
 | GET | `/api/agents/{p}/{t}/{a}/media-roots` | – | `{roots: [abs path]}` the folders whose files the agent's answers may link and preview on its page: its folder + its `writable` folders, minus any that is, holds or sits in a secret / private path (`agent_guard.media_roots`); the page passes the one holding a file as `within` to `/api/files/thumb`, `/raw`, `/stat` · `404` |
-| POST | `/api/agents/{p}/{t}/{a}/run` | `{text?, reply_to?, attachments?:[filepath] (≤ 10)}` (`attachments`: uploaded first with `POST /api/uploads?path=<agent path>`, each a regular file under `<agent>/attachments/` with no link below it, else `400 bad_attachment`; files only = the text "See the attached files."; the thread's `run` message keeps `attachments`) | `{started: true, session: Session, continued?: true}` \| `{started: false, reason: "disabled"\|"budget"\|"rate"\|"depth"\|"missing"}` - the text is the user's task (not framed). `reply_to` = a thread message id: its session goes on with the text (`continued`, no new session; a gone session -> a new one). A new session gets the last 3 results of the thread as framed context |
+| POST | `/api/agents/{p}/{t}/{a}/run` | `{text?, reply_to?, attachments?:[filepath] (≤ 10), call?: "fr"}` (`call`: said on a voice call of the agent's page, in that language: its queue item `call`, as `MessageIn.call`; `attachments`: uploaded first with `POST /api/uploads?path=<agent path>`, each a regular file under `<agent>/attachments/` with no link below it, else `400 bad_attachment`; files only = the text "See the attached files."; the thread's `run` message keeps `attachments`) | `{started: true, session: Session, continued?: true}` \| `{started: false, reason: "disabled"\|"budget"\|"rate"\|"depth"\|"missing"}` - the text is the user's task (not framed). `reply_to` = a thread message id: its session goes on with the text (`continued`, no new session; a gone session -> a new one). A new session gets the last 3 results of the thread as framed context |
 | POST | `/api/agents/{p}/{t}/{a}/seen` | – | `{ok}`: the thread is read (`thread_unread` 0) and the finished, read runs are archived (`agents.tidy`) |
 | POST | `/api/agents/{p}/{t}/{a}/triggers/{tid}/test` | – | `{event: FeedEvent}`: a sample feed event on the trigger's source (its first level, its `match` words), so the agent starts as for a real one · `404 not_found` |
 | POST | `/api/agents/{p}/{t}/{a}/webhook` | `{kind: "generic"\|"stripe"\|"shopify"\|"github", prompt?, levels?, match?}` | `{agent, hook: FeedHook}`: a feed hook named `<topic>-<agent>` + a feed trigger on its source |
@@ -484,7 +517,9 @@ permission, else it runs inside) and `WebFetch(domain:<d>)`; `--add-dir` per wri
 bypass (`agent_guard.mode`: Claude Code lets every domain through in bypass -> acceptEdits). Sandbox unavailable
 (`available()`: bwrap, socat, AppArmor profile when kernel.apparmor_restrict_unprivileged_userns=1) -> the turn
 fails before Claude starts. With `rules`: `hooks.PreToolUse` = `<python> -m maxxing.agent_guard hook <agent path>`
-(deny + reason). The `maxxing` CLI refuses everything but `CLI_ALLOWED` when its process belongs to the systemd unit
+(deny + reason). The owner's conversation (`agents.manager_turn`) is never sandboxed and has no approvals: its
+`--settings` = `agent_guard.chat_settings` (the same `permissions.deny` on secrets + Edit on `locked_paths` but its
+CLAUDE.md, the rules hook), the topic's permission mode. The `maxxing` CLI refuses everything but `CLI_ALLOWED` when its process belongs to the systemd unit
 `maxxing-<sid8>` of a session in a sandboxed agent folder (`/proc/self/cgroup`, not an env var the turn could
 change). A session in a topic gets `--agents <json>` with the topic's agents that have `subagent` on
 (`agent_format.subagents`). Tests: `MAXXING_SANDBOX_CHECK=0` skips the availability check.
@@ -557,6 +592,113 @@ Approval { id: string (16 hex), session: string, agent_path: string, tool: strin
 |---|---|---|---|
 | GET | `/api/approvals?session=<sid>` | – | `{approvals: [Approval]}` waiting ones, oldest first |
 | POST | `/api/approvals/{id}` | `{decision: "allow"\|"deny", message?}` | `Approval` (`404 not_found`, `409 not_pending` when answered, timed out or expired) |
+
+## Harness Browser
+
+`maxxing/browser/` + `maxxing/api/browser.py` (INTERNALS "maxxing.browser"). Off unless `browser_feature` (Settings).
+Settings in config `browser`: global values, **profiles** (each one its own Chromium: sign-ins, exit; `main`
+= the person's "General", always there, cannot be deleted; also the profile of the projects `general` and `system`) and **exits** (shown as "connections": where a profile's
+traffic leaves; `direct` = this server, always there, not stored). **One profile per project** (`project` =
+`projects/<name>`, one at most per project): made with the exit and `on_exit_down` of `main`, named
+after the project, the first time a turn of the project gets the browser (`active_for`), when an owner view of an
+enabled folder is asked, and for every project that has an agent when `GET /api/browser` runs; it cannot be deleted
+while its project exists (`409 project`). Who may use it: a `browser` block `{enabled?}` in the `.maxxing.json` of a
+project or a topic (topic -> project -> `true`, `browser.SESSIONS_DEFAULT`) and `{enabled?, profile?}` in an agent's agent.json (its
+`enabled` is never inherited: `false` unless set). Which profile: a session = its project's; an agent = its `profile` if that profile exists, else its
+project's (`profile: "own"` of before = its project's; a project's / topic's `profile` is ignored). **Navigators**
+(`navs.py`): a window of tabs in a profile's Chromium; several may share a profile (its sign-ins), each sees only its
+tabs: the person's one `me` (its profile stored in `<state>/browser/navigators.json`), `agent:<path>` (every run of an
+agent: lasting), `session:<sid>` (the turns of a session, in its project's profile: temporary, its tabs are closed
+once no turn, viewer or person used them for `idle_min`; the profile's journal keeps a line). A turn's tools see only its
+navigator's tabs (view.py); the person may open tabs in any navigator (they are marked as theirs). Bus topic `browser` on every start / stop /
+tab change / request / exit state change (`sessions` too when a turn starts or stops waiting for an exit).
+Errors: `{error, message}`.
+
+```
+BrowserSettings { ask: bool (true), wait_min: int (30, 1..1440), downloads: bool (false), idle_min: int (30, 5..1440),
+                  tab_sleep_min: int (20, 2..720), max_tabs: int (12, 2..30, awake per profile),
+                  max_active_profiles: int (3, 1..8), exit_wait_s: int (180, 0..900),
+                  search: "google"|"duckduckgo"|"bing" ("google": the address bar's search) }
+BrowserProfile  { id (^[a-z0-9][a-z0-9-]{0,23}$, not "direct"), name (<= 40), exit: "direct"|exit id,
+                  on_exit_down: "wait"|"vps", project: ""|"projects/<name>" (set by the server) }
+                                                                                     (<= 40 profiles, main first)
+BrowserExit     { id, name, type: "proxy"|"tailscale"|"wireguard",
+                  proxy: url ("socks5://host:port"|"http://host:port"; no scheme = socks5), user
+                  tailscale: node (the device used as exit node, its Tailscale IP), login_server ("https://..." Headscale, "" = Tailscale)
+                  wireguard: - }                                                     (<= 10 exits)
+                  secret (proxy password | WireGuard config | Tailscale auth key) = vault key BROWSER_EXIT_<ID>
+                  (`-` -> `_`, upper case, not exposed to turns), never in config.json
+ExitView        = BrowserExit + { state: "up"|"down"|"unknown", since, error, latency_ms, test: ExitTest|null, checking: bool,
+                  secret: bool (one is in the vault) }
+ExitTest        { ok, at, error?, ip, country, country_code, city, operator, asn, kind: "isp"|"mobile"|"hosting",
+                  latency_ms, mbps? }        (ip-api.com through the exit; kind "hosting" also when ip-api says proxy;
+                  mbps = 2 MB over TLS from a CDN, absent when that part failed)
+ProfileRow      = BrowserProfile + { state: "starting"|"running"|"stopped", tabs, awake, mem, turns, control: bool,
+                  asks, has_data: bool (its folder exists), gone: bool (a project's whose project was deleted),
+                  agents: int (agents whose browser is on and runs on it) }
+SessionLine     { session, title, path, first, last, actions, sites: [host] (<= 12), open: bool (its tabs are still
+                  open), turns }      (a temporary navigator, from the profile's journal: entries with nav "session:*")
+BrowserTab      { key, url, title, by: {kind: "you"|"session"|"agent", sid?, name?, path?}, asleep: bool,
+                  front: bool (shown in the live view of its navigator), used, nav }
+Navigator       { id: "me"|"agent:<path>"|"session:<sid>", kind: "person"|"agent"|"session", name ("" | the
+                  agent's | the session's title), path?, session?, profile: pid|null (an agent whose project's profile
+                  is not made yet), running, tabs, awake, page: {url, title}|null, control: bool,
+                  watched: bool (a live view shows it), turns, used }
+                  (the person's, the agents' with a browser on, sessions with a tab)
+BrowserState    { profile, nav: navigator|null (null: the whole profile), state, started, last_use, stops_at, tabs: [BrowserTab], front: key|null,
+                  page: {url, title}|null, control: bool (the person has the tab shown), control_by,
+                  busy: bool (a turn acted on the tab shown in the last 15 s), turns: [{session, path, kind, nav}],
+                  mem, level: ""|"live"|"background" (CPU level of its unit), bytes, blocked: [host] (5 newest),
+                  dialog: {type: "alert"|"confirm"|"prompt"|"beforeunload", message, default}|null (open on a page),
+                  chooser: {multiple}|null (a page asked for files) }
+Summary         { running: [pid], mem, turns: {sid: pid}, tabs: {pid: awake}, cap, server_used, server_total,
+                  level: "ok"|"warn"|"critical" }
+Waiting         { session, owner, exit, profile, at, resume: bool }      (a turn stopped by a down exit)
+OwnerView       { owner: "project:<path>"|"topic:<path>"|"agent:<path>", path, kind, own: {enabled?, profile?},
+                  enabled, profile, from: {enabled, profile} (owner that set it, "" = default), feature,
+                  inherited: OwnerResolve of the parent|null (topic, agent), chain: [owner] (nearest first),
+                  exit: ExitView|null (its profile's, not direct), project: "projects/<name>", project_profile:
+                  pid|"" (not made yet), sites: [site]|null (a sandboxed agent's domains, the only sites its
+                  browser opens; null = any public site), asks: [BrowserAsk] }
+BrowserAsk      { id (16 hex), session, owner, profile, reason, what: "captcha"|"sign_in"|"code"|"payment"|"consent"|"other",
+                  at, expires, status: "pending"|"done"|"skip"|"timeout"|"expired", note?, decided_at?, decided_by? }
+BrowserAction   { at, session, nav, tool, args (values typed -> "<n chars>", urls without query), ok, ms?, page?, refused? }
+```
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/browser` | – | the feature on: every project with an agent gets its profile first; `{feature, navigators: [Navigator], settings: BrowserSettings, available: {ok, missing}, tools: {tailscale, wireguard} (installed), setup: {running, log, error}, profiles: [ProfileRow], exits: [ExitView], direct: {test: ExitTest\|null, checking}, summary: Summary, asks: [BrowserAsk], waiting: [Waiting]}`; also checks in the background the exits not checked for 60 s and tests again (no speed) an up exit whose last good test is over 1 h old (`ExitView.checking` meanwhile) |
+| PUT | `/api/browser/settings` | `Partial<BrowserSettings>` (other keys ignored) | same as GET (`400 bad_browser`) |
+| POST | `/api/browser/setup` | `{exits?: bool}` | `{running: true}`; installs in the background (root): Chromium & co, `exits` = also Tailscale + wireproxy (pinned versions, checked hashes) into `<state>/tools/`; see `setup` in GET |
+| POST | `/api/browser/profiles` | `{name, exit?, on_exit_down?}` | `BrowserProfile` (`400 bad_browser` no name / bad value / unknown exit, `409 too_many`) |
+| GET | `/api/browser/profiles/{pid}` | – | `{profile: BrowserProfile, browser: BrowserState, gone, agents: [Navigator] (lasting, on it), person: [Navigator] (the person's when on it), temporary: [SessionLine] (newest first, open ones without journal first), actions: [BrowserAction] (30 newest), asks: [BrowserAsk]}` (`404 no_profile`) |
+| PUT | `/api/browser/profiles/{pid}` | same as POST, every key optional | `BrowserProfile` (`400`, `404 no_profile`) |
+| DELETE | `/api/browser/profiles/{pid}` | – | `{ok}`; stops it, erases its folder, tabs and journal; its agents go back to their project's (`404`, `409 main`, `409 project` while its project exists) |
+| POST | `/api/browser/profiles/{pid}/open` | `{nav?}` (`me`) | `BrowserState` of that navigator; starts the profile for the person with a tab in it (its last one, else the first site of the list) (`400 bad_navigator`, `404 no_navigator`, `409 off`, `409 too_many_profiles`, `503 unavailable`, `404`) |
+| POST | `/api/browser/profiles/{pid}/stop` | – | `BrowserState`; the profile sleeps (its tabs are kept, asleep) |
+| POST | `/api/browser/profiles/{pid}/sleep` | – | `BrowserState` + `slept`: every tab not shown sleeps |
+| POST | `/api/browser/profiles/{pid}/forget` | – | `BrowserState`; stopped, sign-ins, tabs and journal erased |
+| GET | `/api/browser/profiles/{pid}/picture?nav=me&w=480` | – | JPEG (`no-store`) of the tab shown in that navigator, else its last used, `w` 160..960 px wide; `204` while the profile is not running (never starts it) (`404 no_profile`) |
+| POST | `/api/browser/profiles/{pid}/files?nav=me` | multipart `files` (<= 20, 50 MB each) | `BrowserState`; given to the page of that navigator that asked (its file input, `chooser`), copied into the profile's uploads folder (`409 no_chooser`, `413 too_large`) |
+| POST | `/api/browser/profiles/{pid}/tabs` | `{url?, nav?}` (`me`) | `BrowserState` of that navigator; a new tab of the person in it, in that navigator's window (`400 refused` for a page its rules refuse) |
+| POST | `/api/browser/profiles/{pid}/tabs/{key}/show` | – | `BrowserState`; shows it, wakes an asleep one (`404 no_tab`) |
+| DELETE | `/api/browser/profiles/{pid}/tabs/{key}` | – | `BrowserState` (show / close: of the tab's navigator) |
+| PUT | `/api/browser/navigators/{nav}` | `{profile}` (`nav` = `me`) | `{id, name, profile, at}`; the person's browser on another profile: its tabs move there, asleep (`404 no_navigator`, `404 no_profile`) |
+| POST | `/api/browser/exits` | `{type, name?, url?, user?, secret?, node?, login_server?}` | `ExitView`; the id is made from the name (`400 bad_exit` no type / bad url / bad login_server, `400 bad_secret`, `409 too_many`) |
+| PUT | `/api/browser/exits/{eid}` | same, every key optional (`type` ignored) | `ExitView`; `secret` replaces the vault value; its runtime state is forgotten (`404 no_exit`) |
+| DELETE | `/api/browser/exits/{eid}` | – | `{ok}`; vault key, unit and `<state>/browser/exits/<eid>/` removed (`404`, `409 in_use` while a profile uses it) |
+| POST | `/api/browser/exits/{eid}/test` | – | `ExitTest` (`eid` = `direct`: the server's own address); an exit that cannot start = `{ok: false, error, at}`; updates its state (`404 no_exit`) |
+| GET | `/api/browser/exits/{eid}/tailscale` | – | `{state: "needs_setup"\|"needs_login"\|"starting"\|"no_node"\|"node_offline"\|"up", backend, auth_url, account, nodes: [{id, name, dns, os, online, active}] (devices offering an exit node), node, error?}`; starts its `tailscaled` and, signed out, `tailscale up` for a sign-in address (`404 no_exit` not a Tailscale exit) |
+| POST | `/api/browser/exits/{eid}/tailscale` | `{node?}` \| `{action: "login"\|"logout"}` | same as GET; `node`: use that device (`--exit-node`, LAN access off) and save it (`400 bad_node`) |
+| GET | `/api/browser/owner?path=` | – | `OwnerView` (`400 bad_path`: not a project / topic / agent folder, `404 not_found`) |
+| PUT | `/api/browser/owner` | `{path, enabled?, profile?, inherit?: ["enabled"\|"profile"]}` | `OwnerView`; `inherit` removes the owner's own key (`profile` = back to its project's); `profile` / `inherit: ["profile"]` for an agent only (`400 bad_browser`, `404 no_profile`) |
+| POST | `/api/browser/waiting/{sid}` | `{action: "resume"\|"retry"\|"dismiss"}` | `resume` / `retry`: `{ok (the exit works now), waiting: Waiting\|null}` (`resume` = the turn goes on when the exit is back); `dismiss`: `{ok}` (`404 not_waiting`) |
+| GET | `/api/browser/asks?session=&path=` | – | `{asks: [BrowserAsk]}` pending |
+| POST | `/api/browser/asks/{id}` | `{action: "done"\|"skip", note?}` | `BrowserAsk` (`409 decided`); the person's hand is released. `done` stores the hand-back in the request file (never in the response): `trail` (pages the person went to in that session's tab, without query), `page`, `picture` (base64 JPEG): `ask_human` returns them to Claude (text + an image block) |
+| POST | `/api/browser/live-token` | – | `{token}` one use, 30 s |
+| WS | `/api/browser/live?t=<token>&profile=<pid>&nav=<navigator>&q=auto\|high\|low` | signed-in cookie + token | one navigator (default `me`) of a profile (default `main`; `4403` bad token / cookie, `4404` no profile). Server -> binary JPEG frames of the tab shown, text `{"t":"state", browser: BrowserState, me, asks}` (when it changes) / `{"t":"error", text}`. Client -> `{"t":"got"}` as each frame arrives (up to 3 are on their way per viewer, `live.INFLIGHT`; one the connection could not send yet is replaced by the newer one; quality adapts to the queueing measured), `{"t":"mouse", type: down\|up\|move, x, y (0..1), button?, clicks?, alt?, ctrl?, meta?, shift?}`, `{"t":"wheel", x, y, dx, dy}`, `{"t":"key", type: down\|up, key, code, keyCode, text?}`, `{"t":"text", text}`, `{"t":"nav", url}` (`rules.address`: not an address = a search with `settings.search`), `{"t":"back"\|"forward"\|"reload"}` (each one gives the person the tab shown), `{"t":"copy"}` -> `{"t":"copied", text}` (the page's selection), `{"t":"dialog", accept, text?}` (answers `dialog`), `{"t":"chooser"}` (no file for the page), `{"t":"take"}`, `{"t":"release", done?: true\|"skip", note?}`, `{"t":"quality", q}`, `{"t":"size", w, h, dpr?}` (CSS px of the view: the page in front is laid out for it, clamped 360x320..2560x1600; back to 1280x800 when nobody watches). `auto`: JPEG quality 30..70 follows the time a frame takes to reach the slowest viewer |
+| POST | `/api/browser/mcp/{sid}` | JSON-RPC `tools/list` \| `tools/call` | loopback + `Authorization: Bearer <turn token>` only (`browser_mcp.py`); owner and profile come from the turn file; refusals, a down exit (after `exit_wait_s`) and `409 too_many_profiles` come back as `isError` tool results |
+| WS | `/api/browser/cdp/{pid}` | – | loopback + `X-Browser-Secret` (one per turn) only: that turn's chrome-devtools-mcp to its profile's Chromium, filtered by `rules.json` and by its view (view.py) |
 
 ## Docs
 | GET | `/api/docs` | – | `[{slug, title, section, order}]`; `?full=1` adds `markdown` to every page (full-text search, one request) |

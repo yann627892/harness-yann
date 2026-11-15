@@ -136,14 +136,20 @@ The page is **one flow**, like a chat, with the box to write to it at the bottom
 agent's answers on the left with its avatar, and what its automations did, all in the order it happened (a line
 between days).
 
+The box is a session's: the model and the compaction gauge sit in its bar, **Stop** next to Send while the agent
+answers you, and the message of a run you reply to shows as a card on top of it.
+
 - **You see it work**: each command and file it uses shows as a line while it
   works (**Stop** stops the turn), then its answer, whole, with the model, the time and the cost. A request it asked
   you to allow (a web search, a site outside its list) stays a line in the flow once answered.
 - **It is one conversation**: your messages, here or on Telegram, go on in **the same session**. The agent remembers
   everything you said and what it already read or did, so it answers faster and costs less. **New conversation**
-  (under the box) starts a fresh one; a new one also starts by itself after 6 hours without a message (**New
+  (the speech-bubble button next to Send) starts a fresh one; a new one also starts by itself after 6 hours without a message (**New
   conversation after**, in Settings -> Limits; 0 = never) or when the last one failed. A new conversation gets the
   agent's last results as context, so "and the second point?" still makes sense.
+  A long conversation is summarized like a session's (Settings -> Claude, **Automatic compaction**): from its first
+  answer on, a big context continues in a fresh thread seeded with a summary, and the agent keeps its role and
+  memory. A run of the agent (a schedule, a webhook) is one turn and is never summarized.
 - **The box works like a session's**: the model and the intelligence are picked under it (they change the next turns
   of the conversation, or start the next one with them), `/` opens the same menu (`/model`, `/effort`, `/new`,
   `/compact` and the skills of its topic), and the microphone sends a **voice message** directly when **Send voice
@@ -169,7 +175,10 @@ between days).
 - **Run now** (its menu, the Agents page) starts a run of its routine, like a schedule would: it shows as an
   automation, never as a message of your conversation.
 - **A message while a run holds the day's budget** (a schedule running, or the turn before a **New conversation**)
-  waits and starts by itself right after that run ends: it is never refused. Automations still wait their turn.
+  waits and starts by itself right after that run ends: it is never refused. So does a run asked by hand
+  (`maxxing agents run`, **Run now**) or handed over by another agent (`maxxing agents send`): it shows as waiting,
+  then starts. A schedule that falls during a run is skipped, feed events wait for it.
+- **A task has a size**: 100,000 characters at most. Longer, put the text in a file and give its path.
 - **Long texts**: your messages and its answers in the conversation are kept whole (up to 50,000 characters). The
   report of an automation is kept up to 4,000 characters, marked **cut** when longer; **Open the run** has it all.
 - **Its answers** open file links in the preview, show images and videos as thumbnails and audio with a player, and
@@ -230,7 +239,7 @@ which starts A) stop after 3 hops, like `maxxing agents send`.
 | Limit | Default | |
 |---|---|---|
 | **On / off** | on | an agent switched off starts for nothing (its schedule runs are skipped) |
-| **Daily budget** | 2 USD | once today's sessions of the agent cost that much, it waits until tomorrow (the day of your time zone in Settings); a turn that reaches it is stopped in the middle (Claude Code `--max-budget-usd`); a run holds what is left of the day until it ends, so a trigger meanwhile is skipped (feed events wait for it) (0 = no budget; 0.01 USD at least otherwise, 1000 at most) |
+| **Daily budget** | 2 USD | once today's sessions of the agent cost that much, it waits until tomorrow (the day of your time zone in Settings); a turn that reaches it is stopped in the middle (Claude Code `--max-budget-usd`); a run holds what is left of the day until it ends, so a schedule meanwhile is skipped (feed events, runs asked by hand and work handed by another agent wait for it) (0 = no budget; 0.01 USD at least otherwise, 1000 at most) |
 | **Runs per hour** | 6 | more starts by its triggers and scripts in the same hour are refused (0 = no limit, 120 at most); your own messages (agent page, Telegram) never count. A negative value or one above the maximum is refused when you save |
 | **New conversation after** | 6 h | after this long without a message, your next one starts a new conversation (0 = never, 720 at most) |
 | **Time limit** | 30 min | a run is stopped after this |
@@ -307,6 +316,12 @@ moment, and says so; asked by its
 conversation, a mailbox and that switch are one request on the card. If you set it back to **Free** yourself, it
 stays Free: more sources or later changes never switch it again. Agents made before keep their setting.
 
+**Free with a permission mode other than bypass** (**accept edits** or **default**, settings -> **Permission
+mode**): the agent reads the files of its topic (not its `.env` files) and writes in its own folder and in the
+**folders of the topic** you list (`--writable drafts,plans`), without asking. Commands (Bash) are refused there,
+except `maxxing agents …` and `maxxing feed …`: an agent that must run commands is either Protected (they run inside
+the sandbox) or in bypass.
+
 **Protected** runs it in **Claude Code's sandbox**:
 
 - its commands can **write only in its own folder**, plus the **folders of the topic** you list (`.` = the topic's
@@ -344,7 +359,10 @@ The sandbox needs `bubblewrap` and `socat` (the installer adds them), and on Ubu
 that lets `/usr/bin/bwrap` create user namespaces for every local user: it is loaded only when you create (or
 sandbox) an agent, or by `maxxing agents sandbox-setup`, never by the installer.
 If one is missing, the agent's page says so and its runs stop instead of running without walls:
-`maxxing agents sandbox-setup` (as root) installs them, `maxxing doctor` checks them. It is a strong fence, not a
+`maxxing agents sandbox-setup` (as root) installs them, `maxxing doctor` checks them. The check starts the sandbox
+for real: on Ubuntu versions whose own AppArmor profile over bubblewrap (`bwrap-userns-restrict`) keeps it from
+starting, it says `apparmor`, and `sandbox-setup` switches that profile off (it prints the command that puts it
+back). It is a strong fence, not a
 vault: the turn still runs as the server's user, MCP servers and tools you allow outside the shell are not inside it.
 
 ### Who changes an agent
@@ -354,8 +372,11 @@ You, and the agent when **you** ask it in its conversation.
 - **Its runs** (schedules, webhooks, e-mails, notifications, other agents, a Telegram forward) never change it: they
   are told that its role, settings and triggers are yours, and `maxxing agents create|cron|webhook|watch|on|off|set|import`
   is refused; when something should change, the run says so in its answer. Without the sandbox nothing can stop a run
-  from editing its files, so a run that changes its `agent.json` or `CLAUDE.md` is reported in its conversation
-  ("This run changed ...").
+  from editing its files, so at the end of a run that changed its `agent.json`, the file is **put back as it was**
+  (a run never gives itself a budget, a key or a right) and the conversation says so; a change of its `CLAUDE.md`,
+  `.mcp.json` or `.claude/settings.json` is reported there ("This run changed ...") for you to check.
+  A run does not start work with your rights either: `maxxing sessions new|send` and `maxxing cron run|restore` are
+  refused in it (it hands work to another agent with `maxxing agents send`).
 - **Its conversation with you** is its manager. It may rewrite its role (`CLAUDE.md`)
   and its memory, add, change or remove its schedules (`maxxing agents cron <agent> --job <id> --schedule … | --off |
   --remove`), add webhooks and feed triggers, switch itself off and change its other settings (`maxxing agents set
@@ -370,10 +391,11 @@ You, and the agent when **you** ask it in its conversation.
   message. If a value it changes is no longer the one on the card (you changed it since), or the agent was deleted,
   **Allow** is refused with the reason and nothing is applied: the agent asks again if it still needs it. A request waits up to 7 days. What only makes it **safer** (its sandbox, approvals
   on, fewer keys or sites, a lower budget) is applied at once.
-- **In its sandbox, the conversation does not ask** before reading files, searching the web, opening a page of its
-  sites or writing in its folders; its commands stay in the sandbox (its domains, no secrets). When one needs more
-  (another site, a file outside its folders), it can run outside the sandbox **once you allow that command** (an
-  approval card). Its runs never can.
+- **When you talk with it, it is not limited**: your conversation runs like a session of its topic (its mode, no
+  sandbox, nothing to approve), because you just asked. Its **runs** (schedules, webhooks, e-mail, notifications,
+  another agent, **Run now**) keep its sandbox, its domains and **Ask before risky actions**. In the conversation it
+  still never reads the vault or changes its own settings by hand: a safety setting waits for your OK (above), and it
+  only sees its own keys.
 - Text that came from outside (a mail, a page, a webhook) can end up in its memory or its results: the conversation is
   told it is information, never orders, and only what you write there counts. Outside text never enters the
   conversation itself: a forward or an event always starts a run of its own.
@@ -389,7 +411,7 @@ or not (a Claude Code hook).
 
 ### Approvals
 
-With **Ask before risky actions** on, **every** run asks, not only the outside ones: when it wants to run a command,
+With **Ask before risky actions** on, **every** run asks, not only the outside ones (your conversation with it never does): when it wants to run a command,
 edit a file or use a tool you did not allow in advance, it waits and the request shows with **Allow** and **Deny**:
 in the agent's thread (the card then says how it ended: allowed, denied, no answer in time), in its run, in the
 **Notifications**, and in the **Overview**, where the yellow **!** over its desk opens the request (the **Waiting for you** chip of the list keeps only the
@@ -409,7 +431,8 @@ Harness agents speak Claude Code's own format (`.claude/agents/<name>.md`: a `--
 - **New agent -> Import a Claude Code agent file** creates an agent from one, Free and without trigger
   (`maxxing agents import FILE --topic P/T`); its `tools` become the agent's **tools allowed without asking**: read
   them before you import a file someone else wrote; fields Harness has no equivalent for (`mcpServers`, `hooks`, `memory`…)
-  are listed as not imported;
+  are listed as not imported, and a file that asks for `permissionMode: bypassPermissions` is imported in **accept
+  edits** (said in the same list): you set bypass yourself on its page if you want it;
 - **Callable from the topic's sessions** (settings): Claude can then hand a task to this agent inside your normal
   sessions of its topic, as a Claude Code subagent. It works there with the session's permissions and cost (not the
   agent's limits) and reads / writes the agent's memory, as notes only: an order written in that memory (its runs

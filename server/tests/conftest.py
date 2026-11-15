@@ -43,9 +43,10 @@ def _never_the_real_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.fixture(autouse=True)
 def _never_the_real_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`maxxing deps` / uninstall write commands to /usr/local/bin, remove Claude Code from root's home, a fail2ban
-    jail, a swap line of /etc/fstab...: in tests every one of those paths is under tmp_path."""
-    from maxxing import cmd_core, deps
+    jail, a swap line of /etc/fstab, the slices...: in tests every one of those paths is under tmp_path."""
+    from maxxing import cmd_core, cpu, deps
     fake = tmp_path / "_system"
+    monkeypatch.setattr(cpu, "SLICE_DIR", fake / "systemd-system")      # the CPU priority slices (uninstall removes them)
     monkeypatch.setattr(deps, "LINK_DIR", fake / "usr-local-bin")
     monkeypatch.setattr(deps, "root_home", lambda: fake / "root-home")
     monkeypatch.setattr(cmd_core, "F2B_JAIL", fake / "fail2ban" / "harness-maxxing.local")
@@ -82,6 +83,7 @@ def mx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setenv("MAXXING_CLAUDE_BIN", str(FAKE_CLAUDE))
     monkeypatch.setenv("FAKE_CLAUDE_DIR", str(tmp_path / "fake-claude"))
     monkeypatch.setenv("FAKE_CLAUDE_DELAY", "0.02")
+    monkeypatch.setenv("MAXXING_TASK_SETTLE_S", "1")   # (8 s for real) the fake starts its own turn at once
     # upload_min_free_mb 0: tmp_path often sits on a small tmpfs; tests/test_uploads.py covers the reserve
     config.save_config({"workspace": str(ws), "files_root": str(files), "upload_min_free_mb": 0})
     return {"state": state, "ws": ws, "files": files, "tmp": tmp_path, "fake_dir": tmp_path / "fake-claude"}
