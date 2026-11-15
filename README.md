@@ -1,9 +1,29 @@
-# Harness Maxxing
+# Harness Yann
 
 [![License: Fair Source](https://img.shields.io/badge/license-Fair%20Source-blue)](LICENSE)
 [![Installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.harness-maxxing.com%2Fv1%2Fbadge%2Finstalls)](#install)
 [![GitHub stars](https://img.shields.io/github/stars/makushingu/harness-maxxing?style=social)](https://github.com/makushingu/harness-maxxing/stargazers)
 [![X (Twitter)](https://img.shields.io/badge/X-@HarnessMaxxing-black?logo=x)](https://x.com/HarnessMaxxing)
+
+<!-- FORK: start - this block belongs to the fork (see FORK.md); keep it when merging upstream -->
+
+> ### Unofficial fork of Harness Maxxing
+>
+> **Not Harness Maxxing, and not maintained by its authors.** Based on upstream `stable` (2.0.0-alpha.151), this
+> fork adds three things:
+>
+> - **Several Anthropic-compatible LLM gateways at once** - OpenCode Zen, OpenCode Go, OpenRouter or a custom
+>   endpoint, side by side with a subscription token or an API key. Each session picks its credential with its
+>   model; Settings -> Claude tests and removes each connection on its own.
+> - **Suggested replies** above the message box (written by the smallest model, one call per idle turn, can be
+>   turned off).
+> - **Run a command** on a server from the Infra page, with its exit code, output and duration.
+>
+> Every `maxxing update` brings upstream's versions plus these changes.
+> Install: `REPO=yann627892/harness-yann BRANCH=stable sh install.sh` -
+> details in [NOTICE.md](NOTICE.md), merge notes in [FORK.md](FORK.md).
+
+<!-- FORK: end -->
 
 **A self-hosted control room for Claude Code.** Many persistent Claude conversations organised by
 project and topic, plus files, tasks, scheduled jobs, a Telegram bridge and a memory backup -

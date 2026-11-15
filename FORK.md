@@ -35,6 +35,10 @@ connection — that migration must keep working.
   `/sessions` at 20 000 bytes in French. `files` is not preloaded on `/sessions`; that exception is listed in
   `tests/test_web_i18n_groups.py` (`KNOWN`).
 - **`web/dist` is committed**: any `web/` change needs `npm run build` and the rebuilt `dist` in the same commit.
+- **`README.md` is the fork's landing page**: its title is `# Harness Yann` and a block between
+  `<!-- FORK: start -->` and `<!-- FORK: end -->`, right under the badges, states that this is an unofficial fork
+  of Harness Maxxing and what it adds (the license forbids using their names for the fork beyond that). Upstream
+  edits rarely touch those lines; when they do, keep them.
 - **`POST /api/infra/exec` is documented in `docs/dev/API.md`**: upstream's contract test walks every route.
 - The fork's features are announced in `CHANGELOG.md` under `### Added by this fork (not upstream)` inside the
   current version's section — the first `## ` heading must stay exactly the installed version (`test_docs.py`).
