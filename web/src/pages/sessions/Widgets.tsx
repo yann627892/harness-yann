@@ -165,6 +165,7 @@ export function ModelPicker({
           {real ? t('sessions.model.answered', { model: modelLabel(real, models) }) : t('sessions.model.nextTurn')}
           {gw && ` · ${gw}`}
         </DropdownMenuLabel>
+        {onEffort && <EffortRow effort={effort || ''} onEffort={onEffort} />}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void pick('', '')}>
           <span className="flex size-4 items-center justify-center">{!chosen && <Check className="!text-foreground" />}</span>
@@ -181,7 +182,6 @@ export function ModelPicker({
             {real === m.id && <span className="text-[10px] text-muted-foreground">{t('sessions.model.lastUsed')}</span>}
           </DropdownMenuItem>
         ))}
-        {onEffort && <EffortRow effort={effort || ''} onEffort={onEffort} />}
       </DropdownMenuContent>
     </DropdownMenu>
   )
