@@ -5,7 +5,32 @@ All notable changes to Harness Maxxing. Versions follow semantic versioning.
 
 ## 2.0.0-alpha.151 - 2026-11-14
 
+### Added by this fork (not upstream)
+
 New:
+- **Several LLM gateways at the same time.** Settings -> Claude -> **Gateway** connects one of each: OpenCode Zen
+  (pay-as-you-go credits), OpenCode Go (a Go subscription), OpenRouter, or a custom Anthropic-compatible endpoint.
+  They live beside a subscription token or an API key instead of replacing them: each session picks its credential
+  with its model, the picker lists every side's models tagged with the gateway's name (OpenCode Go, OpenRouter…) and
+  the credential a turn runs on follows the model chosen. Settings -> Claude tests and removes each connection on
+  its own, and the **default** provider (new sessions, session titles, Team summaries) is whichever one you pick. A
+  single gateway configured before this version is moved over on the first start: nothing to re-enter, and sessions
+  made then keep running on the side their model comes from.
+- **Suggested replies above the message box.** Once a session is idle, two or three short messages you could send
+  next appear above the field (*Run the tests*, *Show me the diff*): one click sends it at once, as if typed. The
+  smallest model writes them from the end of the conversation, one quick call per turn at most, only while the
+  session is open and idle, counted in your Claude plan. Turn them off in Settings -> Claude, **Follow-up
+  suggestions**.
+- **Run a command on a server from the Infra page.** **Run a command** opens a window where you pick a server and
+  type a command; the exit code, the output and the duration come back in the same window, with nothing to install
+  on the server.
+
+Changed:
+- **Intelligence on a gateway model.** Claude Code caps a level the model does not support at the highest one it
+  does; models it does not recognise as effort-capable (most gateway models) may ignore it. The level still stays
+  on the session and shows next to the model name.
+
+New (upstream):
 - **Chips for names and commands.** When you pick someone from the `@` menu (a session, an agent, a Team contact or
   group), the name becomes a chip right in the box, and stays one in the sent message: a click opens that session or
   agent. A `/command` or skill at the start of a message is a chip too, in sessions and in an agent's conversation.
