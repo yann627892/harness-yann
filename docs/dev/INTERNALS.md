@@ -110,7 +110,7 @@ Python modules call each other only through these functions. Keep signatures sta
   provider_of(meta)) --tools "" --no-session-persistence --strict-mcp-config --system-prompt …`, cwd
   `<state>/claude-suggest`, env `spawn.claude_env(meta.env, "default", provider=…)` (the session's own side),
   timeout 20 s, at most two calls at a time; answer through `parse()`
-  (JSON array, else one line per item; bullets/numbers and quotes stripped, 3 at most, 110 chars each).
+  (JSON array, else one line per item; bullets/numbers and quotes stripped, one at most, 110 chars).
 ## maxxing.claude_auth  (stdlib only, also used by the runner)
 - `record(ok, error=None, source="turn"|"test"|"check", ends=None, provider=None)` - outcome of a real call on
   that side; `detect(text) -> str|None` finds a sign-in error; `status() -> {ok, method, detail, checked_at, error,

@@ -1,9 +1,10 @@
 """Follow-up messages proposed above the composer (config `suggestions`).
 
 The web UI asks for them (`GET /api/sessions/{id}/suggestions`) when a session is idle and has history; a small
-model (Haiku, on the session's own provider) reads the end of the conversation and replies with a JSON array of
-2-3 very short next messages. Nothing runs in the background: no call until the UI asks, one call per turn at
-most (the answer is cached per session, turn count and log size), and never while a turn or a plan is waiting.
+model (Haiku, on the session's own provider) reads the end of the conversation and replies with a JSON array
+holding the one very short next message worth sending. Nothing runs in the background: no call until the UI
+asks, one call per turn at most (the answer is cached per session, turn count and log size), and never while a
+turn or a plan is waiting.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from . import spawn, store
 log = logging.getLogger("maxxing.suggest")
 
 TIMEOUT_S = 20
-MAX = 3                                 # suggestions kept
+MAX = 1                                 # only the most likely next message is shown
 MAX_CHARS = 110                         # a longer answer is not a message
 CONTEXT_CHARS = 700                     # per message sent to the model
 LAST_ASSISTANT_CHARS = 1600             # the assistant's last message usually says what was done and what is left
@@ -29,16 +30,16 @@ CONTEXT_MESSAGES = 6                    # last user / assistant messages
 TOOLS_SHOWN = 8                         # recent tool calls, so the suggestions name real files and commands
 CACHE_TTL_S = 30 * 60
 SYSTEM_PROMPT = (
-    "You write the messages a developer could send next in their chat with a coding agent. Read the end of the "
-    "conversation (the last assistant message and the recent tool calls say where the work stands) and propose "
-    "2 or 3 follow-ups that are specific to it: name the real files, commands, errors or results involved and "
-    "take the work one step further (check it, fix the cause, extend it, commit it, clean it up...). "
+    "You write the one message a developer is most likely to send next in their chat with a coding agent. "
+    "Read the end of the conversation (the last assistant message and the recent tool calls say where the work "
+    "stands) and pick the single most useful follow-up: name the real file, command, error or result involved "
+    "and take the work one step further (check it, fix the cause, extend it, commit it, clean it up...). "
+    "If several ideas come to mind, keep the one the user would type first, not a list. "
     "Never generic filler that would fit any conversation, never a question about what to do next, never "
-    "something already done. Write as the user would type it: imperative, first person when natural, 12 words "
-    "at most. Use the language of the conversation (French if the user writes French). "
-    "Reply with only a JSON array of strings: no numbering, no quotes around the array, no commentary. "
-    'Example, for a French conversation about a login bug: ["Ajoute un test pour le mot de passe expiré", '
-    '"Vérifie que le message d’erreur est bien traduit"]')
+    "something the assistant has just done. Write as the user would type it: imperative, first person when "
+    "natural, 12 words at most. Use the language of the conversation (French if the user writes French). "
+    "Reply with only a JSON array holding one string: no numbering, no commentary. "
+    'Example, for a French conversation about a login bug: ["Ajoute un test pour le mot de passe expiré"]')
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 
 _slots = threading.BoundedSemaphore(2)  # at most two calls at a time
@@ -81,7 +82,7 @@ def context(events: list[dict], title: str = "") -> str:
 
 
 def parse(answer: str) -> list[str]:
-    """The model's answer as 2-3 short messages: a JSON array, else one line per item."""
+    """The model's answer as one short message: a JSON array, else one line per item."""
     text = (answer or "").strip()
     if not text:
         return []
@@ -183,7 +184,7 @@ def suggestions(sid: str) -> list[str]:
             return []
         with _slots:
             out = ask(m, f"{prompt}\n\n"
-                         "Write the 2 or 3 follow-up messages this user would most likely send next: concrete, "
-                         "about what the conversation is doing, as a JSON array of strings.")
+                         "Write the one follow-up message this user would most likely send next: concrete, "
+                         "about what the conversation is doing, as a JSON array of one string.")
         _remember(sid, key, out)
         return out

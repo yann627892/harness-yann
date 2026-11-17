@@ -16,9 +16,9 @@ New:
   its own, and the **default** provider (new sessions, session titles, Team summaries) is whichever one you pick. A
   single gateway configured before this version is moved over on the first start: nothing to re-enter, and sessions
   made then keep running on the side their model comes from.
-- **Suggested replies above the message box.** Once a session is idle, two or three short messages you could send
-  next appear above the field (*Run the tests*, *Show me the diff*): one click sends it at once, as if typed. The
-  smallest model writes them from the end of the conversation, one quick call per turn at most, only while the
+- **Suggested reply above the message box.** Once a session is idle, one short message you could send next
+  appears above the field (*Run the tests*): one click sends it at once, as if typed. The smallest model writes
+  it from the end of the conversation, one quick call per turn at most, only while the
   session is open and idle, counted in your Claude plan. Turn them off in Settings -> Claude, **Follow-up
   suggestions**.
 - **Run a command on a server from the Infra page.** **Run a command** opens a window where you pick a server and

@@ -983,7 +983,7 @@ export const fr: Record<keyof typeof en, string> = {
   'cdef.shortTitlesModel': 'Titres écrits par Claude',
   'cdef.shortTitlesModelHint': 'Le plus petit modèle nomme le sujet (titres plus justes). Un appel rapide par nouvelle session, compté dans votre forfait Claude.',
   'cdef.suggestions': 'Suggestions de réponse',
-  'cdef.suggestionsHint': 'Quand une session est au repos, 2-3 courts messages que vous pourriez envoyer ensuite apparaissent au-dessus du champ : un clic en envoie un. Le plus petit modèle les écrit, une fois par tour au plus, compté dans votre forfait Claude.',
+  'cdef.suggestionsHint': 'Quand une session est au repos, le court message que vous pourriez envoyer ensuite apparaît au-dessus du champ : un clic l’envoie. Le plus petit modèle l’écrit, une fois par tour au plus, compté dans votre forfait Claude.',
   'cdef.autoUpdate': 'Mettre à jour Claude Code automatiquement',
   'cdef.autoUpdateHint': 'Désactivé par défaut. Activé : quand une version stable plus récente de Claude Code sort (déjà utilisée depuis quelques jours, pas la toute dernière), le serveur l’installe dès que rien n’a tourné depuis 10 minutes (aucun tour, aucun message en attente, aucune tâche planifiée), et revient à la précédente si elle ne démarre pas. Vérifié toutes les 6 heures ; le résultat apparaît dans les notifications.',
   'cdef.autoUpdateLast': 'Dernière mise à jour : {from} → {to}, {date}',

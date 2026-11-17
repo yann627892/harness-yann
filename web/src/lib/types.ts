@@ -75,7 +75,7 @@ export type ClaudeStatus = {
   /** New sessions get a short title (2-5 words) naming their subject. */
   short_titles?: boolean
   short_titles_model?: boolean
-  /** The composer proposes 2-3 short follow-up messages above it once a session is idle. */
+  /** The composer proposes the one most likely follow-up message above it once a session is idle. */
   suggestions?: boolean
   /** Claude Code updated by the server while nothing runs (`claude_auto_update`, default on). */
   auto_update?: ClaudeAutoUpdate

@@ -150,7 +150,7 @@ def test_follow_up_suggestions_use_the_small_model_once_per_turn(client, topic, 
     n = len(calls(mx))
     r = client.get(f"/api/sessions/{s['id']}/suggestions")
     assert r.status_code == 200
-    assert r.json()["suggestions"] == ["Run the tests", "Show me the diff", "Explain the change"]
+    assert r.json()["suggestions"] == ["Run the tests"]     # only the most likely one is shown
     made = calls(mx)[n:]
     assert len(made) == 1
     assert made[0]["argv"][made[0]["argv"].index("--model") + 1] == "haiku"     # the small model
@@ -195,9 +195,10 @@ def test_suggestion_context_names_the_work(client, topic, mx):
 
 def test_suggestion_answers_are_parsed_tolerantly():
     from maxxing.sessions import suggest
-    assert suggest.parse('```json\n["Run the tests", "Show me the diff"]\n```') == ["Run the tests", "Show me the diff"]
-    assert suggest.parse("1. Run the tests\n2. Show me the diff\n") == ["Run the tests", "Show me the diff"]
+    assert suggest.parse('```json\n["Run the tests", "Show me the diff"]\n```') == ["Run the tests"]
+    assert suggest.parse("1. Run the tests\n2. Show me the diff\n") == ["Run the tests"]
     assert suggest.parse('["Same", "same", "", "x"]') == ["Same"]      # duplicate, empty and too short dropped
+    assert suggest.parse('["", "Show me the diff"]') == ["Show me the diff"]   # one kept, skip invalid entries
     assert suggest.parse("") == []
 
 
