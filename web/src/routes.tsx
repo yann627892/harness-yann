@@ -42,9 +42,10 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, lazy: page(() => import('./pages/dashboard')) },
           // Feature pages — implemented in src/pages/<name>/index.tsx
-          // `files.*` is asked only by the file menu and the preview (both on demand): the group loads then.
+          // `files.*` is asked by the file menu and the preview, both on demand: the group loads then, and
+          // translate() falls back while it arrives. Preloading it here breaks the first-load dictionary budget.
           { path: 'sessions/*', lazy: page(() => import('./pages/sessions')) },
-          { path: 'files/*', lazy: page(() => import('./pages/files'), ['files', 'media']) },
+          { path: 'files/*', lazy: page(() => import('./pages/files'), ['files', 'media', 'ctext']) },
           { path: 'tasks/*', lazy: page(() => import('./pages/tasks'), ['tasks']) },
           // Crons moved into Settings (links in old notifications, Telegram reports and bookmarks keep working)
           { path: 'crons/*', Component: CronsMoved },

@@ -3,6 +3,33 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
+## Unreleased
+
+New:
+- **Several sessions at once.** In the session list, click a session then Ctrl+click (Cmd on a Mac, or Shift) another:
+  all the sessions in between are selected; Ctrl+click on a topic or a project selects all of its sessions. A bar
+  then opens, closes, archives or deletes them in one go (Delete key to delete, Escape to let them go).
+- **Confirm from the keyboard.** In a confirmation window (deleting a session...), Enter confirms at once, Escape
+  cancels, the arrows move between the buttons.
+- **Copy the text of a file.** The file viewer has a **Copy the text** button (in its "more" menu on a phone), and
+  the Files page the same lines in the menu of a file. A Markdown or HTML file gives two choices: **Copy the
+  source**, or **Copy as plain text** (the words as you read them, without the marks). A Word document copies as
+  Markdown or as plain text, a workbook as cells that paste into a spreadsheet, a PDF as the text read in its pages,
+  code, text and CSV files as they are.
+
+Fixed:
+- **Tabs.** The shown tab is now an oval that glides from tab to tab, the other tabs lose their grey background,
+  and the line that cut across the shown tab's border is gone. On a phone the tabs scroll from one edge of the screen
+  to the other instead of being cut short of it.
+- **A session that ended in error turns its counter red** (sidebar, ☰ button, project and topic of the list), instead
+  of the green of a finished one.
+- **The automatic update really updates.** "Update by itself when nobody is here" stopped for good at the first
+  version that came with an upgrade note (about one version out of two), without saying why. A note no longer holds
+  the update back: Harness updates, then tells you in the notifications that there are notes to apply (open the
+  update topic and say "update"). Under the switch, Settings -> Updates now says when it last looked and what it
+  found ("waiting, someone is on the interface", "a session is working", "up to date"...), and a busy server is
+  looked at again after 5 minutes instead of 30.
+
 ## 2.0.0-alpha.156 - 2026-11-15
 
 ### Added by this fork (not upstream)

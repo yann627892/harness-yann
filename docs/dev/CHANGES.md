@@ -5,6 +5,46 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
+## Unreleased
+
+- Tabs bar: `useTabIndicator` (`tabMotion.ts`) now places an oval (the chip's width, height and offset) behind the
+  chips (`z-0`, chips `relative z-10`, transparent): it glides to the tab picked; the underline is gone. `TabsBar`
+  `edge` (phone header): the tablist runs edge to edge with its own `px-3`, the scroll-into-view keeps that padding.
+- Session multi-selection (`web/src/pages/sessions/selection.ts`, zustand, not persisted): a plain click on a tree
+  row sets the anchor, Ctrl/Cmd/Shift + click picks the rows between, in DOM order of `[data-session-row]` under the
+  same `[role=tree]` (the anchor copy nearest to the target when it shows twice: Favorites); Ctrl + click on a
+  topic / project row picks its live sessions (`TreeSessions` context = `byPath`). `SelectionBar` (Tree.tsx, computer
+  only): open (at most `SHOW_OPEN_MAX` in columns, `PICK_OPEN_MAX` 20 in tabs), close, archive, delete (one confirm,
+  N `DELETE /api/sessions/{id}` in parallel); Delete key / Escape on the window when no field, dialog or menu has
+  the focus. Strings in their own group `sel`, loaded on the first pick.
+- `ConfirmHost`: the action button gets the focus on open (not with `typeToConfirm`), arrows swap the focus between
+  both buttons, Enter outside a button / field confirms.
+- Workspace topics get `errors` (unread, not archived, `state == "error"`; `workspace._session_stats`); `CountBadge`
+  / `CountDot` get the tone `error` (destructive), used for the unread counter of the sidebar, ☰, tree and phone
+  rows when `errors > 0`; title "Error - " + `sessions.showUnread` (first-load budget). The mock counts it and its failed session is unread.
+
+- Automatic update (`maxxing.auto_update`): an upgrade note no longer makes the preflight "needs a person"
+  (`_simple`): since the notes exist about one version out of two has one, so the first of them stopped the
+  automatic update for good (every later target crosses the same note). The update now runs as `maxxing update
+  --auto` (new flag, kept as `auto` in `update/after.json`); `smartupdate.after_update()` announces the notes to
+  apply in the feed (`auto-update-notes:<version>`), no session is opened. `tick()` keeps every pass in
+  `auto-update.json` `last` `{at, result, why?}` (GET /api/system/version `auto_update.last`, line under the switch,
+  strings `system.autoLast` / `autoRes.*` / `autoWhy.*`, group `settings`), logs a change of result, looks again
+  after `BUSY_POLL_S` (5 min) when the server was busy, posts "Harness is updating" only after the unit started
+  (new result `failed`), and dedupes "needs you" per version instead of per commit (one per push on beta).
+
+- "Copy the text" (`web/src/features/files/copyText.tsx`: `useCopyChoices`, `CopyTextButton` for a title bar,
+  `CopyTextItems` for a menu; used by `Viewer.tsx`, `FilePreview.tsx`, `pages/files/FileView.tsx`, where the text is
+  the editor's, unsaved changes included). Plain text is made in the browser by `features/files/plainText.ts`
+  (lazy chunk: `markdownToText` walks the mdast of `unified` + `remark-parse` + `remark-gfm`, `htmlToText` walks a
+  `DOMParser` document - nothing of the page runs or loads -, `sheetsToText` gives TSV). `unified` and `remark-parse`
+  were already installed through react-markdown; they are now declared in `web/package.json`. New route
+  `GET /api/files/pdf/text` (`pdftotext`, at most `PDF_TEXT_MAX` 2 MB then `truncated`; a scan gives an empty text).
+  `lib/utils.ts` `copyTextLater(promise)`: a text fetched or converted after the click is handed to the clipboard as
+  a `ClipboardItem` promise (Safari only writes during the click), with `copyText` as the fallback. Its strings are
+  their own dictionary group (`ctext`): the `files` group is part of the first load of a session, whose budget
+  (20,000 bytes, `test_web_first_load`) was full.
+
 ## 2.0.0-alpha.156 - 2026-11-15
 
 - Voice mode hardening (Radar check): `tts.synth` waits at most `SYNTH_TIMEOUT_S` (30 s, `select`) for the Piper
