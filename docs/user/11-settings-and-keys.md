@@ -20,7 +20,7 @@ two blocks):
 | | **Skills** | the skills Claude sees on this server: **yours** (in `~/.claude/skills`, the workspace, a project or a topic, with where each one lives) and the ones **shipped with Harness** (refreshed by every update, read-only); **Open**, **Edit with Claude**, **Share with the community**, **New skill** - see [Skills](skills) |
 | | **MCP** | the MCP servers of Claude Code (a service's tools for Claude): every session or one topic, state, **Connect** (sign-in), **Remove** - see [MCP servers](28-mcp.md) |
 | | **Keys** | your secrets vault (below) |
-| | **Usage** | Claude plan usage (5-hour window, week) and the plan name (Pro, Max, Ultra): the same figures as the bars at the bottom of the sidebar, read from the last Claude answer; a verified **Ultra** account has no 5-hour limit, so only the week is shown; **Show plan usage** (on for new installs) shows them here and adds the dashboard widget (experimental: it may also ask Anthropic directly when no answer came for 10 minutes); tokens per project, topic and session, tokens per day, how fast turns start (Claude Code ready / first answer, median of recent turns) |
+| | **Usage** | **Daily budget**: a ceiling in dollars per day for the whole server (0 = none), counted at the price Claude Code reports for each turn (on a subscription: what the same turns would cost with an API key). A [notification](feed) at 80 %, an alert when it is reached; from then on the scheduled prompt jobs and the agents' triggers wait for the next day (skipped, with the reason), while your own messages, your messages to an agent and **Run now** still run. The card shows what today cost so far. **Start again after the usage limit** (on by default): a scheduled job or an agent run stopped by the usage limit of your Claude plan starts again by itself once the limit resets, plus a delay (60 seconds by default). Then Claude plan usage (5-hour window, week) and the plan name (Pro, Max, Ultra): the same figures as the bars at the bottom of the sidebar, read from the last Claude answer; a verified **Ultra** account has no 5-hour limit, so only the week is shown; **Show plan usage** (on for new installs) shows them here and adds the dashboard widget (experimental: it may also ask Anthropic directly when no answer came for 10 minutes); tokens per project, topic and session, tokens per day, how fast turns start (Claude Code ready / first answer, median of recent turns) |
 | **Automate** | **Crons** | the scheduled jobs: list, run now, history, editor (see [Crons](crons)); old `/crons` links open it |
 | | **Notifications** | a notification (and an optional sound) when a Claude session finishes, pulsing unread badges - saved per browser; then the [notifications feed](feed): its Telegram thread, **Server problems in the notifications**, sources and webhooks |
 | | **Telegram** | bot wizard, linking, mode (simple chat, threads, web mirror), notification options, two-step sign-in (also in Security) – see [Telegram](telegram) |
@@ -83,8 +83,9 @@ The first-run wizard asks the same question (**What will you use?**), and Settin
 soon as a GitHub key is in the vault. An install made before 2.0.0a132 keeps the pages it had.
 
 Under **Sessions**, indented: **Maxxing mode (beta)** and the **line under the answers** (cost, tokens, duration, model: tick what
-it shows) for everyone, and, saved in this browser only (marked **This browser**): the **Tabs mode** (Alt+T; off = Zones) and
-the **HUD**. Under **Team**, while Team is on: **Team bubbles** (the chat bubbles at the bottom right of every page,
+it shows) for everyone, and, saved in this browser only (marked **This browser**): the **Tabs mode** (Alt+T; off = Zones). Below
+the pages: **Harness Browser** (see [Harness Browser](browser)) and **Devices**, off by default (Claude uses your own
+computers and phones, see [Devices](devices)). Under **Team**, while Team is on: **Team bubbles** (the chat bubbles at the bottom right of every page,
 saved in this browser). The notification when a session finishes is in **Settings -> Notifications**, the Claude plan usage
 widget in **Settings -> Usage**, the presentation mode by default in **Settings -> Security**, the Telegram mode in
 **Settings -> Telegram**.
@@ -275,8 +276,10 @@ Store API keys and tokens your projects need (for example `OPENAI_API_KEY`, `SHO
 - **Expose** makes the secret available as an **environment variable** to every Claude session and
   every shell cron job – handy for scripts, and Claude never needs to see the value in a chat;
 - some names are reserved (system variables, variables that make shells, Node, Python or git load
-  code - `NODE_OPTIONS`, `BASH_ENV`, `GIT_SSH_COMMAND`... -, `ANTHROPIC_BASE_URL`, anything starting with
-  `MAXXING_`); an existing key with such a name is kept but no longer exposed.
+  code or send credentials elsewhere - `NODE_OPTIONS`, `BASH_ENV`, `SHELLOPTS`, `CLAUDE_CONFIG_DIR`,
+  `ANTHROPIC_BASE_URL`, `SSH_AUTH_SOCK`... -, anything starting with `MAXXING_`, `GIT_`, `LD_`, `DYLD_`,
+  `PYTHON`, `NODE_`, `BASH_`, `XDG_` or `SSL_`, anything ending in `_PROXY`); an existing key with such a
+  name is kept but no longer exposed.
 
 From scripts and sessions: `maxxing keys list|get|set|delete` (the value of `set` is read from stdin) -
 a script that renews a token writes the new value back this way. Scripts read keys from the

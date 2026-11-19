@@ -33,7 +33,8 @@ def test_parse_fields():
 @pytest.mark.parametrize("bad", ["", "* * * *", "61 * * * *", "* * * * * *", "*/0 * * * *", "5-1 * * * *",
                                  "@sometimes", "a * * * *", "* * 0 * *", "1,,2 * * * *",
                                  "² * * * *", "٣ * * * *", "*/² * * * *",           # Unicode digits: refused
-                                 "0 9 * * monday", "0 9 * january *", "0 9 * * monkey"])  # cron refuses long names
+                                 "0 9 * * monday", "0 9 * january *", "0 9 * * monkey",
+                                 "9" * 5000 + " * * * *", "*/" + "9" * 5000 + " * * * *"])  # cron refuses long names
 def test_parse_errors(bad):
     with pytest.raises(crons.CronError):
         crons.parse(bad)
@@ -673,6 +674,40 @@ def test_an_unreadable_jobs_json_is_never_saved_over(org):
         assert e.value.code == "damaged_jobs"
     assert crons.jobs_path().read_text() == bad
     assert crons.read_crontab() == tab
+
+
+def test_files_nested_too_deep_read_as_damaged_not_a_crash(org):
+    """jobs.json, retries.json or a line of runs.jsonl of 100 000 brackets: the damaged path, not a RecursionError."""
+    a = crons.create_job({"name": "A", "schedule": "0 5 * * *", "command": "echo a"})
+    deep = "[" * 100_000
+    crons.runs_path().write_text(deep + "\n" + json.dumps({"cron_id": a["id"], "status": "ok", "started": 1.0}) + "\n")
+    assert [r["cron_id"] for r in crons.read_runs(a["id"])] == [a["id"]]     # the good line is kept
+    (crons.jobs_path().parent / "retries.json").write_text(deep)
+    assert config.read_json(crons.jobs_path().parent / "retries.json", {}) == {}
+    crons.tick()
+    crons.jobs_path().write_text(deep)
+    assert crons.list_jobs() == []
+    with pytest.raises(crons.CronError) as e:
+        crons.create_job({"name": "C", "schedule": "0 7 * * *", "command": "echo c"})
+    assert e.value.code == "damaged_jobs"
+
+
+def test_a_schedule_that_is_not_text_blocks_nothing(org, capsys):
+    """"schedule": 5 or ["x"] written by hand: that job is skipped, the others are still created, synced, listed."""
+    from maxxing import cmd_cron
+    a = crons.create_job({"name": "A", "schedule": "0 5 * * *", "command": "echo a"})
+    b = crons.create_job({"name": "B", "schedule": "0 6 * * *", "command": "echo b"})
+    d = json.loads(crons.jobs_path().read_text())
+    for j in d["jobs"]:
+        j["schedule"] = 5 if j["id"] == a["id"] else ["x"] if j["id"] == b["id"] else j["schedule"]
+    crons.jobs_path().write_text(json.dumps(d))
+    c = crons.create_job({"name": "C", "schedule": "0 7 * * *", "command": "echo c"})
+    crons.delete_job(c["id"])
+    crons.sync_crontab()
+    with pytest.raises(crons.CronError):
+        crons.job_is_due(crons.get_job(a["id"]))
+    assert cmd_cron._handler(types.SimpleNamespace(cron_cmd="list", json=False)) == 0
+    assert a["id"] in capsys.readouterr().out
 
 
 def test_deleted_lists_even_with_a_bad_date(org, capsys):

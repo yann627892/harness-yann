@@ -10,7 +10,7 @@ Run it when you add or upgrade a dependency. Standard library only (Python >= 3.
 - JavaScript: the production `dependencies` of `web/package.json` and everything they pull in (`web/package-lock.json`),
   bundled into `web/dist`, plus the build-time code Vite and Tailwind embed in it; texts from `web/node_modules`
   (`cd web && npm ci`); the fonts of `web/dist` come from the `@fontsource-variable/*` packages (SIL OFL 1.1);
-- Go: the modules of `pc-agent/go.mod`; texts from the Go module cache when present (`go mod download`).
+- Go: the modules of `link/go.mod`; texts from the Go module cache when present (`go mod download`).
 The output is sorted and has no date or local path: the same inputs give the same file.
 """
 from __future__ import annotations
@@ -251,7 +251,7 @@ def _go_cache() -> Path | None:
 
 
 def go_packages() -> list[dict]:
-    mod = read_text(ROOT / "pc-agent" / "go.mod")
+    mod = read_text(ROOT / "link" / "go.mod")
     reqs = re.findall(r"^\s*(?:require\s+)?([\w.\-]+(?:/[\w.\-~]+)+)\s+(v[\w.\-+]+)", mod, re.M)
     cache = _go_cache()
     out = []
@@ -260,8 +260,25 @@ def go_packages() -> list[dict]:
         d = cache / f"{esc}@{version}" if cache else None
         texts = [(f.name, read_text(f)) for f in license_files(d)] if d else []
         lic = next((license_from_text(t) for _, t in texts if license_from_text(t)), "") or GO_KNOWN.get(name, "")
-        out.append({"eco": "Go", "name": name, "version": version, "group": "compiled into the PC agent", "license": lic,
+        out.append({"eco": "Go", "name": name, "version": version, "group": "compiled into Harness Link (desktop)", "license": lic,
                     "texts": texts, "url": f"https://pkg.go.dev/{name}@{version}?tab=licenses"})
+    return out
+
+
+# ---- Android ------------------------------------------------------------------------------------------------------
+# The direct dependencies of the Harness Link Android app; what they pull in (AndroidX, Kotlin, Okio) is Apache-2.0 too.
+ANDROID_KNOWN = {"androidx.appcompat:appcompat": "Apache-2.0", "com.google.android.material:material": "Apache-2.0",
+                 "com.squareup.okhttp3:okhttp": "Apache-2.0"}
+
+
+def android_packages() -> list[dict]:
+    gradle = read_text(ROOT / "android" / "app" / "build.gradle.kts")
+    out = []
+    for g, a, v in sorted(set(re.findall(r'^\s*implementation\("([\w.\-]+):([\w.\-]+):([\w.\-]+)"\)', gradle, re.M))):
+        name = f"{g}:{a}"
+        out.append({"eco": "Android", "name": name, "version": v, "group": "compiled into Harness Link (Android)",
+                    "license": ANDROID_KNOWN.get(name, ""), "texts": [],
+                    "url": f"https://mvnrepository.com/artifact/{g}/{a}/{v}"})
     return out
 
 
@@ -281,7 +298,9 @@ def render(items: list[dict]) -> str:
         "",
         "- **JavaScript**: bundled into the web interface (`web/dist`), fonts included (SIL Open Font License 1.1).",
         "- **Python**: installed from PyPI into the server's virtual environment by the installer and `maxxing update`.",
-        "- **Go**: compiled into the optional PC agent (`pc-agent/`).",
+        "- **Go**: compiled into the optional Harness Link desktop app (`link/`).",
+        "- **Android**: compiled into the optional Harness Link Android app (`android/`), with the AndroidX, Kotlin and",
+        "  Okio libraries they pull in (Apache-2.0).",
         "",
         "Tools the installer downloads from their publishers (Claude Code, uv, Python, Node.js, Caddy, Chromium, ...)",
         "are not part of this list: they come with their own licenses.",
@@ -295,7 +314,7 @@ def render(items: list[dict]) -> str:
     ]
     lines += [f"| {k} | {v} |" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
     texts: dict[str, list[str]] = {}
-    for eco in ("JavaScript", "Python", "Go"):
+    for eco in ("JavaScript", "Python", "Go", "Android"):
         group = [it for it in items if it["eco"] == eco]
         lines += ["", f"## {eco} ({len(group)})", "", "| Package | Version | License | Use |", "|---|---|---|---|"]
         for it in group:
@@ -322,7 +341,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="exit 1 when THIRD_PARTY_NOTICES.md is not up to date")
     a = ap.parse_args()
-    items = js_packages() + python_packages() + go_packages()
+    items = js_packages() + python_packages() + go_packages() + android_packages()
     text = render(items)
     flagged = sorted(f"{it['eco']} {it['name']} {it['version']}: {it['license'] or 'UNKNOWN'}" for it in items
                      if not it["license"] or COPYLEFT.search(it["license"]))

@@ -26,8 +26,6 @@ import { cn } from '@/lib/utils'
 import { TouchSessionsButton } from '@/components/shell/TouchNav'
 import { Logo } from '@/components/shell/Logo'
 import { useQueryClient } from '@tanstack/react-query'
-import { useUI } from '@/stores/ui'
-import { openHud } from './Hud'
 import { costTip, useCostIsBilled, useResultLine } from './resultLine'
 import { useT, withGroups } from '@/i18n'
 import {
@@ -76,6 +74,7 @@ import { endingCut, forgetLog, getLog, loadEarlier, loadLog, seedEmptyLog, useLo
 import { PlanChip, PlanNotice } from './Plan'
 import { ApprovalCards } from './Approvals'
 import { SessionBrowserBar } from '@/features/browser/SessionBrowser'
+import { SessionDevicesBar } from '@/features/devices/SessionDevices'
 import { MaxxingControls, MaxxingMeter } from './MaxxingMeter'
 import { notifySendFailed, notifySent, useMaxxingEnabled } from './maxxing'
 import { MobileTabsSlot, TabsToggle } from './Tabs'
@@ -126,7 +125,9 @@ export const StripContext = React.createContext<{
 
 /** Phone, tabs view: the open sessions' chips, under the app bar of the session's header. */
 function MobileTabs() {
-  return <>{React.useContext(MobileTabsSlot)}</>
+  const tabs = React.useContext(MobileTabsSlot)
+  // steps aside while typing, like the place row (but stays on a phone held sideways: globals.css)
+  return tabs && <div data-kbd-hide="" data-tabs="">{tabs}</div>
 }
 
 /* ---------------------------------------------------------------- shell */
@@ -486,11 +487,14 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
   }, [])
   const seenFor = React.useRef<number>(0)
   React.useEffect(() => {
-    if (!session || !session.unread || !visible) return
+    if (!session) return
+    // Read when shown: a later "Mark as unread" (same `updated`) stays, only a new answer is marked seen again.
+    if (!session.unread) return void (seenFor.current = session.updated)
+    if (!visible) return
     if (!(focused || variant !== 'column' || count === 1)) return
     if (seenFor.current === session.updated) return
     seenFor.current = session.updated
-    seen.mutate(session.id)
+    seen.mutate(session)
   }, [session, focused, visible, variant, count]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Queued messages of this tab that the server no longer holds (cleared elsewhere) disappear.
@@ -569,17 +573,17 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
     }
   }
 
+  // mutateAsync: the follow-up runs even if the column is gone by then (another page)
   const onStop = () =>
-    stop.mutate(sid, {
-      onSuccess: () => usePending.getState().clearQueued(sid),
-    })
+    stop.mutateAsync(sid).then(
+      () => usePending.getState().clearQueued(sid),
+      () => {},
+    )
 
   const tgLinked = !!tg?.configured && !!tg?.chat
   const authReason = claude && !claude.auth.ok ? t(claude.auth.method ? 'sessions.composer.authExpired' : 'sessions.composer.noAuth') : null
   const dir = absTopicDir(ws, path)
 
-  const qc = useQueryClient()
-  const hudOn = useUI((s) => s.hud)
   // The terminal drawer (Settings -> Features -> Sessions -> Code mode; never for agents): Ctrl+J, /terminal, the session's options.
   const termOn = !!settings?.code_mode && !agentRun && !isAgentPath(path)
   const termOpen = useTermUI((x) => !!x.bySid[sid]?.open) && termOn
@@ -589,17 +593,6 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
     if (dir && !out.some((x) => x.path === dir)) out.push({ path: dir, label: '' }) // '' = "Topic folder" (TermDrawer)
     return out
   }, [session?.code_repos, dir])
-  const hud = () => {
-    const go = (path: string) => {
-      navigate(path)
-      window.focus()
-    }
-    openHud(sid, qc, go).then(
-      (ok) => !ok && toast.error(t('sessions.popupBlocked')),
-      (e) => toast.error(errorMessage(e)),
-    )
-  }
-
   const detach = () => {
     const w = window.open(`/sessions/solo/${sid}`, `mx-solo-${sid}`, 'popup,width=560,height=860')
     if (w) close(col.key)
@@ -726,7 +719,6 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
       onCompact={actions.compact}
       onHandoff={actions.handoff}
       onFolder={dir ? () => navigate(`/files?path=${encodeURIComponent(dir)}`) : undefined}
-      onHud={hudOn && variant !== 'mobile' ? hud : undefined}
       onTerminal={termOn ? () => toggleTerm(true) : undefined}
       onArchive={actions.archive}
       onDelete={actions.del}
@@ -839,6 +831,7 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
         {!notFound && aside.aside && <AsidePanel aside={aside.aside} onClose={aside.close} />}
         {!notFound && <ApprovalCards session={session} />}
         {!notFound && <SessionBrowserBar session={session} />}
+        {!notFound && <SessionDevicesBar session={session} />}
         {!notFound && termOpen && (
           <React.Suspense fallback={null}>
             <TermDrawer

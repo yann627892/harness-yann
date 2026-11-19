@@ -40,9 +40,10 @@ the UI rules [docs/dev/DESIGN.md](docs/dev/DESIGN.md): change the contract docs 
   ```bash
   cd web && npm ci && npm run typecheck && npm run build
   ```
-- **PC agent** (Go), only if you touched `pc-agent/`:
+- **Harness Link** (devices), only if you touched `link/` (Go) or `android/` (Kotlin):
   ```bash
-  cd pc-agent && go test ./...
+  cd link && go test ./...
+  cd android && ./gradlew testDebugUnitTest
   ```
 - A dev server: `MAXXING_STATE=/tmp/hm-dev uv run maxxing serve --port 8801` (each contributor its own port
   8801-8809 and its own state folder).
@@ -82,9 +83,9 @@ set the version at release time):
 1. Run the checks of step 3 for the parts you touched; they must pass.
 2. Push your branch and open a pull request to **`beta`** (not `main`). Fill in the template (tests, changelogs,
    `web/dist`, CLA).
-3. **Sign the CLA**: on your first pull request the CLA bot asks you to post this comment once, exactly and alone:
+3. **Sign the CLA**: on your first pull request, post this comment once, exactly and alone:
    `I have read the CLA Document and I hereby sign the CLA`. Contributing for a company? Sign it on behalf of that
-   entity (see [CLA.md](CLA.md)). The pull request cannot be merged before (its **CLA** check stays red).
+   entity (see [CLA.md](CLA.md)). The maintainers check it before merging: the pull request waits until it is signed.
 
 Commits credit people only: no AI author, no "Generated with" signature, no `Co-Authored-By` naming an AI
 (co-authoring people is fine). Once per clone, `git config core.hooksPath .githooks` turns on the `commit-msg`

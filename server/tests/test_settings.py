@@ -7,7 +7,7 @@ from maxxing import config
 def test_get_defaults(client, org):
     s = client.get("/api/settings").json()
     assert s == {"timezone": "UTC", "language": "en", "public_url": "", "files_root": str(org.tmp),
-                 "presentation_default": False, "usage_widget": False, "tasks_page": False, "git_page": False, "code_mode": False, "infra_page": False, "team_page": False, "agents_page": False, "mail_page": False, "browser_feature": False,
+                 "presentation_default": False, "daily_budget_usd": 0.0, "limit_retry": True, "limit_retry_delay_s": 60, "usage_widget": False, "tasks_page": False, "git_page": False, "code_mode": False, "infra_page": False, "team_page": False, "agents_page": False, "mail_page": False, "browser_feature": False, "devices_feature": False,
                  "maxxing_mode": False,
                  "memory_max_lines": 200, "cpu_priorities": True, "result_line_hidden": [], "donation_hidden": False, "sidebar_order": []}
 
@@ -57,6 +57,8 @@ def test_put_and_validate(client, org):
     assert client.put("/api/settings", json={"timezone": "Mars/Base"}).json()["error"] == "invalid_timezone"
     # `localtime` is a link to /etc/localtime, not a zone: handed to timedatectl it breaks the server's clock
     assert client.put("/api/settings", json={"timezone": "localtime"}).json()["error"] == "invalid_timezone"
+    # `Factory` is a zone for Python but not for browsers (Intl.DateTimeFormat throws: the Crons page broke)
+    assert client.put("/api/settings", json={"timezone": "Factory"}).json()["error"] == "invalid_timezone"
     assert client.put("/api/settings", json={"language": "de"}).status_code == 422
     assert client.put("/api/settings", json={"public_url": "ftp://x"}).json()["error"] == "invalid_url"
     assert client.put("/api/settings", json={"files_root": "/does/not/exist"}).json()["error"] == "invalid_files_root"

@@ -54,9 +54,11 @@ class Limits(BaseModel):
 
 class Trigger(BaseModel):
     id: Optional[str] = None
-    kind: Literal["feed"] = "feed"
+    kind: Literal["feed", "agent"] = "feed"
     enabled: Optional[bool] = None
-    source: Optional[str] = None
+    source: Optional[str] = None                # feed: the feed source
+    agent: Optional[str] = None                 # agent: the path of the agent whose runs start this one
+    on: Optional[Literal["ok", "error", "any"]] = None   # agent: which ends of its runs
     levels: Optional[list[str]] = None
     match: Optional[str] = None
     prompt: Optional[str] = None
@@ -102,6 +104,7 @@ class AgentIn(BaseModel):
     chat_model: Optional[str] = Field(default=None, max_length=80)   # its model ("" = model)
     mail: Optional[list[dict]] = Field(default=None, max_length=10)    # mailboxes of the E-mail page (mail/access.py)
     browser: Optional[dict] = None          # its own browser (maxxing/browser): {enabled, web, sites, profile, ask, wait_min, downloads}
+    devices: Optional[list[str]] = Field(default=None, max_length=30)   # the person's devices it may use (maxxing/devices)
 
 
 def _fields(body: AgentIn) -> dict:
@@ -395,6 +398,7 @@ async def _loop() -> None:
                 last_scan = now
                 await asyncio.to_thread(agents.scan_feed)
                 await asyncio.to_thread(agents.flush_waiting)
+                await asyncio.to_thread(agents.retry_limits)
             if agents.debouncer.pending:
                 await asyncio.to_thread(agents.flush_due)
         except asyncio.CancelledError:

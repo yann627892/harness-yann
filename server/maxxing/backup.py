@@ -65,7 +65,7 @@ PRUNE_DIRS = {".git", "node_modules", "attachments", ".venv", "venv", "__pycache
 DENY_FILES = [r"secrets\.json", r"keys\.json", r"\.env", r".*\.env", r"\.env\..*", r".*\.pem", r".*\.key",
               r".*\.p12", r".*\.pfx", r"id_(rsa|dsa|ecdsa|ed25519).*", r".*credentials.*", r".*\.log",
               r".*\.jsonl", r".*\.sqlite3?", r".*\.db", r"\.netrc", r"\.git-credentials", r".*\.kdbx"]
-_DENY = re.compile("^(?:" + "|".join(DENY_FILES) + ")$", re.I)
+_DENY = re.compile(r"\A(?:" + "|".join(DENY_FILES) + r")\Z", re.I | re.S)    # S, \Z: a newline in a name hides nothing
 
 # Secret FORMATS (not words: memory files legitimately mention variable names).
 LEAKS: list[tuple[str, re.Pattern[bytes]]] = [(k, re.compile(p.encode())) for k, p in [
@@ -75,7 +75,7 @@ LEAKS: list[tuple[str, re.Pattern[bytes]]] = [(k, re.compile(p.encode())) for k,
     ("Slack token", r"(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{10,}"),
     ("AWS access key", r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"),
     ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"),
-    ("Telegram bot token", r"(?<![A-Za-z0-9_:])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"),
+    ("Telegram bot token", r"(?:(?<![A-Za-z0-9_:])|(?<=bot))\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"),
     ("API key (sk-)", r"(?<![A-Za-z0-9_-])sk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}"),
     ("Shopify token", r"(?<![A-Za-z0-9_])shp(?:at|ss|ca|pa)_[a-fA-F0-9]{30,}"),
     ("Stripe key", r"(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}"),
@@ -93,19 +93,21 @@ LEAKS: list[tuple[str, re.Pattern[bytes]]] = [(k, re.compile(p.encode())) for k,
     # digits, not a sentence ("password: in the vault"), a placeholder (<...>, `...`), a variable ($DB_PASS), a link
     # nor a password manager's name ("Password: 1Password") nor the name of the key that holds it ("mdp: SHOP_DB_PASS2",
     # upper case words joined by underscores, each ending with at most two digits, the last one may be a number:
-    # how a password is meant to be noted next to an account; "S3CR3T_P4SS_9X" is not a key name)
+    # how a password is meant to be noted next to an account; "S3CR3T_P4SS_9X" is not a key name; the name ends the
+    # value, with at most one punctuation mark after it: "ADMIN_PASS1:xK9f..." is a password)
     # The lookaheads are bounded: unbounded, a long token such as "password:password:..." rescans the rest of the
     # line at every label and the scan turns quadratic (minutes for a few hundred kB). Quotes around the label and
     # the value are allowed so JSON passwords ("password": "...") are caught too.
-    ("password", r"(?i)(?:password|passwd|mot de passe|mdp)[\"']?[ \t]*[:=][ \t]*[\"']?(?!\$)(?![^\s]{0,256}://)"
+    ("password", r"(?i)(?:(?<![A-Za-z0-9_])(?:password|passwd|pw|pass|mot de passe|mdp|secret|token|api[_-]?key)[\"']?[ \t]*(?:[:=|]|\xef\xbc\x9a)|(?<![A-Za-z0-9_])bearer[ \t]+)[ \t]*[\"']?(?!\$)(?![^\s]{0,256}://)"
                  r"(?!(?:1password|bitwarden|keepass\w*|lastpass|dashlane|protonpass|keychain)\b)"
-                 r"(?!(?-i:[A-Z]+[0-9]{0,2}(?:_[A-Z]+[0-9]{0,2})*_(?:[A-Z]+[0-9]{0,2}|[0-9]+))(?=[\s,.;:)\]|`'\"]|$))"
+                 r"(?!(?-i:[A-Z]+[0-9]{0,2}(?:_[A-Z]+[0-9]{0,2})*_(?:[A-Z]+[0-9]{0,2}|[0-9]+))[,.;:)\]|]?(?=[\s`'\"]|$))"
                  r"(?=[^\s`'\"<>()]{0,128}\d)(?=[^\s`'\"<>()]{0,128}[A-Za-z])[^\s`'\"<>()]{8,}"),
 ]]
 
 # Config keys restored from a backup (paths, network and Telegram ids are server-specific).
 RESTORABLE_CONFIG = ("timezone", "language", "default_model", "permission_mode", "dashboard", "extensions",
-                     "usage_widget", "tasks_page", "git_page", "infra_page", "team_page", "agents_page", "mail_page", "browser_feature", "maxxing_mode", "sidebar_order")
+                     "usage_widget", "tasks_page", "git_page", "infra_page", "team_page", "agents_page", "mail_page", "browser_feature", "devices_feature", "maxxing_mode", "sidebar_order",
+                     "daily_budget_usd")
 
 
 class BackupError(Exception):
@@ -428,7 +430,7 @@ def glob_re(pattern: str) -> re.Pattern[str]:
         else:
             out += re.escape(pattern[i])
             i += 1
-    return re.compile("^" + out + "$")
+    return re.compile(r"\A" + out + r"\Z", re.S)
 
 
 _PRUNE = {d.lower() for d in PRUNE_DIRS}
@@ -498,7 +500,7 @@ def scan(files: dict[str, bytes]) -> list[dict]:
     """-> [{file, kinds}] for every file containing a secret-shaped string."""
     hits = []
     for rel, data in sorted(files.items()):
-        kinds = scan_bytes(data)
+        kinds = sorted(set(scan_bytes(data)) | set(scan_bytes(rel.encode("utf-8", "replace"))))   # the path too
         if kinds:
             hits.append({"file": rel, "kinds": kinds})
     return hits
@@ -768,6 +770,8 @@ def _safe_rel(name: str) -> str | None:
     p = Path(name)
     if p.is_absolute() or ".." in p.parts or not name or name.startswith("/"):
         return None
+    if any(len(part.encode(errors="replace")) > 255 for part in p.parts):   # no file system takes it (ENAMETOOLONG)
+        return None
     return p.as_posix()
 
 
@@ -829,7 +833,11 @@ def _apply(files: dict[str, bytes], hold: bool | None = None) -> dict:
     root = config.workspace()
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
-    trash = config.STATE / "trash" / f"backup-restore-{time.strftime('%Y%m%d-%H%M%S')}"
+    stamp = f"backup-restore-{time.strftime('%Y%m%d-%H%M%S')}"
+    trash, n = config.STATE / "trash" / stamp, 1
+    while trash.exists():                          # a second restore in the same second keeps the first copy
+        n += 1
+        trash = config.STATE / "trash" / f"{stamp}-{n}"
     restored, unchanged = [], 0
     hooks_held: list[str] = []
     # A new server (no session yet: the installer's restore, a move) gets everything back as it was. A server in use
@@ -880,10 +888,13 @@ def _apply(files: dict[str, bytes], hold: bool | None = None) -> dict:
     outside: list[str] = []
     todo = []
     for rel, data in sorted(files.items()):
-        if rel.startswith(META_DIR + "/") or denied(rel):
+        if rel.startswith(META_DIR + "/") or denied(rel) or _safe_rel(rel) is None:   # None: a name no file system takes
             continue
         dest = (root / rel)
-        if root not in dest.resolve().parents:
+        try:
+            if root not in dest.resolve().parents:
+                continue
+        except (OSError, RuntimeError):            # a name too long, a link loop: skipped like an unsafe path
             continue
         if allowed is not None and not any(r.match(rel) for r in allowed):
             aside = trash / "outside" / rel
@@ -914,10 +925,12 @@ def _apply(files: dict[str, bytes], hold: bool | None = None) -> dict:
     jobs = files.get(f"{META_DIR}/crons/jobs.json")
     if jobs is not None:
         try:
+            doc = json.loads(jobs)
+            if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), list) \
+                    or not all(isinstance(j, dict) for j in doc["jobs"]):
+                raise ValueError("not a jobs file")        # never replaces the crons with something else
             if hold:
                 jobs, held["crons"], held_job_ids = _hold_new_jobs(jobs)
-            else:
-                json.loads(jobs)
             if put(_cron_jobs_file(), jobs, "state/crons/jobs.json"):
                 crons_restored = True
                 crons = _crons()

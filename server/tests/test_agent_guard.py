@@ -532,7 +532,9 @@ def test_shell_settings_with_a_secret_stay_hidden():
     from maxxing import agent_guard
     for text in ("export PGPASSWORD=x\n", "export DATABASE_URL=postgres://u:pw@h/db\n", "github_token=ghp_1\n",
                  "MYSECRET=1\n", "readonly NPM_TOKEN=abc\n", "set -x API_KEY abc\n", "export GITHUBTOKEN=1\n",
-                 "export OPENAI_API_KEY=sk-1\n", "declare -rx DB_PASS=1\n", "  export  http_proxy=http://me:pw@proxy:3128\n"):
+                 "export OPENAI_API_KEY=sk-1\n", "declare -rx DB_PASS=1\n", "  export  http_proxy=http://me:pw@proxy:3128\n",
+                 "export PATH=$HOME/bin:$PATH GH_TOKEN=ghp_abc\n", "export EDITOR=vim; export OPENAI_API_KEY=sk-abc\n",
+                 '[ -n "$PS1" ] && export GH_TOKEN=ghp_abc\n', "if true; then export STRIPE_SECRET=sk_live_x; fi\n"):
         assert agent_guard.sets_a_secret(text), text
     for text in ('export PATH="$HOME/.local/bin:$PATH"\nalias ll="ls -l"\n', "export KEYBOARD=fr\n",
                  "export EDITOR=vim\nPS1='\\u@\\h'\n", "export URL=https://example.com/a:b\n", "x" * 200_000 + "\n"):
@@ -570,3 +572,26 @@ def test_a_huge_sandbox_goes_in_a_file(mx):
     assert spawn.settings_args({}, extra) == args                   # the same settings: the same file
     small = spawn.settings_args({}, {"sandbox": {"enabled": True}})
     assert json.loads(small[1])["sandbox"] == {"enabled": True}      # small ones stay inline
+
+
+def test_a_link_to_the_topic_s_own_files_never_makes_them_writable(client, topic, mx):
+    """`notes -> memory.md` (or a folder link to .claude) passes the name filter of writable ".": its target is
+    still one of the topic's own files, read by every session of the owner there."""
+    from maxxing import agent_guard, agents
+    _on(client)
+    _create(client, writable=["."])
+    root = Path(client.get("/api/workspace/tree").json()["root"])
+    t = root / "projects/acme/topics/blog"
+    (t / "memory.md").write_text("m")
+    (t / "notes").symlink_to(t / "memory.md")
+    (t / "role").symlink_to(t / "CLAUDE.md")
+    (t / ".claude").mkdir(exist_ok=True)
+    (t / "cc").symlink_to(t / ".claude")
+    (t / "site").mkdir()
+    a = {**agents.load(A), "sandbox": True}
+    w = agent_guard.writable_dirs(A, a)
+    assert f"{t}/site" in w                                       # negative case: an ordinary folder stays
+    assert not [x for x in w if x in (f"{t}/memory.md", f"{t}/CLAUDE.md", f"{t}/.claude")], w
+    allow = agent_guard.settings(A, a)["sandbox"]["filesystem"]["allowWrite"]
+    assert str(t / "memory.md") not in allow and str(t / "CLAUDE.md") not in allow
+    assert agent_guard.writable_dirs(A, {**a, "writable": ["notes", "role"]}) == []

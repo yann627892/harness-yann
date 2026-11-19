@@ -3,9 +3,74 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
-## Unreleased
+## 2.0.0-alpha.158 - 2026-11-19
 
 New:
+- **Jobs and agents start again right after the usage limit resets.** When a scheduled job or an agent run (started
+  by hand, by a notification, by another agent or by its schedule) is stopped by the usage limit of your Claude plan,
+  it starts again by itself one minute after the reset time Claude gave ("resets 4pm"), instead of trying every 30
+  minutes. Settings -> Usage -> **Start again after the usage limit** (on by default) turns it off or changes the
+  delay.
+- **Mark all your agents as read.** On the Agents page, a **✓✓** button beside the chips of the list marks every
+  agent and group with something to read as read at once, as if you had opened each of them (with a topic chip on,
+  only that topic's). It shows only while something is unread. Thanks to Anthony14FR.
+
+Changed:
+- **Dependencies updated** (minor and patch versions only): Vite 8.3.8, React Router 8.5.1, TanStack Query 5.108,
+  Zustand 5.1, Tailwind CSS 4.3.5, lucide-react 1.74, CodeMirror, FastAPI 0.163, Starlette 1.10, Pydantic 2.14.3,
+  websockets 17.4 and their own dependencies. Thanks to Anthony14FR, who flagged them.
+- **The session list loads about twice as fast on a busy server.** With thousands of sessions (scheduled jobs and
+  agents add many), the list, the sidebar and the dashboard answer in half the time.
+- **The Agents page loads faster when your agents have many runs.** The list of agents read the browser state once
+  per run to count them; it now reads it once.
+- **Mark a session as read or unread.** The menu of a session (right click, or a long press on a phone) in the
+  session list and in the second sidebar has **Mark as read** / **Mark as unread**: the dot and the counters of its
+  topic and project follow. A session marked unread stays so until you open it.
+- **Hide the voice buttons you do not use.** Settings -> Voice -> **Buttons of the message box**: the mic button
+  (dictation and voice messages) and the voice mode button can be turned off; they disappear from every message
+  box, on every device.
+- **A shorter toolbar in a narrow message box.** When the box is narrow (phone, side by side sessions), the model
+  picker shows only its icon; its tooltip and its menu still name the model.
+- **Clearer filters above the session list.** "All / Running / Unread" became an icon (all the sessions) and the
+  two counters of the sidebar's Sessions entry, with the same colours: a click on a counter shows only those
+  sessions, a second click shows them all again. A counter at zero is hidden.
+- **Unread sessions are green on the dashboard too.** In the Activity card, a finished session you have not read
+  yet has a green dot (it was orange), like in the session list; a failed one stays red.
+- **Tasks open as a list on a phone.** The board shows one column at a time on a small screen: the Tasks page now
+  opens on the list there, until you pick another view. Thanks to Anthony14FR.
+- **More room to read a session on a phone.** With a single session open, the tabs bar is gone (it repeated the
+  title under it); while you type, the tabs step aside like the place row; held sideways, the place rows are hidden
+  so the thread keeps most of the screen. Thanks to Anthony14FR.
+
+Fixed:
+- **Sharp image previews in sessions.** A wide picture (a screenshot, a photo in landscape) looked blurry in
+  the thumbnails of the thread, of the attachments and of the message box: its thumbnail is now high enough for its
+  box.
+- **Nothing you asked or typed is lost when you open another page.** A side question ("Question" on the waiting
+  messages) and its answer were gone after a visit to Agents or any other page: they stay now, even after a reload.
+  The text being written in a Team chat is kept per chat. A dictation still being transcribed, or a recording when
+  you leave the page, lands in the draft of its box. Queued messages taken back ("Edit") while you leave go to the draft.
+- **`maxxing agents list` answers several times faster when you have many agents.** It read every scheduled job
+  again for each agent; it reads them once now (with 24 agents: about 290 ms down to 60 ms).
+- **A diff keeps its line numbers in sight when scrolled sideways.** In the Changes view and the pull requests, a
+  long line scrolled the numbers, the + / - and the `@@` headers off screen (often on a phone): they stay at the left
+  edge now. Thanks to Anthony14FR.
+
+## 2.0.0-alpha.157 - 2026-11-18
+
+New:
+- **A daily budget for the whole server.** Settings -> Usage has a **Daily budget** in dollars (0 = none, as
+  before). You get a notification at 80 % and an alert when it is reached; from then on the scheduled jobs and the
+  agents wait for the next day, while your own messages and **Run now** still run. The card shows what today cost
+  so far (at the price Claude Code reports; on a subscription, what the same turns would cost with an API key).
+- **Devices: Claude uses your own computers and phones.** Install the small Harness Link app on a Windows, Mac or
+  Linux computer (one command to paste) or an Android phone (a QR code), accept it, and Claude can look at its
+  screen, click, type and open apps, for what only exists there. Per device: **View only** (Claude looks and guides
+  you) or **Control**, and which projects and agents may use it. Watch it live, take over at any time and hand it
+  back with a word; Claude asks you for passwords, codes and captchas. On a computer, Harness Link runs only while
+  you let it: type `harness-link` in a terminal, it shows there what Claude does, and Ctrl+C stops it. Off by
+  default: Settings -> Features -> Devices. A computer with several screens: pick the one Claude uses in the device's
+  row, and Claude switches screens by itself when it needs another one. [Show me](#show:devices)
 - **Several sessions at once.** In the session list, click a session then Ctrl+click (Cmd on a Mac, or Shift) another:
   all the sessions in between are selected; Ctrl+click on a topic or a project selects all of its sessions. A bar
   then opens, closes, archives or deletes them in one go (Delete key to delete, Escape to let them go).
@@ -16,6 +81,18 @@ New:
   source**, or **Copy as plain text** (the words as you read them, without the marks). A Word document copies as
   Markdown or as plain text, a workbook as cells that paste into a spreadsheet, a PDF as the text read in its pages,
   code, text and CSV files as they are.
+- **Chain your agents.** An agent can now start by itself after another one: in its **When it works**, add **After
+  another agent…**, pick the agent and which of its runs count (those that succeed, those that fail, or all), and,
+  if you want, words its result must contain. Each automatic run of the first agent then hands its result to the
+  next one: a researcher on a schedule, a writer after it, an editor after the writer. **Try with its last result**
+  checks it at once. From a terminal: `maxxing agents after editor writer`.
+
+Changed:
+- **The HUD is gone.** The floating bar that showed one session over your other apps and shared your screen is
+  replaced by Devices: add your computer in **View only** and Claude sees your screen and guides you, without ever
+  clicking.
+- **"Browser of my PC" is gone.** It was prepared but never downloadable; Devices does it and more (Claude uses
+  the whole computer, not only a browser).
 
 Fixed:
 - **Tabs.** The shown tab is now an oval that glides from tab to tab, the other tabs lose their grey background,
@@ -29,6 +106,13 @@ Fixed:
   update topic and say "update"). Under the switch, Settings -> Updates now says when it last looked and what it
   found ("waiting, someone is on the interface", "a session is working", "up to date"...), and a busy server is
   looked at again after 5 minutes instead of 30.
+- **Dependencies with a known vulnerability are updated.** The OpenTelemetry API used by the server
+  (GHSA-mf5v-w3w3-f6cg) and Soup Sieve in the web scraping tools (GHSA-mmhr-3c5m-f64f), both could be slowed down by
+  crafted input; uv 0.13.8 (it trusted a certificate authority that was revoked, GHSA-hq85-5cpj-mr62); fast-uri in the
+  video tools (GHSA-333x-w4r6-6crp and three others). Scrapling and its browser stay on the same versions. Caddy is
+  updated by the system (`apt upgrade caddy`, 2.11.5 or later fixes GHSA-8qx7-j2v2-x6q5).
+- **The weekly "Check dependencies for vulnerabilities" job no longer shows "Failed" when it finds something.** The
+  finding is in the notifications; "Failed" now only means the check itself could not run.
 
 ## 2.0.0-alpha.156 - 2026-11-15
 

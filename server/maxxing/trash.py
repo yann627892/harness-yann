@@ -116,7 +116,7 @@ def _ws_rel(p: Path, real_root: Path | None = None) -> str:
         pass
     try:
         return str(p.resolve().relative_to(real_root or ws.resolve()))
-    except OSError as e:
+    except (OSError, RuntimeError) as e:                # RuntimeError: a loop of symbolic links
         raise ValueError(f"{p}: {e}") from None
 
 
@@ -137,20 +137,33 @@ def _sessions_of(item: Path) -> list[Path]:
 def _side(item: Path) -> dict:
     try:
         d = json.loads(item.with_name(item.name + ".json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):      # RecursionError: JSON nested too deep
         return {}
     if not isinstance(d, dict):
         return {}
     # A damaged sidecar loses its bad fields, not the whole listing: texts are strings without NUL, the
     # date a finite number.
-    side = {k: v for k, v in d.items() if not isinstance(v, str) or "\0" not in v}
+    side = {k: v for k, v in d.items() if not isinstance(v, str) or ("\0" not in v and _utf8_ok(v))}
     for k in ("original", "path", "title"):
         if k in side and not isinstance(side[k], str):
             del side[k]
     at = side.get("at")
-    if at is not None and (isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)):
-        del side["at"]
+    if at is not None:
+        try:
+            ok = isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at)
+        except OverflowError:                           # an integer too big for a float
+            ok = False
+        if not ok:
+            del side["at"]
     return side
+
+
+def _utf8_ok(s: str) -> bool:
+    try:
+        s.encode()
+    except UnicodeEncodeError:                          # a lone surrogate
+        return False
+    return True
 
 
 def _is_extra(p: Path) -> bool:
@@ -221,7 +234,7 @@ def _build(t: Path, root: Path) -> list[dict[str, Any]]:
             continue
         side = _side(p)
         try:
-            at = float(side.get("at") or p.stat().st_mtime)
+            at = float(side.get("at") or p.lstat().st_mtime)
         except OSError:                            # removed meanwhile
             continue
         kind = "previous_versions" if not side and p.name.startswith("backup-restore-") else _kind(p, side)
@@ -242,21 +255,26 @@ def _item(item_id: str) -> Path:
             or len(item_id.encode(errors="replace")) > 255):
         raise TrashError(400, "bad_id", "Invalid trash item")
     p = trash_dir() / item_id
-    if not p.exists() or _is_extra(p):
+    if not (p.exists() or p.is_symlink()) or _is_extra(p):      # a link whose target is not here is an item too
         raise TrashError(404, "not_found", "Not in the trash (already restored or deleted?)")
     return p
 
 
+_restore_lock = threading.Lock()
+
+
 def _free(dest: Path) -> Path:
     """dest, or "<name> (restored)", "<name> (restored 2)"... when something has the name now."""
-    if not dest.exists():
+    if not os.path.lexists(dest):                         # a dangling link is something too
         return dest
-    stem, suffix = (dest.stem, dest.suffix) if dest.is_file() or dest.suffix else (dest.name, "")
+    stem, suffix = (dest.name, "") if dest.is_dir() else (dest.stem, dest.suffix)   # "v1.2" is a folder, not "v1" + ".2"
     n = 1
     while True:
         tag = " (restored)" if n == 1 else f" (restored {n})"
-        cand = dest.with_name(f"{stem}{tag}{suffix}")
-        if not cand.exists():
+        room = 255 - len(f"{tag}{suffix}".encode())          # a file name is at most 255 bytes
+        short = stem.encode()[:max(room, 1)].decode(errors="ignore") if len(stem.encode()) > room else stem
+        cand = dest.with_name(f"{short}{tag}{suffix}")
+        if not os.path.lexists(cand):
             return cand
         n += 1
 
@@ -264,13 +282,13 @@ def _free(dest: Path) -> Path:
 def _free_dir_name(dest: Path) -> Path:
     """Topics and projects need slug names (at most 48 characters): "<name>-restored", "<name>-restored-2"...,
     the name cut to make room for the tag."""
-    if not dest.exists():
+    if not os.path.lexists(dest):
         return dest
     n = 1
     while True:
         tag = "-restored" + ("" if n == 1 else f"-{n}")
         cand = dest.with_name(dest.name[:48 - len(tag)].rstrip("-") + tag)   # still a slug (workspace.SLUG_RE)
-        if not cand.exists():
+        if not os.path.lexists(cand):
             return cand
         n += 1
 
@@ -278,16 +296,22 @@ def _free_dir_name(dest: Path) -> Path:
 def _put_sessions(folder: Path, old_prefix: str | None = None, new_prefix: str | None = None) -> int:
     """Move <sid>.json/.log from a trash folder back into the session store (paths remapped)."""
     from .sessions import store
-    done = 0
+    done, damaged = 0, False
     for meta_p in sorted(folder.glob("*.json")):
         sid = meta_p.stem
-        if not store.is_valid_id(sid) or store.meta_path(sid).exists():
+        if not store.is_valid_id(sid):
+            continue
+        if store.meta_path(sid).exists():              # that id is in use again: its copy stays in the folder
+            damaged = True
             continue
         try:
             meta = json.loads(meta_p.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
+            meta = None
+        if not isinstance(meta, dict):                 # damaged: its files stay in the folder, never deleted
+            damaged = True
             continue
-        path = meta.get("path") or ""
+        path = meta.get("path") if isinstance(meta.get("path"), str) else ""
         if old_prefix is not None and new_prefix is not None and (path == old_prefix or path.startswith(old_prefix + "/")):
             meta["path"] = new_prefix + path[len(old_prefix):]
         meta["state"] = "idle" if meta.get("state") == "running" else meta.get("state", "idle")
@@ -298,7 +322,8 @@ def _put_sessions(folder: Path, old_prefix: str | None = None, new_prefix: str |
             shutil.move(str(log_p), str(store.log_path(sid)))
         meta_p.unlink()
         done += 1
-    shutil.rmtree(folder, ignore_errors=True)
+    if not damaged:
+        shutil.rmtree(folder, ignore_errors=True)
     return done
 
 
@@ -331,14 +356,19 @@ def restore(item_id: str) -> dict[str, Any]:
                 meta = json.loads(mp.read_text())
                 meta["path"] = path
                 config.write_json(mp, meta)
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError, RecursionError):
                 pass
         n = _put_sessions(p)
+        if p.exists():                                      # a damaged file stayed: the item stays in the trash
+            raise TrashError(409, "not_restorable", "This session file is damaged and cannot be restored")
         p.with_name(p.name + ".json").unlink(missing_ok=True)
         bus.invalidate("sessions", "workspace", "trash")
         return {"ok": True, "kind": kind, "restored_to": path, "sessions": n}
     original = Path(side["original"])
-    parents = original.resolve().parents                    # a sidecar never sends a file out of the roots
+    try:
+        parents = original.resolve().parents                # a sidecar never sends a file out of the roots
+    except (OSError, RuntimeError):                         # a name too long, a loop of symbolic links
+        raise TrashError(409, "not_restorable", "This item cannot be restored from here") from None
     if not any(r.resolve() in parents for r in (config.workspace(), config.files_root())):
         raise TrashError(409, "not_restorable", "This item cannot be restored from here")
     # Restoring a topic (an agent) first would make a bare project (topic) folder, which then came back as
@@ -350,9 +380,13 @@ def restore(item_id: str) -> dict[str, Any]:
             raise TrashError(409, "project_in_trash", "Its project is in the trash: restore the project first")
         if kind == "agent" and not topic_dir.is_dir() and _in_trash(topic_dir, "topic"):
             raise TrashError(409, "topic_in_trash", "Its topic is in the trash: restore the topic first")
-    dest = _free_dir_name(original) if kind in ("project", "topic", "agent") else _free(original)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(p), str(dest))
+    try:
+        with _restore_lock:                                 # two restores of the same name must not pick the same free one
+            dest = _free_dir_name(original) if kind in ("project", "topic", "agent") else _free(original)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(p), str(dest))
+    except OSError as e:                                    # the folder it was in is now a file, a read-only disk...
+        raise TrashError(409, "not_restorable", f"Cannot put it back there: {e.strerror or e}") from None
     n = 0
     sess = p.with_name(p.name + ".sessions")
     if sess.is_dir():
@@ -434,7 +468,10 @@ def purge_old(days: int = KEEP_DAYS) -> int:
     cutoff = time.time() - days * 86400
     n = 0
     for p in _entries():
-        at = float(_side(p).get("at") or p.stat().st_mtime)
+        try:
+            at = float(_side(p).get("at") or p.lstat().st_mtime)
+        except OSError:                                 # a broken link or an item removed meanwhile
+            continue
         if at < cutoff:
             _remove(p)
             n += 1
@@ -448,18 +485,31 @@ def trash_session(sid: str) -> Path:
     meta = store.read(sid) or {}
     slug = re.sub(r"[^a-z0-9]+", "-", (meta.get("title") or "session").lower()).strip("-")[:40] or "session"
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest, n = trash_dir() / f"{stamp}-session-{slug}", 1
-    while dest.exists():
+    base = f"{stamp}-session-{slug}"
+    dest, n = trash_dir() / base, 1
+    # The name is reserved by creating its sidecar exclusively (as workspace.move_to_trash does): empty() or a second
+    # delete in the same second must not take the folder before its sidecar exists.
+    while True:
+        sidecar = dest.with_name(dest.name + ".json")
+        if not os.path.lexists(dest):
+            try:
+                os.close(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                break
+            except FileExistsError:
+                pass
         n += 1
-        dest = trash_dir() / f"{stamp}-session-{slug}-{n}"
-    dest.mkdir(parents=True)
-    for ext in (".json", ".log"):
-        src = store._path(sid, ext)                     # noqa: SLF001 - same package family
-        if src.exists():
-            shutil.move(str(src), str(dest / f"{sid}{ext}"))
+        dest = trash_dir() / f"{base}-{n}"
+    try:
+        config.write_json(sidecar, {"original": sid, "at": time.time(), "kind": "session",
+                                    "title": meta.get("title") or "Session", "path": meta.get("path") or ""})
+        dest.mkdir(parents=True)
+        for ext in (".json", ".log"):
+            src = store._path(sid, ext)                 # noqa: SLF001 - same package family
+            if src.exists():
+                shutil.move(str(src), str(dest / f"{sid}{ext}"))
+    except BaseException:
+        sidecar.unlink(missing_ok=True)
+        raise
     store.remove(sid)                                   # locks and run markers
-    config.write_json(dest.with_name(dest.name + ".json"),
-                      {"original": sid, "at": time.time(), "kind": "session",
-                       "title": meta.get("title") or "Session", "path": meta.get("path") or ""})
     bus.invalidate("trash")
     return dest

@@ -49,7 +49,7 @@ Single source of truth between `server/` and `web/`. Change it here first, then 
 
 ## Claude
 | GET | `/api/claude/status` | – | `{installed, version, auth:{ok, method:"oauth_token"\|"credentials"\|"api_key"\|"gateway"\|null, detail, checked_at:float\|null, error:string\|null, ends_at:float\|null}, gateway:{provider:"zen"\|"zen_go"\|"openrouter"\|"custom", name, base_url, models:{opus,sonnet,haiku,test}}\|null, gateways:[{id,provider,name,base_url,models,default:bool}], anthropic:{connected:bool, method:"oauth_token"\|"credentials"\|"api_key"\|null, detail}, default_provider:"anthropic"\|"gateway:<id>", default_model, permission_mode, auto_compact_tokens, idle_compact_tokens, idle_compact_after_s, smart_resume_tokens, protect_secrets:bool, short_titles:bool, short_titles_model:bool, suggestions:bool, auto_update:{enabled:bool, checked_at:float\|null, latest:string\|null, last:{from, to, at:float, ok:bool, error:string\|null}\|null}, models:[{id,label,provider:"anthropic"\|"gateway:<id>",context_window:int\|null}]}` (`context_window`: as last reported by Claude Code on this server, null if never seen; `gateway` = the default LLM gateway (older clients), null = none; `gateways` = every connected gateway, `default` marks the one new sessions use; `anthropic` = the stored subscription token / API key or the CLI's own sign-in; all of them can be connected at once - each entry of `models` carries the credential its turns run on, and `default_provider` is the side of new sessions and background calls) |
-| POST | `/api/claude/auth` | `{kind:"oauth_token"\|"api_key"\|"gateway", value, provider?, base_url?}` | stores the secret then runs a test call → `{ok, error?}`; 400 `invalid` if `value` is shorter than 10 characters or not printable ASCII without spaces; `gateway`: `provider` = `zen`\|`zen_go`\|`openrouter`\|`custom` (default custom), `base_url` = the endpoint (the preset's when omitted; required for `custom`; https only, http on a private address; Claude Code appends `/v1/messages` itself) |
+| POST | `/api/claude/auth` | `{kind:"oauth_token"\|"api_key"\|"gateway", value, provider?, base_url?}` | stores the secret then runs a test call → `{ok, error?}` (when the test fails, the credential stored before is put back); 400 `invalid` if `value` is shorter than 10 characters or not printable ASCII without spaces; `gateway`: `provider` = `zen`\|`zen_go`\|`openrouter`\|`custom` (default custom), `base_url` = the endpoint (the preset's when omitted; required for `custom`; https only, http on a private address; Claude Code appends `/v1/messages` itself) |
 | DELETE | `/api/claude/auth` | `?kind=gateway\|anthropic&id=<gateway id>` | removes the stored token/key/gateway; `kind`: only that side (the others stay connected), omitted: everything; `id` picks one gateway (`zen`, `zen_go`, `openrouter`, `custom`), omitted with `kind=gateway`: every gateway |
 | POST | `/api/claude/test` | `?provider=anthropic\|gateway:<id>` | `{ok, model, ms, error?}` (real one-line call; `provider`: the side to test, omitted = the default one; bare `gateway` = the default gateway) |
 | PUT | `/api/claude/settings` | `{default_model?, permission_mode?, claude_provider?, auto_compact_tokens?, idle_compact_tokens?, idle_compact_after_s?, smart_resume_tokens?, protect_secrets?, short_titles?, short_titles_model?, suggestions?, claude_auto_update?}` | `{ok}` · default_model: empty, or a model id (1-100 of `A-Za-z0-9._:[]/@-`), else 400 `invalid` · claude_provider: `"anthropic"` \| `"gateway:<id>"` - the side of new sessions, titles and summaries (bare `"gateway"` = the default gateway; `default_model` follows to that side's Sonnet), else 400 `invalid` · protect_secrets: deny rules on secrets.json and ~/.ssh for every turn · short_titles (default true): a session created with a message and no title gets a short title in the background, made locally, or by the smallest model with short_titles_model (default false) (INTERNALS.md `maxxing.sessions.titles`) · suggestions (default true): an idle session's composer shows the one follow-up message written by the smallest model, one call per turn at most (INTERNALS.md `maxxing.sessions.suggest`) · claude_auto_update (default false): the server runs `claude update` while idle, only for a release out for 2 days (INTERNALS.md#maxxingclaude_update) · permission_mode ∈ `bypass` (default) \| `acceptEdits` \| `default` · auto_compact_tokens: 0 = off, else a turn ending above it (at least 100 000) queues a summary turn + fresh thread (default 300 000) · idle_compact_tokens (0..2 000 000, default 200 000; 0 = off, else at least 20 000) / idle_compact_after_s (300..604 800, default 3600): a user message to a session idle for longer, with at least that context, is preceded by a summary turn and runs in the fresh thread · smart_resume_tokens (0..2 000 000, default 60 000; 0 = off, else at least 20 000): a user message after a pause of 5 min+ to a session with at least that context (cache expired, or 100 000+) is sorted by a small model call: NEW -> summary turn first, CONTINUE -> no summary, failure -> the idle rule |
@@ -99,13 +99,14 @@ Session = {
   archived: bool, favorite: bool, notify: bool,
   source: "web"|"telegram"|"cron",
   cron: bool,                         // started by a scheduled job (not mirrored on Telegram)
-  unread: bool,                       // finished after the last /seen
+  unread: bool,                       // finished after the last /seen, or marked unread by hand (`{seen:false}`)
   last_text: string,                  // first 200 chars of the last assistant text
   error: string|null,
   plan_mode: bool,                    // turns run read-only (`--permission-mode plan`) and end with a plan
   permission_mode: string,            // set by its cron ("" = the topic's, else the global mode)
   plan_ready: bool,                   // a plan-mode turn finished OK: its plan waits for POST /plan/approve
   approvals: int,                     // tool calls waiting for the user's Allow / Deny (agent with `approvals`)
+  device_asks: int,                   // ask_human requests on the person's devices waiting for them (Devices)
   code_repos: [str]                   // git repositories its turns changed (Changes view, terminal tabs), at most 8
 }
 ```
@@ -116,7 +117,7 @@ Session = {
 | PATCH | `/api/sessions/{id}` | `{title?, model?, provider?, effort?, archived?, notify?, plan_mode?, favorite?, path?}` | `Session` (`plan_mode:false` also clears `plan_ready`; `favorite` is carried over by a hand-off; `path` moves the session to another topic and its Claude transcript with it - `400 bad_path`, `409 busy` while a turn runs or messages wait; `model`: an id of letters, digits and `._:@/[]-`, 100 characters at most, not starting with `-`, else `400 bad_model`, also on create; `provider`: `"anthropic"` \| `"gateway:<id>"` (bare `"gateway"` = the default gateway) - the credential its turns run on, `""` back to the default one, else `400 bad_provider`; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`, else `400 bad_effort`, kept by a hand-off) |
 | POST | `/api/sessions/{id}/plan/approve` | `{text?}` (shown in the thread as the user's message) | `{queued:bool, session:Session}` — plan mode off, then a turn that tells Claude to implement its latest plan (queue item flag `plan_approved`, kept by steer like `hud`) |
 | DELETE | `/api/sessions/{id}` | – | `{ok}` (stops a running turn, moves the session to the trash) |
-| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], hud?:bool, voice?:filepath, client_id?, mentions?:[{kind: session|agent|team, ref}]}` (`mentions`: the @ of the composer, refs from `/mentions` below; the server resolves them (unknown ones and the session itself dropped, at most 8) and adds to the prompt, not to the displayed message, the command that writes to each (`maxxing sessions send` / `agents send` / `team send`); its `user` event keeps `mentions: [{kind, ref, label, group?, avatar?}]` (never the command), drawn as chips; `client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `hud`: sent from the HUD - the prompt gets a short preface: answer short, annotate the screen capture if useful; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
+| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], voice?:filepath, client_id?, mentions?:[{kind: session|agent|team, ref}]}` (`mentions`: the @ of the composer, refs from `/mentions` below; the server resolves them (unknown ones and the session itself dropped, at most 8) and adds to the prompt, not to the displayed message, the command that writes to each (`maxxing sessions send` / `agents send` / `team send`); its `user` event keeps `mentions: [{kind, ref, label, group?, avatar?}]` (never the command), drawn as chips; `client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
 | GET | `/api/sessions/{id}/mentions` | - | `{items:[{kind: session|agent|team, ref, label, hint, state?, avatar?, group?}]}`: who the composer's @ can name - the other sessions (running first, then the most recent 60, not archived, no agent chats), the agents (Agents page on), the Team contacts and groups (Team page on) |
 | DELETE | `/api/sessions/{id}/queue` | – | clears queued messages |
 | POST | `/api/sessions/{id}/ask` | `{question}` | `{answer, cost_usd, duration_ms}` — side question: Claude answers from a throwaway copy of the session's thread (read-only, nothing saved: the running turn, queue and log are untouched). 409 `no_thread` (never answered yet) / `busy` (one already running for this session), 429 (2 running), 504 (240 s) |
@@ -127,7 +128,7 @@ Session = {
 | POST | `/api/sessions/{id}/stop` | – | `{ok}` (clears the queue, aborts the running turn; returns once settled, ≤ ~10 s). During an idle-compaction summary only the summary is aborted: the message waiting behind it (queue item `held`) stays and runs |
 | POST | `/api/sessions/{id}/compact` | – | `{ok}` summary → fresh Claude context, same session · `409 busy` while running · `400 empty_session` |
 | POST | `/api/sessions/{id}/handoff` | – | `Session` (new session seeded with a summary; old one archived). Messages sent to the new session before the summary arrives are queued (`queued:true`) and run after the seed (10 min at most, or at once when the summary fails) |
-| POST | `/api/sessions/{id}/seen` | – | `{ok}` |
+| POST | `/api/sessions/{id}/seen` | `{seen=true}` (optional) | `{ok}` - read; `{seen:false}`: unread again until read ("Mark as unread") |
 | GET | `/api/sessions/{id}/events?tail=N` | – | last events, read backwards from the end (whole log lines, at least N events when available, max 5000): `{events, start, next, more_before:bool, state}` — `start` = offset of the first line returned, `next` = end offset (start the stream there). What the UI uses to open a thread |
 | GET | `/api/sessions/{id}/events?before=<offset>&limit=N` | – | events strictly before `offset` (backward paging, "Show earlier messages"): `{events, start, next:offset, more_before, state}` · `{events:[], reset:true, state}` when `offset` is not a line boundary of the current log |
 | GET | `/api/sessions/{id}/events?from=0` | – | forward reading `{events:[Event], next:int, state, more:bool}` (≤ 4 MB of log per call; `more` = call again from `next`) · `reset:true` when `from` is beyond the end / not a line boundary |
@@ -178,7 +179,7 @@ Every `path` is absolute and inside `files_root` (else `400 bad_path` / `403 for
 | GET | `/api/files/zip?path=&check=0` | – | the folder as a zip (`application/zip`, `<folder>.zip`, `no-store`), made while it is sent: ZIP64, deflate level 6, stored for already-compressed types (images, video, audio, archives, office, PDF, fonts). Everything the listing shows; symlinked folders are not followed, a symlinked file only when its target is a regular file inside the files root; sockets / FIFOs / devices left out; names not UTF-8 read as Latin-1 · not a folder `404` · over 2 GB uncompressed or 100,000 entries `413 too_large` (checked before the first byte) · `check=1`: `{count, size}` (files, uncompressed bytes) or that `413`, nothing zipped: the UI asks first, a refused link download shows no reason |
 | POST | `/api/files/zip` | `{paths: [abs path]}` (1-1000) | several files and folders in one zip, checked: each path confined like every other (symlinks followed, `403` outside, `404` missing, `400` relative), duplicates and entries inside another selected folder left out, a name already taken gets ` (2)`; the 2 GB / 100,000 caps apply to the whole set (`413 too_large`) → `{count, size, name, token, expires_in}` (`name`: `<their folder>.zip`, or `files.zip` when they come from several folders) |
 | GET | `/api/files/zip?token=` | – | the zip of that POST (same session cookie only, valid `expires_in` = 120 s), planned again from the paths as they are now (`413` if it grew past a cap) · unknown / expired / another session `404`. A link download cannot POST: the browser follows this URL |
-| GET | `/api/files/thumb?path=&w=320&v=&anim=0` | – | webp thumbnail for images, videos and PDFs (ffmpeg, video: frame at 1 s; PDF: first page through `pdftoppm`), cached server side; without ffmpeg images fall back to the original · other types `415`. `w` ≤ 4096. `anim=1` (chat): a `.gif` of at most 8 MB (`GIF_ANIM_MAX`) is served as it is (`image/gif`, it moves), a bigger one gets the still. Cache: `no-cache` (revalidated), or for good with `v`. Same CSP rule as `/raw` (an SVG fallback is sandboxed) |
+| GET | `/api/files/thumb?path=&w=320&h=0&v=&anim=0` | – | webp thumbnail for images, videos and PDFs (ffmpeg, video: frame at 1 s; PDF: first page through `pdftoppm`), cached server side; without ffmpeg images fall back to the original · other types `415`. `w` ≤ 4096; `h` (images, videos): at least this height too, for a box of fixed height (wide pictures). `anim=1` (chat): a `.gif` of at most 8 MB (`GIF_ANIM_MAX`) is served as it is (`image/gif`, it moves), a bigger one gets the still. Cache: `no-cache` (revalidated), or for good with `v`. Same CSP rule as `/raw` (an SVG fallback is sandboxed) |
 | GET | `/api/files/preview?path=&w=2048&v=` | – | the image for the viewer: a WebP at most `w` px wide (64-4096, default 2048) when the original is heavy (over 300 kB, or a format the browser cannot show: then converted), else the original (`.gif` and `.svg` always as they are; no ffmpeg: the original). `v`: as on `/raw` · `404 not_found` · `415 unsupported` (not an image, or a format this server cannot convert) |
 | GET | `/api/files/archive?path=` | – | lists a zip, tar (gz/bz2/xz) or single `.gz` without extracting it: `{path, format:"zip"\|"tar"\|"gzip", entries:[{name, size, dir, mtime}], count, total_size, truncated, size}` (at most 5,000 entries, 256 MB read and 3 s: then `truncated`; cached per file version) · `404 not_found` · `415 unsupported` (another format, or unreadable) |
 | GET | `/api/files/pdf?path=` | – | `{pages, ratio, mtime}` for the page-by-page PDF reader (browsers that show no PDF in the page: most phones): number of pages, height / width of the first one (`pdfinfo`) · `404 not_found` · `415 unsupported` (unreadable or protected PDF, or `pdfinfo` / `pdftoppm` / `ffmpeg` missing: the UI keeps the browser's own viewer) |
@@ -297,7 +298,7 @@ health problems itself every 60 s (not `cron_failed` nor
 | DELETE | `/api/backup` | – | forget repo + token (`409 busy` while a backup or restore runs) |
 
 ## Settings & secrets
-| GET / PUT | `/api/settings` | `{timezone, language:"en"\|"fr", public_url, files_root, presentation_default?, usage_widget:bool, git_page:bool, infra_page:bool, mail_page:bool, maxxing_mode:bool, memory_max_lines:int, cpu_priorities:bool, result_line_hidden:["model"\|"duration"\|"cost"\|"tokens"\|"cache"], donation_hidden:bool}` (`donation_hidden`: hides the donation links of What's new, Feedback and Settings -> License for every browser, default false; the Support card of Settings -> About stays) (`result_line_hidden`: parts of the line under each answer that are hidden, default `[]`, unknown values = 422, stored in canonical order) (`git_page`: the Git page `/git` and its sidebar entry, default false) (`maxxing_mode`: beta, Maxxing mode of the Sessions page - its switch, meter, driver and Alt+M -, default false) (`memory_max_lines`: 0 = no limit, else 50-5000, default 200) (`cpu_priorities`: CPU weights of the server / turns / jobs slices, default true; a change rewrites the slices at once, `cmd_core.ensure_cpu_slices`) — a new `timezone` also switches the server zone (`timedatectl`, cron restarted); PUT ignores the fields equal to the stored config (neither checked nor applied: the web app sends the whole object) |
+| GET / PUT | `/api/settings` | `{timezone, language:"en"\|"fr", public_url, files_root, presentation_default?, daily_budget_usd:number ($ per day for the whole server, 0 = no budget, at most 100000; `400 invalid_daily_budget`), limit_retry:bool, limit_retry_delay_s:int, usage_widget:bool, git_page:bool, infra_page:bool, mail_page:bool, devices_feature:bool, maxxing_mode:bool, memory_max_lines:int, cpu_priorities:bool, result_line_hidden:["model"\|"duration"\|"cost"\|"tokens"\|"cache"], donation_hidden:bool}` (`donation_hidden`: hides the donation links of What's new, Feedback and Settings -> License for every browser, default false; the Support card of Settings -> About stays) (`result_line_hidden`: parts of the line under each answer that are hidden, default `[]`, unknown values = 422, stored in canonical order) (`git_page`: the Git page `/git` and its sidebar entry, default false) (`maxxing_mode`: beta, Maxxing mode of the Sessions page - its switch, meter, driver and Alt+M -, default false) (`memory_max_lines`: 0 = no limit, else 50-5000, default 200) (`limit_retry`: a cron job or an agent run stopped by Claude's usage limit starts again `limit_retry_delay_s` after the reset read from the message or the reported limits, default true and 60; delay 0-3600, `400 invalid_limit_retry_delay`) (`cpu_priorities`: CPU weights of the server / turns / jobs slices, default true; a change rewrites the slices at once, `cmd_core.ensure_cpu_slices`) — a new `timezone` also switches the server zone (`timedatectl`, cron restarted); PUT ignores the fields equal to the stored config (neither checked nor applied: the web app sends the whole object) |
 | PUT | `/api/settings/look` | `{theme:"dark"\|"light"\|"system", accent:"blue"\|"clay"\|"violet"\|"green"\|"amber"\|"rose", tint?:"neutral"\|"tinted"}` | `{ok, look}` · sent by the web app 600 ms after a change of theme / accent / tint (config `look`) · `422` bad value |
 | GET / PUT | `/api/settings/profile` | `{name ≤32, color: "clay"\|"blue"\|"violet"\|"green"\|"amber"\|"rose"\|"teal"\|"zinc", emoji}` | `Profile` `{name, color, emoji, photo, photo_url}` (bus `profile`; PUT keeps the photo; `photo` = 16 hex of the photo's SHA-256, `""` = none) · `400 invalid_color\|invalid_emoji\|invalid_name` (a lone surrogate in `name` or `emoji` is refused) |
 | GET / PUT / DELETE | `/api/settings/profile/photo` | PUT: the image bytes (JPEG, PNG or WebP by their first bytes, ≤ 512 KB; the UI sends a 256 px square) | GET the photo (`?v=` = version, cached for good); PUT / DELETE `Profile` · `400` `too_large` / `not_an_image` / `empty` (`maxxing/profile_photo.py`; Team contacts get the new version) |
@@ -335,41 +336,64 @@ McpServer = {id:"<scope>|<folder>|<name>", name, scope:"user"|"local"|"project",
 | POST | `/api/mcp/login/{login}` | `{redirect}` (the localhost callback URL) | `{ok, message}` · `400 bad_redirect\|login_failed`, `404 login_expired` (also cancelled meanwhile), `409 busy` (already being finished), `504 timeout` |
 | DELETE | `/api/mcp/login/{login}` | – | `{ok}` |
 
-## Browser of my PC
-`maxxing/pcbridge.py` + `api/pc.py`. One paired PC runs the Harness PC agent (`pc-agent/`, contract
-`pc-agent/PROTOCOL.md`); Claude reaches its browser through the user-scope MCP `harness-pc`.
+## Devices
+`maxxing/devices/` + `api/devices.py`, feature `devices_feature` (Settings -> Features, off by default). The person's
+computers and phones run Harness Link (`link/`, `android/`; contract `link/PROTOCOL.md`, v2) and connect OUT to this
+server; Claude uses them through the per-turn MCP `harness-devices` (`devices_mcp.py`, stdio, given by the runner to a
+turn that sees at least one device).
 ```
-PcStatus = {available, device:{id,name,os,arch,browser,browsers,version,created,last_seen}|null, online,
-  browser_running, mcp_running, last_use|null, mcp_registered, pairing:{expires_at,browser,os}|null,
-  candidate, settings:{idle_min}, browsers:[…], targets:[…], actions:[{at,tool,ok,ms,args:{url?,…}}]}   (newest first, 20)
-available = a Harness PC can be downloaded (MAXXING_PC_BIN_DIR, or files listed in pc_agent.json); the UI hides the
-  card while it is false and no PC is paired
-candidate = {id,name,os,arch,version,created,ip}|null in PcStatus: a PC that paired with a code and waits for the user
-PcPairing = {code, expires_at, expires_in, server, downloads:{<target>:url}, commands:{windows,darwin,linux}}
-target = windows-amd64|windows-arm64|darwin-arm64|darwin-amd64|linux-amd64|linux-arm64
+Device = {id:"dev_<8 hex>", name, os:"linux"|"darwin"|"windows"|"android", os_name, kind:"desktop"|"android", arch,
+  version, created, last_seen, confirmed:bool, mode:"view"|"control", scope:["*"] | ["project:<name>", "agent:<path>"],
+  caps:[…], screen:{w,h,scale}|null, note, ip,
+  online, paused, human (the person has it), claude (Claude acted in the last 15 s), used_by:{session,owner,at}|null,
+  watched, hello:{v,os,arch,caps,screen,note}|null}
+DevicesStatus = {feature, available:[<target>…] (what can be downloaded now), latest (link.json version), devices:[Device],
+  invites:[{os, expires_at}] (codes not used yet), asks:[DeviceAsk], actions:[{at,device,tool,args,ok,ms,session,owner,error?}]}
+DeviceInvite = {code (8 characters, once, 15 min), os, expires_at, expires_in, server, commands:{sh, ps1}, link
+  (<server>/link/<code>, the phone's page = the QR code), deeplink (harnesslink://pair?s=<server>&c=<code>),
+  downloads:{<target>: url}}
+DeviceAsk = {id, session, owner:"session:<path>"|"agent:<path>", device, device_name, message, at, expires, status, note}
+target = linux-amd64|linux-arm64|darwin-amd64|darwin-arm64|windows-amd64|windows-arm64|android
 ```
+Who sees a device: its `scope` (a session of project `acme`: `*` or `project:acme`), and an agent turn only the ids of
+its agent.json `devices` (a free agent also the devices whose scope names it: `agent:<path>`). `mode: view`: Claude
+gets `devices`, `screenshot`, `zoom`, `ui_tree`, `ask_human`, `wait`, `screen` only (`screen {device, screen: n|-1}`
+sets the device's `display` like `PUT`, waits up to 3 s for the app's new hello, answers with a shot). Downloads: `MAXXING_LINK_BIN_DIR` (a local
+build), else the release of `maxxing/link.json` (`{version, url, files:{<name>: sha256}}`, cached in
+`<state>/devices/bin/`, checked). A desktop binary is sent with the trailer `<json {server, code}><uint32 BE
+len>HMLINK01`; the APK as it is. The public code routes count wrong codes per client: 20 in 10 min -> `429 throttled`.
+They answer `404 off` while the feature is off.
+
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/pc` | – | `PcStatus` |
-| POST | `/api/pc/pairing` | `{browser, os, autostart?}` | `PcPairing` (code valid 15 min, replaces the previous one) · `422 invalid`, `409 no_agent` (nothing to download) |
-| POST | `/api/pc/confirm` | `{id, ok?:true}` | `{ok}` - yes: the candidate becomes the PC (replaces the previous one, MCP registered); no: its agent gets `unpair` · `ok:false` when it is not the candidate or expired (15 min) |
-| PUT | `/api/pc/settings` | `{idle_min}` (1–240) | `{idle_min}` |
-| POST | `/api/pc/stop` | – | `{ok}` - closes the browser and the tools |
-| POST | `/api/pc/wipe` | – | `{ok}` · `409 offline`, `502 pc_error` |
-| POST | `/api/pc/test` | – | `{ok, text}` (`list_pages` through the MCP path) |
-| POST | `/api/pc/mcp/register` | – | `{ok}` · `409 not_paired` |
-| DELETE | `/api/pc` | – | `{ok}` - unpairs (the agent removes its autostart and exits), MCP removed |
-| POST | `/api/pc/pair` | `{code, name, os, arch, version, browsers}` | `{device_id, token}` - the PC is a `candidate` until `/confirm` · public, `403 bad_code\|expired` |
-| GET | `/api/pc/download/{target}?code=` | – | the agent binary + config trailer, streamed from the cached agent (`Content-Length` set) · public, `403`, `404` |
-| GET | `/api/pc/install.ps1\|sh?code=&target=` | – | install script (downloads, starts) · public |
-| WS | `/api/pc/ws` | `Authorization: Bearer <device token>` | agent control + DevTools frames (PROTOCOL.md) · close `4401` |
-| WS | `/api/pc/cdp` | `X-PC-Secret` | loopback only: DevTools relay for chrome-devtools-mcp · close `4403` |
-| POST | `/api/pc/mcp` | JSON-RPC, `Authorization: Bearer <mcp secret>` | loopback only: MCP (streamable HTTP, JSON) `initialize`, `ping`, `tools/list`, `tools/call` · `403` - a `url` of the PC itself or its local network (localhost, private / link-local IPs in any IPv4 form, bare names, `.local`, `.lan`…) is refused like `file:` |
+| GET | `/api/devices` | – | `DevicesStatus` |
+| POST | `/api/devices/invites` | `{os?}` | `DeviceInvite` · `409 off` (feature off), `429 too_many` (10 codes waiting) |
+| POST | `/api/devices/{id}/confirm` | `{ok}` | `{ok}` - yes: the device may be used; no: it is dropped and its app gets `unpair` · `ok:false` when it does not wait |
+| PUT | `/api/devices/{id}` | `{name?, mode?: view\|control, scope?, display?: -1..15 (screen used, -1 = main)}` | `Device` (+ `screens`: the last `hello.screens`, kept offline) · `400 bad_scope`, `404`, `422` |
+| DELETE | `/api/devices/{id}` | – | `{ok}` - its token is revoked at once, its app gets `unpair` (forgets this server, stops), its requests are skipped |
+| GET | `/api/devices/session/{sid}` | – | `{using:[{id,name,os,online,human,at}], asks:[DeviceAsk]}` - the session's line ("Claude is using …") |
+| GET | `/api/devices/asks?session=` | – | `{asks:[DeviceAsk]}` (pending) |
+| POST | `/api/devices/asks/{id}` | `{action: done\|skip, note?}` | `DeviceAsk` (decided; the person's control is released) · `404`, `409 decided` |
+| POST | `/api/devices/live-token` | – | `{token}` (30 s, one use) for `WS /api/devices/{id}/live?t=` |
+| WS | `/api/devices/{id}/live?t=` | the signed-in cookie + a live token | binary JPEG pictures (~3/s, only while someone watches) + `{"t":"state", device: Device, me, asks}`; in: `{"t":"input", a, x, y, x2?, y2?, sw, sh, button?, double?, dx?, dy?, text?, keys?, ms?}` (pixels of the picture shown, `sw`/`sh` its size: the person takes over), `{"t":"take"}`, `{"t":"release", done?: true\|"skip", note?}` (answers the device's pending requests) · close `4403`, `4404` |
+| GET | `/api/devices/install/<code>.sh\|ps1` | – | install script: stops an older copy and removes its login entry, downloads the app with its trailer, puts it on the PATH, then runs it in the foreground of that terminal (sh: `~/.local/bin/harness-link`, quarantine removed on macOS, `exec … </dev/tty`; ps1: `%LOCALAPPDATA%\HarnessLink\harness-link.exe`, user `Path`) · public, `400 bad_code`, `410 expired`, `429` |
+| GET | `/api/devices/download/{target}?code=` | – | the app (desktop: + pairing trailer; `Content-Length` set; android: the APK) · public, `400`, `404 not_available`, `410`, `429` |
+| POST | `/api/devices/pair` | `{code, name, os, arch, version, caps}` | `{device_id, token}` - the code is used up, the device waits for `/confirm` · public, `400 bad_code`, `410 expired`, `409 too_many`, `422`, `429` |
+| WS | `/api/devices/ws` | `Authorization: Bearer <device token>` | Harness Link protocol v2 (PROTOCOL.md); a device not accepted yet is held (it gets `{"t":"access","ok":false}`), then `access` `ok:true` once accepted or `unpair` if refused or after 15 min; `access` again when its mode changes; `display` (the screen chosen, `PUT {display}`), `watch` (live view open) · unknown / revoked token: refused before the handshake (HTTP 403) |
+| POST | `/api/devices/mcp/{sid}` | JSON-RPC, `Authorization: Bearer <the turn's token>` | loopback only: `tools/list`, `tools/call` of the turn (`<state>/devices/turns/<sid>.json`) · `403` |
+
+`GET /link/<code>` (public, not under /api): the phone's pairing page - Download the app (APK), Open in Harness Link
+(the deep link), the server and the code to type by hand; `410` when the code expired or was used, no script.
+
+Server -> device frames (v2) and what the server adds: `shot {id, max_w, quality}` (+ `crop:{x,y,w,h}`, `sw`, `sh` for
+`zoom`: a region in the space of the last picture; an app that ignores it sends the whole screen), `input {id, a, x, y,
+x2, y2, sw, sh, button, double, dx, dy, text, keys, ms}`, `tree {id, sw, sh}`, `tap_node {id, node}`, `set_text {id,
+node, text}`, `apps {id}`, `open {id, app}`, `state {busy, by: "claude"|"human"|null}`, `unpair`.
 
 ## Voice (speech-to-text)
 Claude cannot listen: audio is transcribed on the server (web mic button + Telegram voice notes).
 ```
-VoiceStatus = {settings:{engine:"off"|"local"|"groq"|"openai", model:"tiny"|"base"|"small"|"medium", language:"auto"|"<iso>", auto_send:bool, direct:bool},   // direct (default true): the web mic sends the recording at once
+VoiceStatus = {settings:{engine:"off"|"local"|"groq"|"openai", model:"tiny"|"base"|"small"|"medium", language:"auto"|"<iso>", auto_send:bool, direct:bool, mic:bool, call:bool},   // mic / call (default true): the mic button and the voice mode button of the message boxes;   // direct (default true): the web mic sends the recording at once
   ready:bool, reason:"off"|"no_ffmpeg"|"not_installed"|"no_key"|null, ffmpeg:bool,
   local:{installed, loaded:str|null, recommended, ram_gb, cpus, models:[{id, size_mb, present}]},
   keys:{groq:bool, openai:bool}, key_names:{groq:"GROQ_API_KEY", openai:"OPENAI_API_KEY"},
@@ -379,8 +403,8 @@ VoiceStatus = {settings:{engine:"off"|"local"|"groq"|"openai", model:"tiny"|"bas
 | GET | `/api/voice` | – | `VoiceStatus` (the UI polls it every second while `install.state = running`) |
 | PUT | `/api/voice/settings` | partial settings | `{ok, settings}` · `400 invalid_language` · `422` bad enum. Default model when never chosen: `small` (`base` with < 4 GB RAM) |
 | POST | `/api/voice/install` | `{model?}` | starts the background job: `uv sync --extra voice` when faster-whisper is missing, then the model download → `install` object · `409 busy` |
-| DELETE | `/api/voice/models/{model}` | – | `{ok}` (deletes a downloaded local model) |
-| POST | `/api/voice/transcribe` | multipart `audio` (+ form `path`? topic path, `language`?) | `{text, language, duration_s, engine, model, ms, audio_path}` — `path` keeps the original file in `<topic>/attachments/voice/YYYY-MM/` (`audio_path`, else null). Any format ffmpeg reads (webm/opus, ogg/opus, m4a, mp3, wav, mp4), ≤ 100 MB, ≤ 15 min · `409 voice_off` · `503 not_installed\|no_key\|no_ffmpeg` · `413 too_long\|too_large` · `422 bad_audio\|empty_audio` · `502 engine_error\|bad_key\|download_failed` |
+| DELETE | `/api/voice/models/{model}` | – | `{ok}` (deletes a downloaded local model) · `409 busy` while that model is being installed |
+| POST | `/api/voice/transcribe` | multipart `audio` (+ form `path`? topic path, `language`?) | `{text, language, duration_s, engine, model, ms, audio_path}` — `path` keeps the original file in `<topic>/attachments/voice/YYYY-MM/` (`audio_path`, else null). Any format ffmpeg reads (webm/opus, ogg/opus, m4a, mp3, wav, mp4), ≤ 100 MB, ≤ 15 min · `400 bad_path` (`path` not a topic, `/` included) · `409 voice_off` · `503 not_installed\|no_key\|no_ffmpeg` · `413 too_long\|too_large` · `422 bad_audio\|empty_audio` · `502 engine_error\|bad_key\|download_failed` |
 
 Telegram: voice notes and video notes in a session thread (not audio files: attachments) are downloaded, transcribed, echoed as
 `🎤 <transcript>` and sent to the session as the user message (attachment = the audio file). Engine off → a hint.
@@ -497,8 +521,14 @@ Limits = {usd_per_day: 2.0 (0 = none), runs_per_hour: 6 (0 = none), timeout_s: 1
           approval_timeout_s: 1800}
 Trigger = {id: "t_<hex>", kind: "feed", enabled, source (feed source), levels: [info|success|warning|error] ([] = all),
            match (substring of title / body, "" = any), prompt, hook_id? (the feed hook made for it)}
+        | {id: "t_<hex>", kind: "agent", enabled, agent (path of another agent; itself -> 400, unknown when added -> 404),
+           on: "ok"|"error"|"any" (default ok), match (substring of its result, "" = any), prompt}
+          an "agent" trigger starts the agent on the result of each automatic run of `agent` (not the owner's
+          conversation, not a group's turns), debounced like feed events, one hop deeper; its runs have
+          trigger "after:<trigger id>", source "agent <name>"; trigger_stats counts them; /test starts it now on the
+          other agent's last result (-> the fire answer, not {event})
 AgentMessage = {id, at, kind: "note"|"run"|"skip"|"result", text,
-                trigger?: "manual"|"cron:<job>"|"feed:<trigger>"|"telegram"|"agent:<path>", source?,
+                trigger?: "manual"|"cron:<job>"|"feed:<trigger>"|"after:<trigger>"|"telegram"|"agent:<path>", source?,
                 session?: sid, reason? (skip), ok?: bool (result), cost?: number|null (result), status? (note),
                 outside?: true (result of a run started by outside text: left out of the owner's new conversation; another start that gets it as context asks first),
                 reply_to?: message id (run that continued a session), attachments?: [filepath] (run)}
@@ -968,7 +998,7 @@ Block =
 | PATCH | `/api/extensions/{id}` | `{enabled?, pinned?}` | `{ok}` (`pinned` on a widget -> 400 `not_a_page`) |
 | PUT | `/api/extensions/pins` | `{order: [id]}` (≤ 200) | `{pinned: [id]}`: the pinned pages in their new sidebar order (the given ids first, then the pins it does not mention; an id that is not pinned is ignored: this never pins anything) |
 | POST | `/api/extensions/reload` | – | rescans `<workspace>/extensions` |
-| ANY | `/api/ext/{id}[/{path}]` | – | forwarded to the extension's `api.py` `handle()`: return value → JSON, `(status, body)` tuple sets the status, `ValueError` → 400, `LookupError` → 404, other → 500 `extension_error`, 30 s timeout (504 `extension_timeout`), 503 `extension_busy` at once while an earlier timed-out `handle()` of the same extension has not returned, or when the 4 extension threads are all still running earlier calls. A `.` / `..` segment in `path` → `400 bad_path` |
+| ANY | `/api/ext/{id}[/{path}]` | – | forwarded to the extension's `api.py` `handle()`: return value → JSON, `(status, body)` tuple sets the status (an int from 200 to 599, else 500 `extension_error`; 204 / 304 are sent without a body), `ValueError` → 400, `LookupError` → 404, other → 500 `extension_error`, 30 s timeout (504 `extension_timeout`), 503 `extension_busy` at once while an earlier timed-out `handle()` of the same extension has not returned, or when the 4 extension threads are all still running earlier calls. A `.` / `..` segment in `path` → `400 bad_path` |
 | GET | `/ext/{id}/page.js` | – | page module (ES module) |
 | GET | `/ext/ui-kit.css` | – | the UI kit of extensions (`server/maxxing/assets/ui-kit.css`): `ui-*` classes scoped to `.mx-ext` (page host) and `[data-mx-kit]` (widget frame), built on the theme variables; the app adds it once when a page extension opens; `ETag` (content hash), `If-None-Match` -> `304` |
 | GET | `/ext/{id}/widget-frame` | – | HTML widget document: the bridge (`maxxing.api / resize / theme`, theme, material and variables from the URL fragment, then by message; `<html data-theme data-material>`) + the UI kit inlined (`<html data-mx-kit>`) + `widget.html`, `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock` (the UI frames it with the same sandbox; an srcdoc frame would inherit the app's script policy). `/ext/{id}/widget.html` stays the raw file (text/plain) |
@@ -1004,6 +1034,7 @@ Built-in card links are SPA routes: `/sessions/<id>`, `/sessions`, `/tasks?task=
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/stats/tokens?force=1` | – | `{totals, projects:[{name, …}], topics:[{path, label ("acme / blog", "acme / blog / Writer" for an agent folder), agent (display name or null), …}], sessions:[{id, title, path, archived, updated, …}] (top 100), days:[{date, tokens, cost_usd}] (90 days), latency:{start_s, first_answer_s, turns}, at}` (latency: medians over the last 20 turns of every session: seconds from starting `claude` to its first event / first answer); each group has `input, output, cache_read, cache_write, total, cost_usd, turns, sessions` (sorted by `total`; project `""` = workspace root). Cached 20 s |
+| GET | `/api/stats/budget` | – | the server's daily budget: `{usd_per_day (settings `daily_budget_usd`, 0 = none), spent_today ($ of today in the Harness time zone, every session, job and agent), reached:bool}`. Once reached, scheduled prompt jobs and agent triggers wait for the next day (run `skipped`, reason `limit`); the user's own messages and "Run now" still run. Notifications: one at 80 %, an alert when reached (ref `budget:reached`, closed when work runs again) |
 
 ## Feed (notifications)
 `FeedEvent = {id, at, source, level: "info"|"success"|"warning"|"error", title, body, url, count, read, actions:

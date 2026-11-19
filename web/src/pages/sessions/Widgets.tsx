@@ -143,14 +143,14 @@ export function ModelPicker({
             )}
           >
             <Cpu className="size-3.5 shrink-0" />
-            {/* narrow composer + a pending switch: only "-> next model" (the tooltip says which one answered) */}
-            <span className={cn('truncate', differs && '@max-sm:hidden')}>{label}</span>
+            {/* narrow composer (the gauge's ring look): the icon only, the tooltip names the model and the gateway */}
+            <span className={cn('truncate @max-md:hidden', differs && '@max-sm:hidden')}>{label}</span>
             {gw && (
               <span className="shrink-0 rounded bg-muted px-1 text-[10px] font-normal whitespace-nowrap text-muted-foreground max-sm:hidden">
                 {gw}
               </span>
             )}
-            {onEffort && effort && <span className="shrink-0 text-[10px] text-muted-foreground/80">· {t(`effort.${effort}`)}</span>}
+            {onEffort && effort && <span className="shrink-0 text-[10px] text-muted-foreground/80 @max-md:hidden">· {t(`effort.${effort}`)}</span>}
             {differs && (
               <span className="shrink-0 rounded bg-warning/15 px-1 text-[10px] whitespace-nowrap text-warning">
                 → {modelLabel(next, models)}

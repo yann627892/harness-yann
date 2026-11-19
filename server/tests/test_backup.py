@@ -106,11 +106,13 @@ def test_scanner_ignores_names():
     for ok in ("password: in the vault (Settings -> Keys)", "mot de passe : `<PASSWORD>`", "passwd = changeme",
                "password: see accounts", "| mdp: 1Password |", "password=$DB_PASS_2024",
                "- Password: https://vault.bitwarden.com/#/vault?itemId=4f2a", "sk_live_ keys start like this", "the eyJ prefix of a JWT",
-               "(mdp : SHOP2_CF_PASSWORD)", "password: SMTP_PASS_2024, rotated", 'password: "SHOP_DB_PASS2"', "mdp: S3_SECRET_KEY"):
+               "(mdp : SHOP2_CF_PASSWORD)", "password: SMTP_PASS_2024, rotated", 'password: "SHOP_DB_PASS2"', "mdp: S3_SECRET_KEY",
+               "mdp: SHOP_DB_PASS2."):
         assert backup.scan_bytes(ok.encode()) == [], ok
     # a key name only when it is the whole value: a password that starts like one, or mixed case, is still caught
     for bad in ("mdp : SHOP2_CF_Xk81mQ", "password: Shop_Db_2024x", "password: ABC_DEF12gh", "password: S3CR3T_P4SS_9X",
-                "mdp: P4SSW0RD_2024", 'password: "AB12CD_9X"'):
+                "mdp: P4SSW0RD_2024", 'password: "AB12CD_9X"', "password: ADMIN_PASS1:xK9fQ2mZtail",
+                "mdp: ROOT_X1.s3cr3tTail99", "password: DB_PASS2,Zq81kLmw", "mot de passe : SHOP_KEY;9fQ2mZxx"):
         assert backup.scan_bytes(bad.encode()) == ["password"], bad
 
 
@@ -244,7 +246,7 @@ def test_secret_blocks_run(gh, ws):
     (ws / "projects/acme/topics/blog/memory.md").write_text("token: sk-ant-api03-" + "Z" * 50 + "\n")
     r = backup.run()
     assert r["ok"] is False and r["code"] == "secret_found"
-    assert r["leaks"] == [{"file": "projects/acme/topics/blog/memory.md", "kinds": ["Anthropic API key"]}]
+    assert r["leaks"] == [{"file": "projects/acme/topics/blog/memory.md", "kinds": ["Anthropic API key", "password"]}]
     assert "Z" * 20 not in r["error"]                                # never echo the value
     assert _commits(bare) == 0
     assert backup.history()[0]["ok"] is False
@@ -676,3 +678,54 @@ async def test_a_lone_surrogate_in_the_backup_include_is_refused(gh, ws):
         r = await c.put("/api/backup/settings", content=b'{"include": ["\\ud800"]}',
                         headers={"content-type": "application/json"})
         assert r.status_code == 400 and r.json()["error"] == "invalid_include", r.text
+
+
+def test_restore_skips_a_name_too_long_for_the_file_system(ws, mx_state):
+    r = backup._apply({"projects/" + "a" * 300 + "/CLAUDE.md": b"x", "memory.md": b"- fact\n"})
+    assert (ws / "memory.md").read_text() == "- fact\n" and r["files"] == 1
+    assert backup._safe_rel("projects/" + "a" * 300 + "/x") is None
+    assert backup._safe_rel("projects/" + "a" * 255 + "/x") is not None
+    long = "projects/" + "a" * 300 + "/CLAUDE.md"
+    assert backup._apply({long: b"x"})["files"] == 0      # also when it gets past _extract
+
+
+def test_two_restores_in_the_same_second_keep_both_copies(ws, mx_state, monkeypatch):
+    monkeypatch.setattr(backup.time, "strftime", lambda *_: "20260101-000000")
+    _in_use()
+    (ws / "memory.md").write_text("v1")
+    t1 = backup._apply({"memory.md": b"v2"})["trash"]
+    t2 = backup._apply({"memory.md": b"v3"})["trash"]
+    assert t1 != t2 and (Path(t1) / "workspace/memory.md").read_text() == "v1"
+    assert (Path(t2) / "workspace/memory.md").read_text() == "v2"
+
+
+@pytest.mark.parametrize("blob", [b'"garbage"', b"[1, 2]", b'{"jobs": "x"}', b'{"jobs": [1]}'])
+def test_restore_never_replaces_the_crons_with_a_malformed_jobs_file(ws, mx_state, blob):
+    crons = pytest.importorskip("maxxing.crons")
+    crons.create_job({"name": "Keep", "schedule": "0 1 * * *", "kind": "shell", "command": "echo hi"})
+    for hold in (False, True):
+        r = backup._apply({f"{backup.META_DIR}/crons/jobs.json": blob}, hold=hold)
+        assert r["crons"] is False
+        assert [j["name"] for j in crons.list_jobs()] == ["Keep"]
+
+
+def test_scanner_sees_a_bot_url_and_other_password_labels():
+    tok = "123456789:AAH" + "a1B2c3D4e5" * 3 + "xy"
+    pw = "Sup3rSecret99"
+    for text in (f"https://api.telegram.org/bot{tok}/getMe", f"| Password | {pw} |", f"pw: {pw}",
+                 f"token: {pw}", f"Authorization: Bearer {pw}", f"password：{pw}"):
+        assert backup.scan_bytes(text.encode()), text
+
+
+
+def test_scan_looks_at_file_names_too():
+    name = "projects/ghp_" + "a1B2c3D4e5" * 3 + "abcdef/notes.md"
+    assert backup.scan({name: b"clean"}) == [{"file": name, "kinds": ["GitHub token"]}]
+    assert backup.scan({"projects/acme/notes.md": b"clean"}) == []
+
+
+def test_a_newline_in_a_name_does_not_get_past_the_deny_list():
+    """`.*` and `$` stopped at the newline: `a\\nb.pem` and `x\\nid_rsa` were not denied."""
+    from maxxing import backup
+    assert backup.denied("a.pem") and backup.denied("a\nb.pem") and backup.denied("id_rsa\nx")
+    assert backup.glob_re("**/*.md").match("a\nb/c.md") and not backup.glob_re("*.md").match("a.md\n")

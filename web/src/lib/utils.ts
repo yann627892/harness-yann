@@ -32,15 +32,8 @@ export function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-/** The window the user is typing in: the HUD (Document Picture-in-Picture) when it has the focus - the
- * clipboard of an unfocused document refuses to write. */
-function focusedWindow(): Window {
-  const pip = (window as unknown as { documentPictureInPicture?: { window: Window | null } }).documentPictureInPicture?.window
-  return pip && pip.document.hasFocus() ? pip : window
-}
-
 export async function copyText(text: string): Promise<boolean> {
-  const w = focusedWindow()
+  const w = window
   try {
     await w.navigator.clipboard.writeText(text)
     return true
@@ -67,7 +60,7 @@ export async function copyText(text: string): Promise<boolean> {
 /** Copy a text that is still being fetched or converted. Safari only writes to the clipboard during the click
  *  itself: it is handed the promise (ClipboardItem); elsewhere the text is written once it is there. */
 export async function copyTextLater(text: Promise<string>): Promise<boolean> {
-  const w = focusedWindow() as Window & typeof globalThis
+  const w = window
   try {
     if (w.ClipboardItem && w.navigator.clipboard?.write) {
       await w.navigator.clipboard.write([new w.ClipboardItem({ 'text/plain': text.then((s) => new Blob([s], { type: 'text/plain' })) })])

@@ -3,8 +3,7 @@
 //   session → open (or focus) that session's column · new=1 → a "new session" column for `path`
 //   (&prompt=<text>: typed in its composer, e.g. the dashboard's "Make it yours" examples)
 //   path alone → reveal the topic in the tree · open → other open columns (shareable layout).
-// /sessions/solo/<id> → one full-screen column (detached window) · /sessions/hud/<id> → HUD popup
-// (browsers without Document Picture-in-Picture) · /sessions/<id> → redirect.
+// /sessions/solo/<id> → one full-screen column (detached window) · /sessions/<id> → redirect.
 import * as React from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Columns2, Keyboard, LayoutGrid, MessageSquarePlus, MessagesSquare, PanelLeftOpen } from 'lucide-react'
@@ -26,7 +25,6 @@ import { AgentHover } from '@/features/agents/AgentHover'
 import { LayoutDropBar, LayoutPicker } from './LayoutPicker'
 import { MIN_W, MAX_W, NewSessionColumn, SessionColumn, StripContext, type ColumnVariant, type Place } from './Column'
 import { PreviewProvider } from './FilePreview'
-import { HudBar } from './Hud'
 import { parseAgentPath, topicLabel, useIsMobile } from './util'
 import { useTouchNav } from '@/components/shell/TouchNav'
 import { PageList } from '@/components/shell/PageList'
@@ -44,7 +42,6 @@ export default function SessionsPage() {
     <PreviewProvider>
       <Routes>
         <Route path="solo/:id" element={<SoloView />} />
-        <Route path="hud/:id" element={<HudView />} />
         <Route path=":id" element={<RedirectToSession />} />
         <Route index element={<Workspace />} />
       </Routes>
@@ -759,6 +756,7 @@ const ColumnFor = React.memo(function ColumnFor({ col, index, count, variant, pl
 /** Touch layout: the session is a full-screen layer, sized to the visual viewport so the composer stays pinned right
  *  above the on-screen keyboard. Its header opens the sessions (☰) and the app menu (⊞). */
 function MobileOverlay({ col, tabs, sessions, onPick }: { col: Col; tabs: boolean; sessions: Session[] | undefined; onPick: (c: Col) => void }) {
+  const several = useSessionsUI((s) => s.cols.length > 1) // one tab only would repeat the title under it
   const ref = React.useRef<HTMLDivElement>(null)
   const body = React.useRef<HTMLDivElement>(null)
   const go = React.useCallback(
@@ -802,7 +800,7 @@ function MobileOverlay({ col, tabs, sessions, onPick }: { col: Col; tabs: boolea
   return (
     <div ref={ref} className="fixed inset-0 z-[45] flex flex-col bg-background pr-[var(--safe-right)] pl-[var(--safe-left)]" data-touch-layer data-testid="touch-session">
       <div ref={body} className="flex min-h-0 flex-1 flex-col">
-        <MobileTabsSlot.Provider value={tabs ? <TabsBar sessions={sessions} onPick={onPick} edge className="-mx-3 border-b-0 bg-transparent px-0 py-1 [&>button]:mr-3" /> : null}>
+        <MobileTabsSlot.Provider value={tabs && several ? <TabsBar sessions={sessions} onPick={onPick} edge className="-mx-3 border-b-0 bg-transparent px-0 py-1 [&>button]:mr-3" /> : null}>
           <ColumnFor col={col} index={0} count={1} variant="mobile" />
         </MobileTabsSlot.Provider>
       </div>
@@ -817,34 +815,6 @@ function SoloView() {
   return (
     <div className="fixed inset-0 z-[45] flex flex-col bg-background">
       <SessionColumn key={id} col={col} sid={id} index={0} count={1} variant="solo" />
-    </div>
-  )
-}
-
-/* ---------------------------------------------------------------- HUD popup (browsers without Document PiP) */
-function HudView() {
-  const { id = '' } = useParams()
-  const opener = window.opener as Window | null
-  // A route of the app shown in the window that opened the HUD (its router follows popstate).
-  const go = React.useCallback(
-    (path: string) => {
-      try {
-        if (opener && !opener.closed) {
-          opener.history.pushState(null, '', path)
-          opener.dispatchEvent(new PopStateEvent('popstate'))
-          opener.focus()
-          return
-        }
-      } catch {
-        /* opener gone or not reachable */
-      }
-      window.open(path, '_blank')
-    },
-    [opener],
-  )
-  return (
-    <div className="fixed inset-0 z-[45]">
-      <HudBar key={id} sid={id} win={window} onOpen={go} onOpenApp={opener ? () => opener.focus() : undefined} />
     </div>
   )
 }

@@ -25,13 +25,14 @@ def cmd_serve(a) -> int:
     if not security.password_is_set():           # the link itself never goes to the journal (readable by admins)
         print("First run - run `maxxing setup-link` on the server for the one-time setup link", flush=True)
     port = a.port or cfg["port"]
-    os.environ["MAXXING_LISTEN_PORT"] = str(port)   # local clients of this server (pcbridge) follow --port
+    os.environ["MAXXING_LISTEN_PORT"] = str(port)   # local clients of this server (a turn's MCP servers) follow --port
     from . import proxylisten
     opts = dict(host=a.host or cfg["bind"], port=port, proxy_headers=True, forwarded_allow_ips="127.0.0.1",
                 log_level="warning", timeout_graceful_shutdown=3)   # live (SSE) connections never end by themselves
     extra = proxylisten.configured(cfg)
     if extra and extra[1] == port:
         print(f"proxy address {extra[0]}:{extra[1]} not opened: same port as the server", flush=True)
+        proxylisten.note_opened(*extra, error="same port as the server")
     if not extra or extra[1] == port:
         uvicorn.run(create_app(), **opts)
         return 0
@@ -40,8 +41,10 @@ def cmd_serve(a) -> int:
     sockets = [uc.bind_socket()]
     try:
         sockets.append(proxylisten.open_socket(*extra))
+        proxylisten.note_opened(*extra)
     except OSError as e:
         print(f"proxy address {extra[0]}:{extra[1]} not opened: {e}", flush=True)
+        proxylisten.note_opened(*extra, error=str(e) or type(e).__name__)
     server = uvicorn.Server(uc)
     server.run(sockets=sockets)
     return 0 if server.started else 3                # as uvicorn.run: a failed startup is not a clean exit

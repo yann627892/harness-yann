@@ -36,7 +36,8 @@ TEMPLATES_DIR = CODE / "templates"
 
 # Names tzdata ships that are not zones: `localtime` is a link to /etc/localtime, so `timedatectl set-timezone
 # localtime` makes /etc/localtime point at itself (the server falls back to UTC, cron fires an hour or more off).
-PSEUDO_ZONES = ("localtime", "posixrules")
+# `Factory` is a placeholder zone that browsers refuse (Intl.DateTimeFormat throws: the Crons page broke).
+PSEUDO_ZONES = ("localtime", "posixrules", "Factory")
 PUBLIC_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?(/[^\s]*)?$")   # shared by PUT /api/settings and init
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -84,6 +85,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mcp_auto": False,                    # True: each turn loads only the MCP servers its session needs (mcp_auto.py)
     "onboarding_completed": False,
     "profile": {"name": "", "color": "", "emoji": ""},   # the user's pseudo: messages, notifications
+    "daily_budget_usd": 0.0,           # Settings -> Usage: dollars a day for the whole server (budget.py), 0 = none
     "usage_widget": False,             # Settings -> Usage: show plan usage (`maxxing init`: on for new installs since 2.0.0a132)
     "maxxing_mode": False,             # Settings -> Features (beta): a finished session comes to the front (Sessions page)
     "health_feed": False,              # server health problems also in the Notifications feed (`maxxing init`: on when new)
@@ -102,6 +104,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sidebar_order": [],               # sidebar: the pages in the order the user dragged them (routes; empty = default)
     "browser_feature": False,          # Settings -> Features: the Harness Browser (one Chromium for the user, sessions, agents)
     "browser": {},                     # its settings (maxxing/browser DEFAULTS: sites, sign-ins, asks, sleep)
+    "devices_feature": False,          # Settings -> Features: Devices (Claude uses the user's computers and phones)
     "dashboard": {"order": [], "hidden": []},
     "extensions": {"disabled": [], "pinned": []},
     "telegram": {
@@ -137,6 +140,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # true = programs a scheduled job leaves running in the background outlive it (KillMode=process), as before
     # 2.0.0a70; `maxxing init` writes true on installs that existed before (no silent change), new ones end them.
     "cron_keep_background": False,
+    # Settings -> Usage: a cron job or an agent run stopped by Claude's usage limit starts again once, this many
+    # seconds after the reset (crons.limit_retry_at)
+    "limit_retry": True,
+    "limit_retry_delay_s": 60,
 }
 
 FLOCK_WAIT_S = 10.0
@@ -278,7 +285,7 @@ def read_json(path: Path, default: Any = None) -> Any:
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):        # RecursionError: nested too deep
         return copy.deepcopy(default)
 
 
@@ -491,6 +498,20 @@ def _path_setting(name: str) -> str | None:
     """A path setting, or None when it is missing or hand-edited to something that is not a string."""
     v = _setting(name)
     return v if isinstance(v, str) and v else None
+
+
+def local_port() -> int:
+    """The port this server listens on (`maxxing serve --port` wins over the config): its local clients (a turn's
+    MCP servers, chrome-devtools-mcp) call it there."""
+    return int(os.environ.get("MAXXING_LISTEN_PORT") or load_config().get("port") or 8787)
+
+
+def local_host() -> str:
+    """The address this server answers on from this machine: 127.0.0.1, or the `bind` address (Tailscale mode)."""
+    bind = str(load_config().get("bind") or "").strip()
+    if not bind or bind in ("0.0.0.0", "::", "localhost"):
+        return "127.0.0.1"
+    return f"[{bind}]" if ":" in bind else bind
 
 
 def workspace() -> Path:

@@ -497,6 +497,26 @@ def test_a_topic_in_mode_ask_waits_for_the_user_and_always_allow_adds_a_rule(cli
     assert bad.status_code == 400
 
 
+def test_always_allow_on_a_request_that_times_out_meanwhile_adds_no_rule(client, topic, mx, monkeypatch):
+    from maxxing import approvals, approval_mcp
+    assert client.patch("/api/workspace/projects/acme/topics/blog", json={"permission_mode": "ask"}).status_code == 200
+    sid = client.post("/api/sessions", json={"path": topic, "message": "APPROVE push"}).json()["id"]
+    p = wait_for(lambda: client.get(f"/api/approvals?session={sid}").json()["approvals"], timeout=15)[0]
+    orig = approvals.topic_of_session
+
+    def late(session):                          # the MCP's timeout lands after the first look at the request
+        out = orig(session)
+        f = approvals._file(p["id"])
+        approval_mcp.write_atomic(f, {**approval_mcp.read(f), "status": "timeout"})
+        return out
+    monkeypatch.setattr(approvals, "topic_of_session", late)
+    r = client.post(f"/api/approvals/{p['id']}", json={"decision": "allow", "always": True})
+    assert r.status_code == 409
+    t = client.get("/api/workspace/tree").json()
+    blog = next(x for pr in t["projects"] for x in pr["topics"] if x["path"] == topic)
+    assert blog["allowed_tools"] == [], blog["allowed_tools"]
+
+
 def test_always_allow_is_refused_for_an_agent_and_with_deny(client, topic, mx):
     _agent(client, approvals=True)
     sid = _run("APPROVE push")["session"]["id"]
@@ -556,3 +576,20 @@ def test_mode_ask_is_accepted_everywhere(client, topic):
     assert client.patch("/api/workspace/projects/acme/topics/blog", json={"permission_mode": "ask"}).status_code == 200
     from maxxing.sessions import spawn
     assert spawn.permission_args("ask") == (["--permission-mode", "default"], {})
+
+
+def test_a_lone_surrogate_in_a_request_keeps_the_list_working_and_can_only_be_denied(client, mx):
+    from maxxing import approvals
+    folder = approvals.folder()
+    srv = Server(folder)
+    srv.call(1, "Net\ud800", {"host": "a\ud800.com", "k\udfff": ["x\ud800"]})
+    req = wait_for(lambda: [r for r in _requests(folder) if r["status"] == "pending"], timeout=10)[0]
+    r = client.get("/api/approvals")
+    assert r.status_code == 200, r.text
+    shown = [x for x in r.json()["approvals"] if x["id"] == req["id"]][0]
+    assert shown["tool"] == "Net�" and shown["clipped"] is True
+    with pytest.raises(approvals.ApprovalError):
+        approvals.decide(req["id"], "allow")
+    approvals.decide(req["id"], "deny")
+    assert _answer(srv)["behavior"] == "deny"
+    srv.close()

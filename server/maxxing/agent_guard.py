@@ -254,8 +254,9 @@ SHELL_RC = (".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_aliase
 # a name with one of these anywhere (PGPASSWORD, github_token), or one of SECRET_PARTS as a whole `_` part (NPM_KEY)
 SECRET_WORDS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "CREDENTIAL")
 SECRET_PARTS = {"KEY", "PASS", "PWD", "AUTH", "PAT", "DSN"}
-# `NAME=value` (export, readonly, declare -x...), fish's `set -x NAME value`, a URL with a password (DATABASE_URL)
-SECRET_SET = re.compile(r"^[ \t]*(?:(?:export|readonly|local|declare[ \t]+-\w+|typeset[ \t]+-\w+)[ \t]+)*(\w+)=\S"
+# `NAME=value` anywhere on a line (export, readonly, declare -x..., after `;`, `&&`, `then`, or as a second assignment),
+# fish's `set -x NAME value`, a URL with a password (DATABASE_URL)
+SECRET_SET = re.compile(r"(?:^|[ \t;&|(`{])(?:(?:export|readonly|local|declare[ \t]+-\w+|typeset[ \t]+-\w+)[ \t]+)*(\w+)=\S"
                         r"|^[ \t]*set[ \t]+-\w+[ \t]+(\w+)[ \t]+\S|(://)[^/\s:@]{1,256}:[^@\s/]{1,256}@", re.M)
 
 
@@ -430,7 +431,8 @@ def writable_dirs(path: str, a: dict) -> list[str]:
     """The `writable` folders of a sandboxed agent, as absolute paths. "." (the whole topic) becomes every entry of the
     topic but TOPIC_LOCKED: the sandbox's denyWrite wins over allowWrite, so the topic's `agents/` cannot be denied
     without denying the agent's own folder, and a new folder there would be a new agent. A folder in `agents/` (or one
-    holding it through a link) is never writable. A link only leads inside the topic: an entry whose target is
+    holding it through a link) is never writable, nor a TOPIC_LOCKED entry (named, or reached through a link). A link
+    only leads inside the topic: an entry whose target is
     elsewhere (a git clone's `cfg -> /root/.claude`) is dropped, the sandbox, Write/Edit (--add-dir) and `maxxing mail
     attachment` would write in the target. An absolute entry is the shared folder of a group (agents.turn_args): it
     stays in the project's groups/ folder."""
@@ -454,6 +456,8 @@ def writable_dirs(path: str, a: dict) -> list[str]:
                 log.warning("writable %s of agent %s leads outside its topic (%s): dropped", k, path, q)
                 continue
             if q == agents_dir or agents_dir in q.parents or q in agents_dir.parents or q == t:
+                continue
+            if t in q.parents and q.relative_to(t).parts[0] in TOPIC_LOCKED:   # `notes -> memory.md`: still locked
                 continue
             if str(q) not in out:
                 out.append(str(q))
@@ -723,9 +727,9 @@ def sandboxed_session(sid8: str) -> str | None:
 
 
 # changing an agent (any agent) is the owner's: refused in every agent turn, sandboxed or not
-AGENT_OWNER_ONLY = {"create", "cron", "webhook", "watch", "on", "off", "silent", "loud", "set", "import", "sandbox-setup", "group"}
+AGENT_OWNER_ONLY = {"create", "cron", "webhook", "watch", "after", "on", "off", "silent", "loud", "set", "import", "sandbox-setup", "group"}
 # ...but the owner's conversation with an agent (its manager) runs these on that agent itself
-AGENT_MANAGER = {"cron", "webhook", "watch", "on", "off", "silent", "loud", "set", "show", "run"}
+AGENT_MANAGER = {"cron", "webhook", "watch", "after", "on", "off", "silent", "loud", "set", "show", "run"}
 
 
 # ...and so is what starts something with the owner's rights outside the agent's guards (a session of any topic,
@@ -766,6 +770,7 @@ def in_the_sandbox() -> bool:
 
 
 BROWSER_OWNER_ONLY = {"set", "profile", "forget", "setup", "settings", "enable", "disable"}
+DEVICES_OWNER_ONLY = {"add", "confirm", "remove", "rename", "access", "mode", "screen", "enable", "disable"}
 
 
 def check_cli(argv: list[str]) -> str | None:
@@ -791,6 +796,10 @@ def check_cli(argv: list[str]) -> str | None:
         return (f"`maxxing browser {words[1]}` is not allowed in an agent turn: its browser settings belong to the "
                 "owner. Say what should change in your answer (the owner's conversation asks for its browser "
                 "with `maxxing agents set <itself> browser.enabled=true`: a request the owner allows).")
+    if turn["path"] and words[0] == "devices" and len(words) > 1 and words[1] in DEVICES_OWNER_ONLY:
+        return (f"`maxxing devices {words[1]}` is not allowed in an agent turn: the person's devices belong to the "
+                "owner. Say what should change in your answer (the owner's conversation asks for a device with "
+                "`maxxing agents set <itself> devices='[\"<id>\"]'`: a request the owner allows).")
     cmd, sub = words[0], (words[1] if len(words) > 1 else "")
     if turn["path"] and not turn.get("manager") and sub in OWNER_ONLY.get(cmd, ()):
         return (f"`maxxing {cmd} {sub}` is not allowed in an agent run: it would start work with the owner's rights, "

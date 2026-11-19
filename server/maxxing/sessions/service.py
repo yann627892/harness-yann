@@ -162,8 +162,9 @@ def _num(v: object) -> float:
         return 0.0
 
 
-def public(meta: dict) -> dict:
-    """Internal meta -> API.md Session."""
+def public(meta: dict, exits_waiting: dict[str, dict] | None = None) -> dict:
+    """Internal meta -> API.md Session. exits_waiting: browser/exits.waiting_by_session() when the caller turns many
+    metas (one read of the waiting turns for the whole list)."""
     m = _effective(meta)
     finished, seen = _num(m.get("finished_at")), _num(m.get("seen_at"))
     return {"id": m["id"], "title": m.get("title") or "Untitled", "path": m.get("path") or "",
@@ -174,14 +175,16 @@ def public(meta: dict) -> dict:
             "context_tokens": m.get("context_tokens"), "context_window": _context_window(m),
             "archived": bool(m.get("archived")), "favorite": bool(m.get("favorite")),
             "notify": bool(m.get("notify")), "source": m.get("source") or "web", "cron": bool(m.get("cron")),
-            "unread": bool(finished) and finished > seen and m.get("state") != "running",
+            "unread": (bool(finished) and finished > seen or bool(m.get("marked_unread"))) and m.get("state") != "running",
             "last_text": m.get("last_text") or "", "error": m.get("error") or None,
             "plan_mode": bool(m.get("plan_mode")), "plan_ready": bool(m.get("plan_ready")),
             "permission_mode": m.get("permission_mode") or "", "approvals": _approvals_waiting(m["id"]),
             "provider": m.get("provider") or None,
             "code_repos": [r for r in (m.get("code_repos") or []) if isinstance(r, str)],
             "worktree": _worktree_public(m),
-            "browser_asks": _browser_waiting(m["id"]), "browser_exit": _exit_waiting(m["id"])}
+            "browser_asks": _browser_waiting(m["id"]),
+            "browser_exit": _exit_waiting(m["id"]) if exits_waiting is None else exits_waiting.get(m["id"]),
+            "device_asks": _devices_waiting(m["id"])}
 
 
 def _worktree_public(m: dict) -> dict | None:
@@ -197,6 +200,12 @@ def _worktree_public(m: dict) -> dict | None:
 def _browser_waiting(sid: str) -> int:
     """`ask_human` requests of the session waiting for the user (maxxing/browser/asks.py; in memory)."""
     from ..browser import asks
+    return asks.waiting(sid)
+
+
+def _devices_waiting(sid: str) -> int:
+    """`ask_human` requests of the session on the person's devices (maxxing/devices/asks.py; in memory)."""
+    from ..devices import asks
     return asks.waiting(sid)
 
 
@@ -257,8 +266,10 @@ def _require(sid: str) -> dict:
 
 # ---- queries -------------------------------------------------------------------------------
 def list_sessions(path: str | None = None, archived: bool | None = None) -> list[dict]:
+    from ..browser import exits
     out = []
     ids = store.list_ids()
+    waiting = exits.waiting_by_session()
     store.forget_cached(set(ids))
     for sid in ids:
         m = store.read_cached(sid)
@@ -266,7 +277,7 @@ def list_sessions(path: str | None = None, archived: bool | None = None) -> list
             continue
         if archived is not None and bool(m.get("archived")) != archived:
             continue
-        out.append(public(m))
+        out.append(public(m, waiting))
     return sorted(out, key=lambda s: s.get("updated") or 0, reverse=True)
 
 
@@ -462,7 +473,7 @@ def _enqueue_voice(sid: str, item: dict, audio: str, *, reset_cron: bool = False
 
 
 def send_message(sid: str, text: str, attachments: list[str] | None = None, source: str = "web",
-                 hud: bool = False, voice_path: str | None = None, ref: str | None = None,
+                 voice_path: str | None = None, ref: str | None = None,
                  client_id: str | None = None, silent_ok: bool = False, mentions: list[dict] | None = None,
                  relay: dict | None = None, call: str | None = None) -> dict:
     """`ref`: an id the caller (Telegram) finds again in the meta of the turn that ran this message
@@ -475,7 +486,7 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
     audio = _check_voice(voice_path)
     if not (text or "").strip() and not files and not audio:
         raise SessionError(400, "empty", "Empty message")
-    extra: dict[str, Any] = {"hud": True} if hud else {}
+    extra: dict[str, Any] = {}
     if call:
         extra["call"] = call
     if ref:
@@ -695,7 +706,6 @@ def _merged(mine: list[dict], **extra: Any) -> dict:
                  mine[-1].get("source") or "web", **extra,
                  **({"voice": [v for x in mine for v in x.get("voice") or []]}
                     if any(x.get("voice") for x in mine) else {}),
-                 **({"hud": True} if all(x.get("hud") for x in mine) else {}),
                  **({"call": calls[-1]} if (calls := [x["call"] for x in mine if x.get("call")]) else {}),
                  **({"client_ids": ids} if (ids := [c for x in mine for c in x.get("client_ids") or []]) else {}),
                  **({"plan_approved": True} if any(x.get("plan_approved") for x in mine) else {}),
@@ -856,10 +866,15 @@ def delete_session(sid: str) -> None:
     bus.invalidate("sessions", "workspace")
 
 
-def mark_seen(sid: str) -> None:
+def mark_seen(sid: str, seen: bool = True) -> None:
+    """Read (opened, or "Mark as read"), or back to unread by hand ("Mark as unread": stays so until read again)."""
     _require(sid)
     with store.edit(sid) as m:
-        m["seen_at"] = time.time()
+        if seen:
+            m["seen_at"] = time.time()
+            m.pop("marked_unread", None)
+        else:
+            m["marked_unread"] = True
     bus.invalidate("sessions", "workspace")
 
 

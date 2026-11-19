@@ -5,8 +5,150 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
-## Unreleased
+## 2.0.0-alpha.158 - 2026-11-19
 
+- Web (from Anthony14FR's PRs #138 #140 #143 #145, rewritten): `useMarkAllSeen()` (`queries/agentGroups.ts`) posts
+  `/seen` for each given agent and group (`Promise.all`), patches `thread_unread` / `unread` to 0 at once and
+  invalidates both lists; `AgentsList` shows the `agents-mark-all-read` button while `matching` / `matchingRooms`
+  (topic + search, whatever the state chip) hold something unread. Tasks: `defaultPrefs()` picks `view: 'list'` when
+  `isCompact()`, a saved view wins. Phone session: `MobileOverlay` fills `MobileTabsSlot` only with several columns;
+  `MobileTabs` wraps them in `data-kbd-hide data-tabs` (hidden while typing); `globals.css` hides
+  `[data-col] [data-kbd-hide]:not([data-tabs])` in landscape below 500 px high on touch screens (the tabs stay, to
+  switch session). `DiffRows`: sticky opaque gutter (`diff-gutter`, `bg-popover` under the line's tint), the `@@`
+  text in a sticky inline span, the selection ring drawn by `after:` above the gutter.
+- Voice: settings `mic` / `call` (default true, `voice.DEFAULTS`, `PUT /api/voice/settings`): `VoiceButton` returns
+  null when `mic` is false (unless recording), `VoiceCall` when `call` is false (unless a call is on). Card "Buttons
+  of the message box" at the top of Settings -> Voice (texts `vmode.btn.*`, group `vmode`). Composer toolbar: the
+  model label and effort hide below `@md` (same breakpoint as the context gauge's ring).
+- Web: `Column.tsx` remembers `updated` while the session is shown read, so a "Mark as unread" of the open, focused
+  session (same `updated`) is not undone at once; a new answer (new `updated`) is still marked seen.
+- Web: session list filters (`Tree.tsx` header): `chip-all` = `Layers` icon (label in `title` / `aria-label`),
+  `chip-running` / `chip-unread` = count pills in the `CountBadge` colours (filled when active), hidden at 0 unless
+  active; the touch layout is a plain flex row (no segmented grid).
+- Web: `useMarkSeen` / `useMarkUnread` take the session (`{id, path, state, archived, unread}`) and patch the
+  workspace tree too (topic `unread` / `errors`): the topic, project and sidebar counters follow at once instead of
+  after the bus refetch of `/api/sessions` (~1 MB with 1 000 sessions). Mock bench: 340-400 ms -> 65-125 ms.
+- Sessions: `POST /api/sessions/{id}/seen` takes an optional `{seen}`; `seen:false` sets meta `marked_unread`
+  (public `unread` = finished after `seen_at` or `marked_unread`, never while running), `seen:true` / opening clears
+  it. Web: `useMarkUnread` (optimistic, shared `readMark` with `useMarkSeen`), item `unread-toggle` in the session
+  row menu of `Tree.tsx` (tree and second bar), texts in the on-demand group `rmark`. Dashboard Activity: unread
+  items `ok` (green) instead of `warn`, "Unread" stat tone `ok`. Mock: `/seen` honours `{seen:false}`.
+- Files: `/api/files/thumb` takes `h` (min height, bucketed like `w`, in the cache key; ffmpeg `scale=min(iw,
+  min(4096,max(w,h*iw/ih)))`). Chat media (box 4:3, h-28) and the attachment strip ask `h=320`, quoted files and
+  composer chips `h=160`; viewer placeholder same URL as the chat (`w=320&h=320`); `media.warm` follows. Before: a
+  wide picture thumbnailed by width only was stretched in its object-cover box (blurry).
+- Web: state lost on unmount (another page unmounts the whole page tree, no keep-alive). Side question
+  (`pages/sessions/Aside.tsx`): module zustand store per session, sessionStorage (answered ones only), `api.post`
+  instead of a per-call `mutate` callback; `useAskAside` removed. Team composer keyed by chat, draft in
+  `mx-draft:team:<chat>`, failed send back via `mutateAsync().catch`. `VoiceButton draftKey`: a transcript that
+  arrives after unmount, or a recording cut by unmount (`useRecorder({onUnmount})`), goes to the draft
+  (`lib/drafts.ts appendDraft` + `DRAFT_EVENT`, now also heard by `useDraftText` and Team). Composer "Edit queue":
+  taken messages land in the draft when the box is gone. Tree delete, Stop, plan approve: `mutateAsync` (follow-ups
+  no longer dropped with the component).
+- GitHub: `.github/workflows/cla.yml` removed (the CLA bot failed on every closed pull request: `Branch cla-signatures
+  not found`). The CLA stays: the maintainers check the signing comment before merging (CONTRIBUTING.md, CLA.md);
+  past signatures stay on the branch `cla-signatures`.
+- Dependencies: `npm update` in `web/` and `uv lock --upgrade` in `server/` (lockfiles only, ranges unchanged;
+  majors left out: mermaid 12, emojibase-data 18). Replaces PRs #107 #110 #112 #116 #117 #118 #126 #128 #130.
+  Vite 8.3.8 now warns about `advancedChunks` (deprecated, use `codeSplitting`) and the extensionless import of
+  `./src/i18n/groups` in `vite.config.ts` (native config loader): harmless for now.
+- `service.list_sessions` reads the turns waiting for a browser exit once per list (`exits.waiting_by_session()`,
+  passed to `public(meta, exits_waiting)`) instead of once per session: each `exits.waiting_for` call built the
+  state path through `config.state_dir()` (a `mkdir`) and stat'ed `waiting.json`. Measured on a copy of a real
+  state with ~2,000 sessions: 139 ms -> 72 ms per list (warm caches); the tree, the dashboard and @-mentions call it.
+  `public(meta)` alone is unchanged. Test: `test_browser.py::test_the_session_list_reads_the_turns_waiting_for_an_exit_once`.
+- `agents._session_stats` (behind `list_agents(with_status=True)`, i.e. `GET /api/agents` and `agents.get`) passes
+  `exits.waiting_by_session()` to `service.public(meta, exits_waiting)` too, read once per list instead of once per
+  agent session (same cost as #119: `config.state_dir()` + stat of `waiting.json` each time). Measured on a copy of a
+  real state (25 agents, 222 agent sessions): 46 ms -> 37 ms per list (warm caches). Test:
+  `test_agents.py::test_the_agents_list_reads_the_turns_waiting_for_an_exit_once`.
+- Usage-limit retry at the reset time: `crons.text_reset()` reads "resets 4pm (UTC)" / "resets 4:30pm" / "resets
+  4am" (zone in parentheses, else or unknown UTC; next occurrence, or one passed less than `LIMIT_RESET_GRACE_S` =
+  15 min ago) and is the last source of `limit_reset()` (epoch, `claude_auth.limits`, text, then `LIMIT_RETRY_S`).
+  `crons.limit_retry_at()` = reset + config `limit_retry_delay_s` (default 60, 0-3600, at least 60 s from now; was a
+  fixed +120 s), None past `CATCH_UP_WINDOW_S` or when config `limit_retry` (default true) is false - then a limit
+  failure is final. Both keys in `/api/settings` (`400 invalid_limit_retry_delay`), card in Settings -> Usage.
+  Agents: `on_turn_end` -> `_plan_limit_retry` stores `<state>/agents/<key>.json` `limit_retry` {at, session,
+  attempt} (one per agent, the latest wins; not for group turns, not when the session env has
+  `MAXXING_CRON_ID`: the cron's `retry_plan` owns it; at most `crons.MAX_RETRIES` for the same session) and posts a
+  `note` (`status: limit_retry`). `agents.retry_limits()` (agents loop, every `FEED_POLL_S`) sends `LIMIT_RETRY_TEXT`
+  into the same session once due, through `gate()`: `busy` waits, other reasons drop it with a `skip`; the run
+  message has `trigger: "limit-retry"`. Fake Claude: `HITLIMIT`.
+- `maxxing agents list` (text output, `cmd_agents._list`) counted each agent's jobs with `agents.cron_jobs(path)`,
+  i.e. one `crons.list_jobs()` per agent (jobs.json, runs.jsonl, retries, `next_run` of every job each time): it now
+  counts them from one `agents.cron_jobs()` call (`path=None` = every job). Measured on a copy of a real state
+  (24 agents, 32 jobs, median of 7, in-process): 286 ms -> 62 ms, same output. Test:
+  `test_agents_cli.py::test_list_reads_the_scheduled_jobs_once`.
+
+## 2.0.0-alpha.157 - 2026-11-18
+
+- Global daily budget (`server/maxxing/budget.py`): config `daily_budget_usd` (0 = none, settings route, restorable
+  from a backup). `spent_today()` sums `days[today].cost` of the session metas touched in the last 25 h (same basis
+  as an agent's `day_cost`; a deleted session takes its cost away). `reached()` gates only automatic work:
+  `crons._claude_turn(auto=True)` returns a `skipped` run, `agents.gate()` returns `limit` for a non-owner trigger
+  (`SKIP_TEXT`, Telegram `AGENT_REASONS`, web `agents.reason.limit`). The user's turns, the owner's messages to an
+  agent or a group (`agent_rooms._start` asks `gate(owner=True)`), "Run now" and shell jobs are never held. `check()` runs after every turn (`service.on_turn_end`, in a
+  thread) and after a settings save: feed source `system`, info at 80 % (`dedupe budget:<day>:<usd>:80`), alert at
+  100 % (ref `budget:reached`, resolved when work runs again). `GET /api/stats/budget`; mock route added.
+- **"After another agent" triggers** (`agents.py` "agent" triggers, contract in `docs/dev/API.md` `Trigger`):
+  `{kind: "agent", agent: <path>, on: ok|error|any, match, prompt}` in agent.json (`TRIGGER_KINDS`, `_clean_chain`;
+  `clean(..., own=path)` refuses itself; `_new_chain_sources_exist` checks only sources added, so a deleted source
+  keeps the trigger inert instead of blocking later saves). `on_turn_end` calls `chain_after(path, text, ok, depth)`
+  for every run that is neither the owner's conversation (`mine`) nor a group turn nor a Harness turn; matches go
+  into the debouncer with `fire_as="after:<tid>"` (kept in `_feed.json`), `depth + 1` (MAX_DEPTH stops loops) and
+  the result framed as outside text (`MAXXING_AGENT_OUTSIDE`). The debouncer now has its own lock (`_mu`):
+  `on_turn_end` and the agents loop add / pop from two threads. `remap` rewrites the triggers pointing at a moved
+  agent (`_remap_chains`). `trigger_stats` counts the runs an "agent" trigger started; `/test` fires it on the source's
+  last result. CLI `maxxing agents after <agent> <other> [--on] [--match] [--prompt]` (owner / manager only, like
+  `watch`). Web: `AgentTriggers.tsx` row + `ChainTriggerDialog`, `triggerLabel` "after:". Tests:
+  `tests/test_agent_chain.py`.
+
+- **Devices** (`maxxing/devices/`, contract in `docs/dev/API.md` "Devices", `INTERNALS.md` "maxxing.devices"): the
+  person's computers and phones run Harness Link (`link/` Go, `android/`), connect out to `WS /api/devices/ws`
+  (Bearer device token, protocol v2: `hello`/`paused`/`ok`/`err` up; `shot`, `input`, `tree`, `tap_node`,
+  `set_text`, `apps`, `open`, `state`, `unpair` down; `shot` also carries `crop` + `sw`/`sh`, `tree` `sw`/`sh`).
+  Pairing: `POST /api/devices/invites` -> 8-char code (15 min, single use, hashed) -> `POST /api/devices/pair`
+  (public, 20 wrong codes / 10 min per client then 429) -> candidate until `POST /{id}/confirm` (dropped after
+  15 min). Desktop downloads carry a trailer `<json {server, code}><u32 BE len>HMLINK01`; `GET /install/<code>.sh|.ps1`,
+  `GET /download/<target>?code=` (it prints each step and a short "How to use it" with the commands; an install command whose code expired or was used answers 200 with a script that
+  prints the reason and exits 1: `curl -f` would only print the HTTP status), `GET /link/<code>` (phone page, route added to Caddy's UI routes). Binaries come
+  from `server/maxxing/link.json` (GitHub release `link-v<version>`, sha256 checked, cached) or
+  `MAXXING_LINK_BIN_DIR`. State `<state>/devices/devices.json` (sha256 of tokens), `actions.jsonl` (typed text kept
+  as its length only). The app gets `{"t":"access", ok, mode}` on connect, once accepted and when its mode changes
+  (`hub._access`, also from the 3 s ticker for CLI changes): its terminal says "Waiting for your OK" / "Accepted".
+  Several screens: `hello.screens` / `hello.display`, device field `display` (`PUT /api/devices/{id} {display}`,
+  -1..15) sent as `{"t":"display","i"}`; backends: macOS `CGGetActiveDisplayList` + `screencapture -D`, X11 RandR 1.5
+  monitors, Windows `EnumDisplayMonitors` + `MOUSEEVENTF_VIRTUALDESK`. Live-view shots carry `live: true` and the app
+  gets `{"t":"watch","on"}` (one line in its terminal instead of one per picture). Claude switches screens itself
+  with the MCP tool `screen` (view mode too; refused while the person has the device; clears the coordinate space);
+  `devices` lists `i name WxH main`. `store.touch` keeps the last `screens` on the device (field in `Device`), so
+  `maxxing devices list` shows them; `maxxing devices screen ID N|main` (the 3 s ticker tells the app).
+  Product skill `maxxing-devices` (tools, refusals, CLI); `runner.DEVICES_NOTE` points to it.
+- Harness Link desktop runs only in the foreground of a terminal (no login entry; older ones removed at start and by
+  the install script, which now `exec`s the app on `/dev/tty` and adds `~/.local/bin` / the user `Path`), with a live
+  log (`link/console.go`). Windows binaries are console apps named `harness-link-windows-<arch>.exe`, installed as
+  `harness-link.exe`. macOS permissions are named after the terminal app (`TERM_PROGRAM`); an empty `screencapture`
+  output is a `permission` error. Hello `note` and device error messages kept up to 1000 characters.
+- Turns: `runner.devices_args()` adds the stdio MCP `harness-devices` (`maxxing/devices_mcp.py`, stdlib) only when the
+  turn sees a device (`devices.visible()`: device `scope` `["*"]` / `project:<p>` / `agent:<path>`, and for an agent
+  its `agent.json` `devices` list; a free agent also sees `agent:<its path>`). It relays to the loopback-only
+  `POST /api/devices/mcp/<sid>` with a per-turn token (`<state>/devices/turns/`, cleared at startup). One
+  `--allowedTools` per turn: merged into the browser's. View mode exposes only `devices`, `screenshot`, `zoom`,
+  `ui_tree`, `ask_human`, `wait`, `screen`. Coordinates = pixels of the last `shot` of that device.
+- `ask_human` waits in memory (asyncio future, 10 min, turn liveness checked every 2 s), feed ref `devask:<id>`
+  (`feed.HANDLERS`), `Session.device_asks`, agent waiting count. Human input over `WS /api/devices/<id>/live`
+  (one-time `POST /live-token`; JPEG frames ~3 fps only while watched, JSON `state`) takes the device; Claude's
+  input is refused meanwhile, `release` answers the ask (`done` / `skip`) with the person's note.
+- `agent.json` `devices` is a security field (adding waits for the owner's OK, removing applies at once);
+  `agent_guard` keeps it owner-only. Settings `devices_feature` (off, restorable), doctor `check_devices`,
+  CLI `maxxing devices`, bus topic `devices`, settings section `/settings/devices`, showcase `devices`.
+- Removed: "Browser of my PC" (`pcbridge.py`, `api/pc.py`, `pc_tools.json`, `pc_agent.json`, `/api/pc/*`,
+  `mcp.has_user_server`, `spawn.ensure_mcp_soon`, web `features/pc`, `lib/queries/pc.ts`); `config.local_port()` /
+  `local_host()` and `security.loopback()` moved out of it. The HUD: `MessageIn.hud`, `runner.HUD_PREFACE`, inline
+  screen captures (`stdin_payload`, `inline_image`), web `Hud.tsx`, route `/hud`, `ui.hud`; Caddy route `hud` -> `link`.
+  The `display-capture=()` Permissions-Policy stays.
+- `THIRD_PARTY_NOTICES.md` has an Android section (`scripts/third_party_notices.py` `android_packages()`: the
+  `implementation(...)` lines of `android/app/build.gradle.kts`, licenses in `ANDROID_KNOWN`).
 - Tabs bar: `useTabIndicator` (`tabMotion.ts`) now places an oval (the chip's width, height and offset) behind the
   chips (`z-0`, chips `relative z-10`, transparent): it glides to the tab picked; the underline is gone. `TabsBar`
   `edge` (phone header): the tablist runs edge to edge with its own `px-3`, the scroll-into-view keeps that padding.
@@ -44,6 +186,24 @@ shown in the product. Newest first, same version headings as `CHANGELOG.md`.
   a `ClipboardItem` promise (Safari only writes during the click), with `copyText` as the fallback. Its strings are
   their own dictionary group (`ctext`): the `files` group is part of the first load of a session, whose budget
   (20,000 bytes, `test_web_first_load`) was full.
+
+- **Dependencies** (issue #104): `server/uv.lock` opentelemetry-api 1.45.1 -> 1.45.2 (GHSA-mf5v-w3w3-f6cg).
+  `templates/scrapling/requirements.txt` re-resolved from `scrapling[fetchers,rag]==0.4.15` + `soupsieve>=4.0.0`
+  (soupsieve 3.0.3 -> 4.1.1, GHSA-mmhr-3c5m-f64f; also playwright 1.64.0 -> 1.64.1, patchright 1.64.1 -> 1.64.4,
+  curl-cffi 0.17.0, new frostwork): the lock hash changes, so `deps update` builds a new venv; Chromium stays on
+  revision 1248. Scrapling 0.5 is not taken: it drops `DynamicFetcher` and renames `extract stealthy-fetch` to
+  `extract fetch` (skill `web-scraping`, users' scripts). `scripts/bump-pins.sh` keeps it below `SCRAPLING_BELOW`
+  (0.5), adds the `SCRAPLING_EXTRA` floors to the compile input, and holds playwright on patchright's minor.
+- `deps.toml` uv 0.13.1 -> 0.13.8 (GHSA-hq85-5cpj-mr62, sha256 checked against the release's `sha256.sum`);
+  `templates/remotion/package-lock.json` fast-uri 3.1.8 -> 3.1.9 (`npm update fast-uri --package-lock-only`;
+  GHSA-333x-w4r6-6crp, -w74x-v6f9-j3xg, -wjr9-j795-jxcr, -xhq7-xmqj-769h). Caddy comes from apt: not pinned here.
+- **Chromium for two drivers**: `playwright install` deletes every revision no Playwright install links to,
+  Patchright's included, so a lock where they need different revisions (playwright 1.65 / patchright 1.64) left
+  `StealthyFetcher` without its browser while `deps update chromium` said "installed". `bump-pins.sh` now
+  re-resolves with `playwright==<patchright minor>.*`, and `_up_chromium` raises `DepError` when a revision is
+  missing after the installs.
+- `maxxing deps check --notify` exits 0 when it found something (the feed reports it): the default job `deps-check`
+  ran it and its runs read "Failed (code 1)". Without `--notify` the exit code is unchanged (1 = vulnerable).
 
 ## 2.0.0-alpha.156 - 2026-11-15
 

@@ -189,6 +189,9 @@ async def status():
             "models": await asyncio.to_thread(service.models)}
 
 
+_auth_lock = asyncio.Lock()
+
+
 class AuthIn(BaseModel):
     kind: Literal["oauth_token", "api_key", "gateway"]
     value: str
@@ -202,20 +205,27 @@ async def set_auth(body: AuthIn):
     # printable ASCII only: a NUL byte made every turn fail to start, a lone surrogate could not be stored
     if len(value) < 10 or any(c.isspace() for c in value) or not (value.isascii() and value.isprintable()):
         raise HTTPException(400, detail={"error": "invalid", "message": "This does not look like a token"})
-    if body.kind == "gateway":
-        try:
-            gateway.connect(body.provider or "custom", body.base_url, value)
-        except ValueError as e:
-            raise HTTPException(400, detail={"error": "invalid", "message": str(e)}) from None
-        service.forget_models_cache()            # the picker switches to the gateway's ids right away
-        res = await asyncio.to_thread(run_test, provider=gateway.gw_provider(body.provider or "custom"))
-        return {"ok": res["ok"], **({"error": res["error"]} if not res["ok"] else {})}
-    # the Anthropic credentials: one of them at a time (both env vars set would be ambiguous), the
-    # gateway connection kept - both sides can be connected at once, each session picks with its model
-    for kind, name in SECRET_FOR.items():
-        config.set_secret(name, value if kind == body.kind else None)
-    service.forget_models_cache()                # ...and the picker gains the Anthropic ids back
-    res = await asyncio.to_thread(run_test, provider="anthropic")
+    async with _auth_lock:                              # two saves at once never restore each other's credential
+        if body.kind == "gateway":
+            try:
+                gateway.connect(body.provider or "custom", body.base_url, value)
+            except ValueError as e:
+                raise HTTPException(400, detail={"error": "invalid", "message": str(e)}) from None
+            service.forget_models_cache()                # the picker switches to the gateway's ids right away
+            res = await asyncio.to_thread(run_test, provider=gateway.gw_provider(body.provider or "custom"))
+            return {"ok": res["ok"], **({"error": res["error"]} if not res["ok"] else {})}
+        # the Anthropic credentials: one of them at a time (both env vars set would be ambiguous), the
+        # gateway connection kept - both sides can be connected at once, each session picks with its model
+        before = {name: config.get_secret(name) for name in SECRET_FOR.values()}
+        for kind, name in SECRET_FOR.items():
+            config.set_secret(name, value if kind == body.kind else None)
+        service.forget_models_cache()                    # ...and the picker gains the Anthropic ids back
+        res = await asyncio.to_thread(run_test, provider="anthropic")
+        if not res["ok"] and any(before.values()):      # a token that fails its test: the one stored before stays
+            for name, old in before.items():
+                config.set_secret(name, old or None)
+            service.forget_models_cache()
+            claude_auth.forget()
     return {"ok": res["ok"], **({"error": res["error"]} if not res["ok"] else {})}
 
 

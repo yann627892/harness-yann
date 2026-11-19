@@ -295,6 +295,21 @@ def test_literal_secrets_stay_out_of_the_cli_arguments(env, monkeypatch):
                                                        "env": {"PW": "hunter2"}}
 
 
+def test_docker_env_secrets_stay_out_of_the_cli_the_overview_and_the_export(env, monkeypatch):
+    from maxxing import mcp
+    seen, cli = [], mcp._cli
+    monkeypatch.setattr(mcp, "_cli", lambda args, folder, **kw: (seen.append(args), cli(args, folder, **kw))[1])
+    mcp.add("gh", {"type": "stdio", "command": "docker",
+                   "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN=hunter2pw", "--env",
+                            "DB_PASSWORD=s3cretpw", "--env=API_KEY=k3yvalue", "-e", "LOG_LEVEL=debug",
+                            "ghcr.io/github/github-mcp-server"]}, None)
+    shown = json.dumps([seen, mcp.export(), mcp.overview()])
+    for secret in ("hunter2pw", "s3cretpw", "k3yvalue"):
+        assert secret not in shown
+    assert "LOG_LEVEL=debug" in json.dumps(mcp.export())
+    assert _cfg(env)["mcpServers"]["gh"]["args"][4] == "GITHUB_PERSONAL_ACCESS_TOKEN=hunter2pw"
+
+
 def test_add_with_secrets_is_undone_when_the_config_cannot_be_completed(env, monkeypatch):
     from maxxing import mcp
     monkeypatch.setattr(mcp, "_write_cfg", lambda fn: None)    # the entry is not found where the CLI put it
@@ -303,24 +318,6 @@ def test_add_with_secrets_is_undone_when_the_config_cannot_be_completed(env, mon
                 None)
     assert e.value.code == "not_saved"
     assert "api" not in _cfg(env).get("mcpServers", {})
-
-
-def test_pc_mcp_registered_reads_no_project_file(env, monkeypatch):
-    """The PC card polls mcp_registered() every 3-15 s: it must not read every project's .mcp.json."""
-    from maxxing import mcp, pcbridge
-    mcp.add(pcbridge.MCP_NAME, {"type": "http", "url": "https://pc.example.com/mcp"}, None)
-    (env.ws / "projects" / "acme" / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": {"command": "x"}}}))
-    import threading
-    reads = []
-    real = mcp._read_mcp_json
-    me = threading.get_ident()                   # add() may start a background check that lists every server
-    monkeypatch.setattr(mcp, "_read_mcp_json",
-                        lambda f: (threading.get_ident() == me and reads.append(f)) or real(f))
-    assert pcbridge.mcp_registered() is True
-    assert reads == []
-    mcp.remove(mcp._id("user", None, pcbridge.MCP_NAME))
-    assert pcbridge.mcp_registered() is False
-    assert any(s["name"] == "x" for s in mcp.servers()) and reads
 
 
 def test_mcp_files_nested_too_deep_are_not_a_500(env):

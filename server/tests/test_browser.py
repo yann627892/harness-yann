@@ -1120,6 +1120,21 @@ def test_exits_come_back_and_resume_the_turns_that_asked(mx, monkeypatch):
     assert sent == ["sess01"] and exits._waiters() == []
 
 
+def test_the_session_list_reads_the_turns_waiting_for_an_exit_once(mx, monkeypatch):
+    from maxxing.browser import exits
+    from maxxing.sessions import service, store
+    metas = [store.create(store.new_meta(T, f"s{i}")) for i in range(3)]
+    exits.wait_down(metas[1]["id"], f"topic:{T}", {"id": "phone", "name": "Phone"}, {"id": "shop", "name": "Shop"})
+    reads = []
+    real = exits._waiters
+    monkeypatch.setattr(exits, "_waiters", lambda: reads.append(1) or real())
+    rows = {s["id"]: s for s in service.list_sessions()}
+    assert len(reads) == 1                                     # not once a session
+    assert rows[metas[1]["id"]]["browser_exit"]["exit"] == "phone"
+    assert rows[metas[0]["id"]]["browser_exit"] is None and rows[metas[2]["id"]]["browser_exit"] is None
+    assert service.get_session(metas[1]["id"])["browser_exit"]["exit"] == "phone"
+
+
 def test_too_many_profiles_put_the_oldest_unused_one_to_sleep(mx, monkeypatch):
     from maxxing import browser
     from maxxing.browser import pool as pool_mod
@@ -1587,3 +1602,24 @@ def test_a_running_profile_never_waits_behind_another_profile_starting(mx):
         finally:
             p._start_lock.release()
     assert asyncio.run(go()) is b
+
+
+def test_turn_ids_reject_a_trailing_newline():
+    from maxxing.browser import replays, turns
+    assert turns.SID_RE.match("abcdef")
+    assert not turns.SID_RE.match("abcdef\n")
+    assert not replays.SID_RE.match("abcdef\n")
+
+
+def test_a_browser_ask_with_a_bad_timestamp_does_not_break_the_listing(tmp_path, mx):
+    from maxxing import browser
+    from maxxing.browser import asks
+    folder = browser.asks_dir()
+    folder.mkdir(parents=True)
+    ok = {"id": "a" * 16, "session": "s1", "owner": "web", "at": time.time(), "status": "pending"}
+    bad = {**ok, "id": "b" * 16, "at": "yesterday"}
+    (folder / f"{ok['id']}.json").write_text(json.dumps(ok))
+    (folder / f"{bad['id']}.json").write_text(json.dumps(bad))
+    assert [d["id"] for d in asks.pending()] == [ok["id"]]
+    asks.scan()
+    asks.prime()

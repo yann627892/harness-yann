@@ -36,7 +36,6 @@ export const qk = {
     status: ['telegram', 'status'] as const,
     link: ['telegram', 'link'] as const,
   },
-  pc: ['pc'] as const,
   backup: {
     all: ['backup'] as const,
     status: ['backup', 'status'] as const,
@@ -60,7 +59,7 @@ export const qk = {
     preflight: ['system', 'preflight'] as const,
   },
   memory: ['memory'] as const,
-  stats: { tokens: ['stats', 'tokens'] as const },
+  stats: { tokens: ['stats', 'tokens'] as const, budget: ['stats', 'budget'] as const },
   docs: {
     list: ['docs', 'list'] as const,
     full: ['docs', 'full'] as const,
@@ -114,6 +113,8 @@ export const BUS_KEYS: Record<BusTopic, readonly (readonly unknown[])[]> = {
   open_sessions: [qk.openSessions],
   // a browser started / stopped / moved to another page, an ask_human request came or was answered
   browser: [['browser']],
+  // a device paired, came online / went away, was paused, used by Claude or taken over; an ask_human on a device
+  devices: [['devices']],
 }
 
 /** Query keys of one bus topic: `agents:<path>` = that agent's thread or unread changed (a message, a feed event

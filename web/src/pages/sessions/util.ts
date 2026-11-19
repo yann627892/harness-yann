@@ -35,9 +35,10 @@ export function contextWindow(
   opts: { chosen?: string | null; real?: string | null; windows?: Record<string, number | null | undefined> } = {},
 ): number {
   const { chosen, real, windows = {} } = opts
-  if (chosen && chosen !== real && windows[chosen]) return windows[chosen]!
+  const known = (id: string) => (Object.hasOwn(windows, id) ? windows[id] : undefined)   // not `constructor`, `toString`…
+  if (chosen && chosen !== real && known(chosen)) return known(chosen)!
   if (reported && reported > 0) return reported
-  if (real && windows[real]) return windows[real]!
+  if (real && known(real)) return known(real)!
   return tokens > CONTEXT_MAX ? 1_000_000 : CONTEXT_MAX
 }
 
@@ -172,7 +173,7 @@ export const isVideo = (p: string) => VID.test(p)
 export const isAudio = (p: string) => AUD.test(p)
 export const baseName = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
 // Same URL builder as the viewer, so the viewer's instant placeholder is the thumbnail already in the cache.
-export const thumbUrl = (p: string, w = 320) => fileThumbUrl(p, w)
+export const thumbUrl = (p: string, w = 320, h?: number) => fileThumbUrl(p, w, null, false, 0, null, h)
 export const rawUrl = (p: string, download = false) => `/api/files/raw?path=${encodeURIComponent(p)}${download ? '&download=1' : ''}`
 export const filesUrl = (p: string) => `/files?path=${encodeURIComponent(p)}`
 
@@ -357,7 +358,7 @@ export function diffStats(lines: DiffLine[]) {
 }
 
 export function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 999_500) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 10_000) return `${Math.round(n / 1000)}k`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
@@ -373,9 +374,9 @@ export function fmtCost(usd: number): string {
 export function fmtMs(ms: number): string {
   if (ms < 1000) return `${ms} ms`
   const s = ms / 1000
-  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`
-  const m = Math.floor(s / 60)
-  return `${m} min ${Math.round(s % 60)} s`
+  if (s < 59.5) return `${s.toFixed(s < 10 ? 1 : 0)} s`
+  const total = Math.round(s)                                  // round first: 119.6 s is 2 min 0 s, not 1 min 60 s
+  return `${Math.floor(total / 60)} min ${total % 60} s`
 }
 
 export function fmtElapsed(sec: number): string {

@@ -105,7 +105,6 @@ class MentionIn(BaseModel):
 class MessageIn(_Text):
     text: str = ""
     attachments: list[str] = Field(default_factory=list)
-    hud: bool = False  # sent from the HUD: Claude is told to answer short and may annotate the screen capture
     # sent during a voice call (the language of the call): Claude is told it is on the phone, answers short and
     # easy to say, in that language
     call: str | None = Field(None, pattern=r"^[a-z]{2,3}$")
@@ -237,7 +236,7 @@ async def delete_session(sid: str):
 
 @router.post("/sessions/{sid}/messages")
 async def send_message(sid: str, body: MessageIn):
-    return await _call(service.send_message, sid, body.text, body.attachments, "web", hud=body.hud,
+    return await _call(service.send_message, sid, body.text, body.attachments, "web",
                        call=body.call, voice_path=body.voice, client_id=body.client_id,
                        mentions=[m.model_dump() for m in body.mentions])
 
@@ -293,9 +292,13 @@ async def handoff(sid: str):
     return await _call(service.handoff, sid)
 
 
+class SeenIn(BaseModel):
+    seen: bool = True
+
+
 @router.post("/sessions/{sid}/seen")
-async def seen(sid: str):
-    await _call(service.mark_seen, sid)
+async def seen(sid: str, body: SeenIn | None = None):
+    await _call(service.mark_seen, sid, body.seen if body else True)
     return {"ok": True}
 
 

@@ -458,7 +458,7 @@ export function ImageView({ path, version, onPrev, onNext, position, className }
   }
 
   if (failed) return <FileInfoCard path={path} reason={t('files.imageError')} className={className} />
-  const thumb = fileThumbUrl(path, 320, version)
+  const thumb = fileThumbUrl(path, 320, version, false, 0, null, 320)
   const zoomStyle = zoom !== 'fit' && natural ? { width: natural.w * zoom, height: natural.h * zoom } : undefined
   // Zoomed: centred while smaller than the view (auto margins never push it out of reach when bigger).
   const zoomCls = zoom === 'fit' ? 'max-h-full max-w-full object-contain' : 'm-auto max-w-none shrink-0'
@@ -714,13 +714,13 @@ export function PdfView({ path, className }: { path: string; className?: string 
   const info = usePdfInfo(path, paged)
   const actions = (short: boolean) => (
     <>
-      <Button asChild variant="ghost" size="sm" className="h-7 pointer-coarse:h-9">
+      <Button asChild variant="ghost" size="sm" className="h-7 pointer-coarse:h-10">
         <a {...openRawProps(path)} aria-label={t(inIosApp() ? 'files.openRawInApp' : 'files.openRaw')}>
           <ExternalLink />
           <span className={cn(short && 'max-sm:sr-only')}>{t(inIosApp() ? 'files.openRawInApp' : 'files.openRaw')}</span>
         </a>
       </Button>
-      <Button asChild variant="ghost" size="sm" className="h-7 pointer-coarse:h-9">
+      <Button asChild variant="ghost" size="sm" className="h-7 pointer-coarse:h-10">
         <a {...downloadProps(path)} aria-label={t('files.download')}>
           <Download />
           <span className={cn(short && 'max-sm:sr-only')}>{t('files.download')}</span>

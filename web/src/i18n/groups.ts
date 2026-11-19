@@ -6,7 +6,7 @@
 export const GROUPS = {
   settings: [
     'mcp', 'system', 'stats', 'keys', 'memory', 'trash', 'features', 'security', 'profile', 'fonts', 'accent',
-    'density', 'tint', 'backup', 'import', 'telegram', 'packs', 'pc', 'license', 'register', 'cdef',
+    'density', 'tint', 'backup', 'import', 'telegram', 'packs', 'license', 'register', 'cdef',
     'keyfiles', 'about', 'appearance', 'skills', 'emoji', 'cconn',
   ],
   auth: ['onb', 'setup', 'login', 'pw', 'twofa'],
@@ -17,6 +17,8 @@ export const GROUPS = {
   mail: ['mail'],
   // the Harness Browser (Settings -> Features, topic menu, agent settings, live view)
   browser: ['browser'],
+  // Devices (Settings -> Devices, the session line, the live view window, an agent's devices)
+  devices: ['devices'],
   tasks: ['tasks', 'crons'],
   files: ['files', 'viewer'],
   // the media player: on the first player shown (a conversation shows one only for an audio file or in the viewer)
@@ -47,6 +49,8 @@ export const GROUPS = {
   // "Copy the text" of a file (features/files/copyText.tsx): with the Files page, else on the first file shown in the viewer
   ctext: ['ctext'],
   sel: ['sel'],
+  // "Mark as read / unread" of a session's menu (pages/sessions/Tree.tsx): on its first text asked
+  rmark: ['rmark'],
   // Office documents and the page-by-page PDF reader (features/files/docs.tsx, pdfPages.tsx): on the first one opened
   docs: ['doc'],
   // the sentences of the status line (components/shell/mood.ts): fetched once the shell shows, not before it

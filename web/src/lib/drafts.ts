@@ -15,9 +15,30 @@ export function forgetAllDrafts() {
     for (const k of keys) localStorage.removeItem(k)
     // the files of a mail being written (features/mail/localDraft.ts)
     indexedDB.deleteDatabase('mx-mail')
+    forgetAside()
   } catch {
     /* private mode */
   }
+}
+
+/** The side questions and answers (sessionStorage `mx-asides`, pages/sessions/Aside.tsx): of one session, or all of them.
+ *  The page listens for this event to empty its store too. */
+export const ASIDE_FORGET_EVENT = 'mx-forget-aside'
+function forgetAside(sid?: string) {
+  try {
+    if (sid === undefined) sessionStorage.removeItem('mx-asides')
+    else {
+      const raw = sessionStorage.getItem('mx-asides')
+      const state = raw ? JSON.parse(raw) : null
+      if (state?.state?.bySid && Object.hasOwn(state.state.bySid, sid)) {
+        delete state.state.bySid[sid]
+        sessionStorage.setItem('mx-asides', JSON.stringify(state))
+      }
+    }
+  } catch {
+    /* private mode, or not JSON */
+  }
+  window.dispatchEvent(new CustomEvent(ASIDE_FORGET_EVENT, { detail: sid }))
 }
 
 /** A deleted session: its draft keys go with it. */
@@ -25,6 +46,7 @@ export function forgetDraft(key: string) {
   try {
     for (const part of PARTS) localStorage.removeItem(`mx-draft:${key}${part}`)
     localStorage.removeItem(`mx-prefilled:${key}`)
+    forgetAside(key)
   } catch {
     /* private mode */
   }
@@ -54,4 +76,19 @@ export function pruneAgentDrafts(kind: 'agent' | 'group', paths: string[]) {
   } catch {
     /* private mode */
   }
+}
+
+/** Fired with the draft key when a draft is written from outside its composer: a mounted composer reloads it. */
+export const DRAFT_EVENT = 'mx-draft'
+
+/** Adds `text` after the draft of `key` (a dictation that came back once its box was gone: another page) and tells
+ *  a box of that key opened again meanwhile. */
+export function appendDraft(key: string, text: string) {
+  try {
+    const cur = localStorage.getItem(`mx-draft:${key}`) || ''
+    localStorage.setItem(`mx-draft:${key}`, [cur.trimEnd(), text].filter(Boolean).join(cur.trim() ? '\n\n' : ''))
+  } catch {
+    /* quota / private mode */
+  }
+  window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: key }))
 }

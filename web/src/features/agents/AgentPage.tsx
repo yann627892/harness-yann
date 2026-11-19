@@ -11,6 +11,7 @@
 // Opening the page marks its results as read (POST /seen).
 import * as React from 'react'
 import { AgentBrowserCard } from '@/features/browser/AgentBrowserCard'
+import { AgentDevicesCard } from '@/features/devices/AgentDevicesCard'
 import { Link, useParams, useSearchParams } from 'react-router'
 import {
   AlertCircle, AlertTriangle, ArrowLeft, Bot, Brain, Check, CheckCircle2, ChevronRight, Clock, ExternalLink, Info, KeyRound, Layers, Loader2, Lock, Mail, Maximize2, MessageSquare, MessageSquarePlus, Pencil, PlayCircle, Reply, Send, Settings2, ShieldCheck, Square, SquareTerminal, StickyNote, UsersRound, X, XCircle, Zap,
@@ -291,6 +292,7 @@ function EnabledSwitch({ agent: a }: { agent: AgentDetail }) {
 /* ---------------------------------------------------------------- The conversation */
 export function triggerLabel(t: TFn, m: Pick<AgentMessage, 'trigger' | 'source'>, crons: Cron[] = []): string {
   const tr = m.trigger || ''
+  if (tr === 'limit-retry') return t('agents.from.limitRetry')
   if (tr === 'manual' && m.source === 'command line') return t('agents.from.command')
   if (tr === 'manual' && m.source === 'conversation') return t('agents.from.conversation')
   if (tr === 'manual' || m.source === 'manual') return t('agents.from.manual')
@@ -301,6 +303,7 @@ export function triggerLabel(t: TFn, m: Pick<AgentMessage, 'trigger' | 'source'>
   if (tr === 'telegram' || m.source === 'telegram') return t('agents.from.telegram')
   if (tr.startsWith('agent:')) return t('agents.from.agent', { name: tr.slice(6).split('/').pop() || '' })
   if (tr.startsWith('feed:')) return m.source ? t('agents.from.feedNamed', { source: m.source }) : t('agents.from.feed')
+  if (tr.startsWith('after:')) return t('agents.from.after', { name: (m.source || '').replace(/^agent /, '') })
   return m.source || tr || t('agents.from.manual')
 }
 
@@ -308,7 +311,7 @@ export function triggerLabel(t: TFn, m: Pick<AgentMessage, 'trigger' | 'source'>
 function triggerIcon(m: Pick<AgentMessage, 'trigger' | 'source'>) {
   const tr = m.trigger || ''
   if (tr.startsWith('cron:')) return Clock
-  if (tr.startsWith('agent:')) return Bot
+  if (tr.startsWith('agent:') || tr.startsWith('after:')) return Bot
   if (tr === 'telegram') return Send
   if (/mail/i.test(m.source || '')) return Mail
   if (tr.startsWith('feed:')) return Zap
@@ -1256,7 +1259,7 @@ function Composer({ agent: a, replyTo, onCancelReply, onSend, ref }: { agent: Ag
           {chat && chat.state === 'running' && <StopButton onClick={() => stopChat.mutate(chat.id)} busy={stopChat.isPending} label={t('sessions.stop')} />}
         </>
       }
-      voice={<VoiceButton onTranscript={onTranscript} onVoiceMessage={onVoiceMessage} />}
+      voice={<VoiceButton draftKey={key} onTranscript={onTranscript} onVoiceMessage={onVoiceMessage} />}
       send={{ onClick: () => submit(), disabled: !canSend, busy: run.isPending || voiceUp, label: t('agents.run.now'), testId: 'agent-run' }}
       reason={files.uploading ? t('sessions.composer.uploading') : null}
       boxProps={{ ...(a.enabled ? files.dropProps : {}), 'data-testid': 'agent-box' }}
@@ -1301,6 +1304,7 @@ function Profile({ agent: a }: { agent: AgentDetail }) {
       <BrokenBanner agent={a} />
       <SandboxBanner agent={a} />
       <AgentBrowserCard path={a.path} who={a.display_name} title={t('agents.panel.browser')} />
+      <AgentDevicesCard path={a.path} devices={a.devices || []} />
 
       <PanelSection title={t('agents.panel.role')}>
         <RoleEditor agent={a} />
@@ -1330,7 +1334,7 @@ function Profile({ agent: a }: { agent: AgentDetail }) {
           <button
             type="button"
             onClick={() => setAdvanced('protection')}
-            className={cn('-mx-1 mt-1 flex items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-accent', !a.sandbox && readsOutside(a) ? 'text-warning' : 'text-muted-foreground')}
+            className={cn('-mx-1 mt-1 flex items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-accent pointer-coarse:min-h-10', !a.sandbox && readsOutside(a) ? 'text-warning' : 'text-muted-foreground')}
             data-testid="agent-sandbox-line"
           >
             {a.sandbox ? <ShieldCheck className="size-3.5 shrink-0" /> : <Lock className="size-3.5 shrink-0 opacity-60" />}
@@ -1382,7 +1386,7 @@ function Profile({ agent: a }: { agent: AgentDetail }) {
         </button>
         <Link
           to={`/agents/groups/new?project=${encodeURIComponent(a.project)}&with=${encodeURIComponent(a.path)}`}
-          className="flex items-center gap-1.5 justify-self-start px-1 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 justify-self-start px-1 text-xs text-muted-foreground hover:text-foreground pointer-coarse:min-h-10"
           data-testid="agent-new-group"
         >
           <UsersRound className="size-3.5 shrink-0" /> {t('groups.withAgent')}
@@ -1463,7 +1467,7 @@ function RoleEditor({ agent: a }: { agent: AgentDetail }) {
         <button
           type="button"
           onClick={() => setV(a.description)}
-          className="group min-w-0 rounded-lg bg-muted px-3 py-2 text-left text-sm break-words whitespace-pre-line hover:bg-muted"
+          className="group min-w-0 rounded-lg bg-muted px-3 py-2 text-left text-sm break-words whitespace-pre-line hover:bg-muted pointer-coarse:min-h-10"
           data-testid="agent-role"
         >
           {a.description ? <Sensitive block>{a.description}</Sensitive> : <span className="text-muted-foreground italic">{t('agents.noRole')}</span>}

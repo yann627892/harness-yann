@@ -49,7 +49,7 @@ MAX_RULES = 200  # per-source Telegram rules kept in config.json (read everywher
 _ALERT_COLS = (("actions", "TEXT"), ("ref", "TEXT"), ("agent", "TEXT"), ("resolved", "REAL"), ("resolution", "TEXT"),
                ("hops", "INTEGER"))     # hops: posted from an agent run (its depth + 1), carried to the runs it starts
 HANDLERS = {"approval": "approvals", "health": "health", "mailsend": "mail.outbox", "human": "browser.asks",
-            "browserexit": "browser.exits", "browsersite": "browser.domains"}   # ref kind -> module with feed_action(value, action, by)
+            "browserexit": "browser.exits", "browsersite": "browser.domains", "devask": "devices.asks"}   # ref kind -> module with feed_action(value, action, by)
 ACTION_STYLES = ("primary", "danger", "default", "link")
 _lock = threading.Lock()
 _aside_lock = config.ProcessLock("feed-aside")   # setting an unreadable feed.db aside
@@ -183,7 +183,7 @@ def _utf8(s: str | None) -> str | None:
 def _clean_actions(actions: Any) -> str | None:
     out = []
     for a in (actions or [])[:4]:
-        if not isinstance(a, dict) or not re.match(r"^[a-z][a-z0-9_-]{0,19}$", str(a.get("id") or "")):
+        if not isinstance(a, dict) or not re.match(r"^[a-z][a-z0-9_-]{0,19}\Z", str(a.get("id") or "")):
             raise FeedError(400, "bad_action", "An action needs an id (a-z, 0-9, - _)")
         out.append({"id": a["id"], "label": " ".join(str(a.get("label") or a["id"]).split())[:40],
                     "style": a.get("style") if a.get("style") in ACTION_STYLES else "default"})
@@ -207,7 +207,7 @@ def post(title: str, body: str = "", level: str = "info", source: str = "custom"
     acts = _clean_actions(actions)
     ref = (_utf8(str(ref)) or "")[:300] or None if ref else None
     agent = (_utf8(str(agent)) or "")[:300] or None if agent else None
-    dedupe, group = (_utf8(str(v)) if v else v for v in (dedupe, group))
+    dedupe, group = ((_utf8(str(v))[:200] or None) if v else None for v in (dedupe, group))
     title = " ".join((title or "").split())[:TITLE_MAX]
     if not title:
         raise FeedError(400, "empty", "An event needs a title")

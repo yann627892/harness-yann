@@ -3,12 +3,12 @@ import { Link } from 'react-router'
 import { BarChart3, RotateCw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { qk, useSaveSettings, useSettings, useTokenStats, useUsage } from '@/lib/queries'
+import { qk, useBudget, useSaveSettings, useSettings, useTokenStats, useUsage } from '@/lib/queries'
 import type { TokenCounts, TokenStats, UsageWindow } from '@/lib/types'
 import { fmtDate, fmtNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useLang, useT } from '@/i18n'
-import { Button, EmptyState, ProgressBar, Segmented, Sensitive, Skeleton, Switch } from '@/components/ui'
+import { Button, EmptyState, Input, ProgressBar, Segmented, Sensitive, Skeleton, Switch } from '@/components/ui'
 import { Callout, SettingRow } from '@/features/common'
 import { Chart, compact } from '@/pages/dashboard/charts'
 import { SettingsCard, SectionStack } from './ui'
@@ -78,6 +78,95 @@ function QuotaCard() {
             <Callout tone="info">{usageReason(usage.data?.reason, usage.data?.retry_at)}</Callout>
           )}
         </div>
+      )}
+    </SettingsCard>
+  )
+}
+
+/** The server's daily budget: the amount (saved on Enter or when the field is left) and what today cost so far. */
+function BudgetCard() {
+  const t = useT()
+  const qc = useQueryClient()
+  const { data: settings } = useSettings()
+  const save = useSaveSettings()
+  const budget = useBudget()
+  const saved = settings?.daily_budget_usd ?? 0
+  const [text, setText] = React.useState<string | null>(null)       // null: not being typed, the saved amount shows
+  const commit = () => {
+    const n = text === null || text.trim() === '' ? 0 : Number(text.replace(',', '.'))
+    setText(null)
+    if (!Number.isFinite(n) || n < 0 || n > 100000 || Math.round(n * 100) / 100 === saved) return
+    save.mutate({ daily_budget_usd: Math.round(n * 100) / 100 }, { onSettled: () => void qc.invalidateQueries({ queryKey: qk.stats.budget }) })
+  }
+  const b = budget.data
+  const pct = b && b.usd_per_day > 0 ? Math.min(100, (b.spent_today / b.usd_per_day) * 100) : 0
+  return (
+    <SettingsCard title={t('stats.budget')} description={t('stats.budgetDesc')}>
+      <SettingRow label={t('stats.budgetField')} description={t('stats.budgetFieldDesc')} htmlFor="mx-budget">
+        <Input
+          id="mx-budget"
+          data-testid="daily-budget"
+          inputMode="decimal"
+          className="w-28 text-right tabular-nums"
+          disabled={!settings}
+          value={text ?? String(saved)}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur()
+          }}
+        />
+      </SettingRow>
+      {b && b.usd_per_day > 0 && (
+        <div className="mt-4 grid gap-1.5" data-testid="budget-today">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="font-medium">{t('stats.budgetToday')}</span>
+            <span className="tabular-nums">{t('stats.budgetSpent', { spent: b.spent_today.toFixed(2), limit: b.usd_per_day.toFixed(2) })}</span>
+          </div>
+          <ProgressBar value={pct} tone={b.reached ? 'error' : pct >= 80 ? 'warn' : undefined} label={t('stats.budgetToday')} />
+          {b.reached && <p className="text-xs text-muted-foreground">{t('stats.budgetReached')}</p>}
+        </div>
+      )}
+    </SettingsCard>
+  )
+}
+
+/** A job or an agent run stopped by the plan's usage limit starts again after the reset (config `limit_retry`,
+ *  `limit_retry_delay_s`; server/maxxing/crons.py limit_retry_at). */
+function LimitRetryCard() {
+  const t = useT()
+  const { data: s } = useSettings()
+  const save = useSaveSettings()
+  const saved = s?.limit_retry_delay_s ?? 60
+  const [text, setText] = React.useState<string | null>(null)
+  const commit = () => {
+    const n = text === null || text.trim() === '' ? saved : Number(text)
+    setText(null)
+    if (!Number.isInteger(n) || n < 0 || n > 3600 || n === saved) return
+    save.mutate({ limit_retry_delay_s: n })
+  }
+  const on = s?.limit_retry !== false
+  return (
+    <SettingsCard>
+      <SettingRow label={t('stats.limitRetry')} description={t('stats.limitRetryDesc')} htmlFor="mx-limit-retry">
+        <Switch id="mx-limit-retry" data-testid="limit-retry" checked={on} disabled={!s} onCheckedChange={(v) => save.mutate({ limit_retry: v })} />
+      </SettingRow>
+      {on && (
+        <SettingRow label={t('stats.limitRetryDelay')} description={t('stats.limitRetryDelayDesc')} htmlFor="mx-limit-retry-delay">
+          <Input
+            id="mx-limit-retry-delay"
+            data-testid="limit-retry-delay"
+            inputMode="numeric"
+            className="w-28 text-right tabular-nums"
+            disabled={!s}
+            value={text ?? String(saved)}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+            }}
+          />
+        </SettingRow>
       )}
     </SettingsCard>
   )
@@ -220,6 +309,8 @@ function TokensCard() {
 export function UsageSection() {
   return (
     <SectionStack>
+      <BudgetCard />
+      <LimitRetryCard />
       <QuotaCard />
       <TokensCard />
     </SectionStack>

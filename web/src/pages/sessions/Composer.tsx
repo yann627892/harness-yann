@@ -22,7 +22,7 @@ import { CloseButton, MessageBox, StopButton, TuckedCard } from '@/features/comp
 const NO_ITEMS: QueueItem[] = []
 
 export { AttachmentChip, type Att }
-export const fromDraftAtt = (a: DraftAtt): Att => ({ lid: Math.random().toString(36).slice(2), name: a.name, size: a.size, path: a.path, progress: 1, error: null, preview: isImage(a.path) ? thumbUrl(a.path, 160) : null })
+export const fromDraftAtt = (a: DraftAtt): Att => ({ lid: Math.random().toString(36).slice(2), name: a.name, size: a.size, path: a.path, progress: 1, error: null, preview: isImage(a.path) ? thumbUrl(a.path, 160, 160) : null })
 export const toDraftAtts = (atts: Att[]): DraftAtt[] => atts.filter((a) => a.path && !a.error).map((a) => ({ path: a.path!, name: a.name, size: a.size }))
 
 export type ComposerHandle = { addFiles: (files: File[]) => void; focus: () => void; quote: (text: string) => void; bringBack: (s: Seed) => void }
@@ -281,11 +281,21 @@ export const Composer = React.forwardRef<ComposerHandle, {
         const rest = cur.slice(shown.length).replace(/^\n\n/, '')
         return [next, rest].filter(Boolean).join('\n\n')
       })
+    // Taken out of the server's queue: the messages must land somewhere - the box, or its draft when the box went
+    // away during the request (another page).
+    const keep = (sd: Seed) => {
+      if (mounted.current) return bringBack(sd)
+      if (sd.text) saveDraft(draftKey, [sd.text, loadDraft(draftKey).trim()].filter(Boolean).join('\n\n'))
+      const had = loadAtts(draftKey)
+      const add = sd.attachments.filter((p) => !had.some((x) => x.path === p)).map((p) => ({ path: p, name: p.split('/').pop() || p, size: 0 }))
+      if (add.length) saveAtts(draftKey, [...had, ...add])
+      window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: draftKey }))
+    }
     try {
       const msgs = await onTakeQueue()
       if (!local) {
         if (!msgs.length) toast.info(t('sessions.queue.editNothing'))
-        else bringBack(toSeed(msgs))
+        else keep(toSeed(msgs))
         return
       }
       const got = toSeed(msgs)
@@ -293,7 +303,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
       const gone = local.attachments.filter((p) => !got.attachments.includes(p))
       if (gone.length) setAtts((a) => a.filter((x) => !x.path || !gone.includes(x.path)))
       const extra = got.attachments.filter((p) => !local.attachments.includes(p))
-      if (extra.length) bringBack({ text: '', quotes: [], attachments: extra })
+      if (extra.length) keep({ text: '', quotes: [], attachments: extra })
       window.setTimeout(() => setTaken(false), 3000) // a message queued since then shows again
     } catch {
       // the toast of the mutation says why; the messages are still queued: take back what was put here
@@ -769,7 +779,7 @@ export const Composer = React.forwardRef<ComposerHandle, {
       onFiles={addFiles}
       toolbar={toolbar}
       actions={running && onStop ? <StopButton onClick={onStop} busy={stopping} label={t('sessions.stop')} /> : null}
-      voice={<VoiceButton onTranscript={onVoice} onVoiceMessage={props.onSendVoice ? onVoiceMessage : undefined} />}
+      voice={<VoiceButton draftKey={draftKey} onTranscript={onVoice} onVoiceMessage={props.onSendVoice ? onVoiceMessage : undefined} />}
       send={{ onClick: () => send(), disabled: !!blocked || empty, busy: sending, label: running ? t('sessions.composer.queue') : t('sessions.composer.send') }}
       reason={reason}
       dimmed={!!disabledReason}
