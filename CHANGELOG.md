@@ -35,6 +35,9 @@ Fixed:
 ### Added by this fork (not upstream)
 
 New:
+- **Upstream progress in Settings -> Version.** Next to the fork's update count, the page now says how many
+  commits the original Harness Maxxing project has that this fork has not merged yet. It is information only:
+  the Update button still installs this fork's updates.
 - **Several LLM gateways at the same time.** Settings -> Claude -> **Gateway** connects one of each: OpenCode Zen
   (pay-as-you-go credits), OpenCode Go (a Go subscription), OpenRouter, or a custom Anthropic-compatible endpoint.
   They live beside a subscription token or an API key instead of replacing them: each session picks its credential

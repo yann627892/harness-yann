@@ -34,6 +34,8 @@ connection — that migration must keep working.
 - **Suggestions stay a lazy i18n group** (`composer`/`settings`), never `core`: `test_web_first_load` caps
   `/sessions` at 20 000 bytes in French. `files` is not preloaded on `/sessions`; that exception is listed in
   `tests/test_web_i18n_groups.py` (`KNOWN`).
+- **The upstream counter is informational only**: `upstream_behind` counts original-project commits not merged into
+  the fork; `behind` still means this fork's updates and keeps the Update button. Keys stay in the `system` group.
 - **`web/dist` is committed**: any `web/` change needs `npm run build` and the rebuilt `dist` in the same commit.
 - **`README.md` is the fork's landing page**: its title is `# Harness Yann` and a block between
   `<!-- FORK: start -->` and `<!-- FORK: end -->`, right under the badges, states that this is an unofficial fork

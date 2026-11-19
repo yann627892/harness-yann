@@ -944,6 +944,8 @@ export type VersionInfo = {
   commit: string
   latest_commit: string | null
   behind: number | null
+  /** Commits in the original (unforked) project not merged into this fork yet: informational only. */
+  upstream_behind?: number | null
   checking?: boolean
   checked_at?: number | null
   /** Changes made to the product code on this server (kept as local commits, carried over by updates). */

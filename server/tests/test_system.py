@@ -197,7 +197,7 @@ def test_version(client, monkeypatch):
     answers = {("rev-parse", "--short", "HEAD"): "abc1234", ("fetch", "--quiet", "origin"): "",
                ("rev-parse", "--short", "FETCH_HEAD"): "def5678", ("rev-list", "--count", "HEAD..FETCH_HEAD"): "3"}
     monkeypatch.setattr(system_api, "_git", lambda *a, timeout=10, auth=False: answers.get(a))
-    system_api._ver.update(at=0.0, latest=None, behind=None, busy=False)
+    system_api._ver.update(at=0.0, latest=None, behind=None, upstream_behind=None, busy=False)
     v = client.get("/api/system/version").json()
     assert v["version"] and v["commit"] == "abc1234"
     for _ in range(50):
@@ -205,13 +205,14 @@ def test_version(client, monkeypatch):
             break
         time.sleep(0.02)
     v = client.get("/api/system/version").json()
-    assert v["latest_commit"] == "def5678" and v["behind"] == 3
+    assert v["latest_commit"] == "def5678" and v["behind"] == 3 and v["upstream_behind"] is None
 
     answers.pop(("fetch", "--quiet", "origin"))                     # offline: tolerated
     answers[("ls-remote", "origin", "HEAD")] = None
     system_api._ver.update(at=0.0, busy=False)
     system_api._refresh_remote()
     assert system_api._ver["latest"] is None and system_api._ver["behind"] is None
+    assert system_api._ver["upstream_behind"] is None
 
     # "Check now": refresh=1 checks synchronously
     answers[("fetch", "--quiet", "origin")] = ""
@@ -219,6 +220,26 @@ def test_version(client, monkeypatch):
     system_api._ver.update(at=time.time(), busy=False)              # fresh cache: only refresh=1 re-checks
     v = client.get("/api/system/version?refresh=1").json()
     assert v["behind"] == 5 and v["checking"] is False and v["checked_at"]
+
+
+def test_version_reports_unmerged_upstream_commits(client, monkeypatch):
+    """The original project's advance is informational: it must not change `behind` (the fork's own updates)."""
+    upstream_fetch = ("fetch", "--quiet", system_api.UPSTREAM, "stable")
+    answers = {("rev-parse", "--short", "HEAD"): "abc1234", ("rev-parse", "--short", "FETCH_HEAD"): "def5678"}
+
+    def fake_git(*a, timeout=10, auth=False):
+        if a in (("fetch", "--quiet", "origin"), upstream_fetch):
+            return ""
+        if a == ("rev-list", "--count", "HEAD..FETCH_HEAD"):
+            return "8" if upstream_fetch in calls else "3"        # origin first, upstream second
+        return answers.get(a)
+
+    calls = []
+    monkeypatch.setattr(system_api, "_git", lambda *a, **kw: calls.append(a) or fake_git(*a, **kw))
+    system_api._ver.update(at=0.0, latest=None, behind=None, upstream_behind=None, busy=False)
+    v = client.get("/api/system/version?refresh=1").json()
+    assert v["behind"] == 3 and v["upstream_behind"] == 8
+    assert upstream_fetch in calls
 
 
 def test_version_check_uses_the_update_token(mx, monkeypatch):

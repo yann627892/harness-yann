@@ -1973,6 +1973,8 @@ export const en = {
   'system.version': 'Version',
   'system.upToDate': 'Up to date',
   'system.behind': '{n} updates available',
+  'system.upstreamBehind': 'Original Harness Maxxing: {count} commits not merged into this fork',
+  'system.upstreamBehind#one': 'Original Harness Maxxing: {count} commit not merged into this fork',
   'system.unknownLatest': 'Latest version unknown',
   'system.unknownLatestDesc': 'GitHub could not be reached with the update token. Run `maxxing update --check` on the server to see why (expired token, no network).',
   'system.check': 'Check now',

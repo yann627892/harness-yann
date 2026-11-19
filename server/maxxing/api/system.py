@@ -105,7 +105,8 @@ async def logs(unit: str = health.SELF_UNIT, lines: int = Query(200, ge=1, le=50
 
 # ---- version / update -----------------------------------------------------------------------
 REMOTE_TTL = 600
-_ver: dict[str, Any] = {"at": 0.0, "latest": None, "behind": None, "busy": False}
+UPSTREAM = "https://github.com/makushingu/harness-maxxing.git"   # the original project, read-only: how far it is ahead
+_ver: dict[str, Any] = {"at": 0.0, "latest": None, "behind": None, "upstream_behind": None, "busy": False}
 _ver_lock = threading.Lock()
 
 
@@ -123,13 +124,13 @@ def _git(*args: str, timeout: float = 10, auth: bool = False) -> str | None:
 
 
 def _refresh_remote() -> None:
-    """Fetch origin (thread) -> latest commit and how many commits we are behind."""
+    """Fetch origin (this fork) for updates, then the original project for unmerged upstream commits."""
     try:
-        latest = behind = None
+        latest = behind = upstream_behind = None
         from .. import license
         if license.enabled():                          # pre-a87 install still on archives: nothing to fetch until
             with _ver_lock:                            # it has moved to git (a few minutes after the start)
-                _ver.update(latest=latest, behind=behind)
+                _ver.update(latest=latest, behind=behind, upstream_behind=upstream_behind)
             return
         if _git("fetch", "--quiet", "origin", timeout=30, auth=True) is not None:
             latest = _git("rev-parse", "--short", "FETCH_HEAD")
@@ -138,8 +139,13 @@ def _refresh_remote() -> None:
         else:
             line = _git("ls-remote", "origin", "HEAD", timeout=20, auth=True)
             latest = line.split()[0][:7] if line else None
+        # The original project is public: no update token. This fork carries its history through merges, so
+        # HEAD..FETCH_HEAD here is exactly the upstream commits not merged into this fork yet (informational).
+        if _git("fetch", "--quiet", UPSTREAM, "stable", timeout=30) is not None:
+            b = _git("rev-list", "--count", "HEAD..FETCH_HEAD")
+            upstream_behind = int(b) if b and b.isdigit() else None
         with _ver_lock:
-            _ver.update(latest=latest, behind=behind)
+            _ver.update(latest=latest, behind=behind, upstream_behind=upstream_behind)
     finally:
         with _ver_lock:
             _ver.update(at=time.time(), busy=False)
@@ -219,7 +225,8 @@ def version_info(refresh: bool = False) -> dict:
         from .. import license
         lic = license.status()
         lic = {k: lic.get(k) for k in ("enabled", "key_hint", "email", "kind", "updates_until", "expires_at", "channel", "latest", "message", "max_servers", "moved_to_git", "move_error")}
-        out = {"version": __version__, "commit": commit, "latest_commit": _ver["latest"], "behind": _ver["behind"], "license": lic,
+        out = {"version": __version__, "commit": commit, "latest_commit": _ver["latest"], "behind": _ver["behind"],
+               "upstream_behind": _ver["upstream_behind"], "license": lic,
                "checking": _ver["busy"], "checked_at": _ver["at"] or None, "custom": custom, "pending": pend}
     from .. import smartupdate
     rep = smartupdate.last_report()

@@ -103,6 +103,12 @@ export function VersionCard() {
         {v.behind == null && v.checked_at && !v.checking && !check.isPending ? (
           <p className="text-[13px] text-muted-foreground">{t('system.unknownLatestDesc')}</p>
         ) : null}
+        {!!v.upstream_behind && (
+          <p className="text-[13px] text-muted-foreground">
+            <GitBranch className="mr-1.5 inline size-3.5 align-[-2px]" />
+            {t('system.upstreamBehind', { count: v.upstream_behind })}
+          </p>
+        )}
         {v.license?.enabled && (
           <p className="text-[13px] text-muted-foreground">
             <KeyRound className="mr-1.5 inline size-3.5 align-[-2px]" />

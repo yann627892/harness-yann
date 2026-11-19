@@ -1957,6 +1957,8 @@ export const fr: Record<keyof typeof en, string> = {
   'system.version': 'Version',
   'system.upToDate': 'À jour',
   'system.behind': '{n} mises à jour disponibles',
+  'system.upstreamBehind': 'Projet d’origine Harness Maxxing : {count} commits non fusionnés dans ce fork',
+  'system.upstreamBehind#one': 'Projet d’origine Harness Maxxing : {count} commit non fusionné dans ce fork',
   'system.unknownLatest': 'Dernière version inconnue',
   'system.unknownLatestDesc': 'GitHub est injoignable avec le jeton de mise à jour. Lancez `maxxing update --check` sur le serveur pour voir pourquoi (jeton expiré, pas de réseau).',
   'system.check': 'Vérifier',
