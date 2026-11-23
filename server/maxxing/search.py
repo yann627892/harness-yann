@@ -61,7 +61,7 @@ MAX_FILES = 20_000                   # other text files, whole workspace (memory
 BUCKET_MIN, BUCKET_MAX = 50, 1_000    # per topic / project / root: MAX_FILES // buckets, clamped to this range
 MAX_SCAN_ENTRIES = 20_000            # directory entries one bucket's walk may visit (big data folders)
 FILES_EVERY_S = 600                  # background loop: full walk of the files at most this often
-FILE_RULES = "2"                     # bump when the indexing rules change: rows are cleaned, then VACUUM
+FILE_RULES = "3"                     # bump when the indexing rules change: rows are cleaned, then VACUUM
 MAX_MESSAGE_CHARS = 20_000
 READ_CHUNK = 4 * 1024 * 1024         # session log bytes read per pass and session
 WAL_LIMIT = 4 * 1024 * 1024          # journal_size_limit: bytes the WAL keeps after a checkpoint
@@ -173,6 +173,11 @@ def _log_ident(p: Path) -> str:
         return ""
 
 
+def _clean(v) -> str:
+    """Text SQLite can store: a lone surrogate (valid in JSON, not in UTF-8) would stop the whole index pass."""
+    return str(v).encode("utf-8", "replace").decode("utf-8")
+
+
 def _stat_key(p: Path) -> tuple | None:
     try:
         st = p.stat()
@@ -198,7 +203,7 @@ def _index_sessions(con: sqlite3.Connection) -> None:
         if m is None or size < 0:                            # unreadable / no log: drop its rows
             alive.discard(key)
             continue
-        title, path = m.get("title") or "Untitled", m.get("path") or ""
+        title, path = _clean(m.get("title") or "Untitled"), _clean(m.get("path") or "")
         row = con.execute("SELECT sig FROM src WHERE key=?", (key,)).fetchone()
         sig = json.loads(row[0]) if row else None
         read_all = True
@@ -228,7 +233,7 @@ def _index_sessions(con: sqlite3.Connection) -> None:
                 # or the session would stop being indexed and re-read on every query.
                 sig["offset"] += _skip_line(p, sig["offset"] + len(chunk)) - sig["offset"]
             if end:
-                lines = chunk[:end].decode("utf-8", "replace").splitlines()
+                lines = chunk[:end].decode("utf-8", "replace").split("\n")
                 for ev in normalize.normalize_lines(lines):
                     if ev.get("type") in ("user", "assistant", "voice_text") and (ev.get("text") or "").strip():
                         con.execute(
@@ -286,24 +291,26 @@ def _index_groups(con: sqlite3.Connection) -> None:
         if sig is None:
             sig = {"ino": ino, "offset": 0, "group": list(stamp[1])}
             con.execute("INSERT INTO items(src, kind, ref, path, title, body, at) VALUES (?,?,?,?,?,?,?)",
-                        (key, "group", path, path, g.get("name") or parts[1], "", stamp[0][1] / 1e9))
+                        (key, "group", path, path, _clean(g.get("name") or parts[1]), "", stamp[0][1] / 1e9))
         if sig["offset"] < size:
             with open(f, "rb") as fh:
                 fh.seek(sig["offset"])
                 chunk = fh.read(READ_CHUNK)
             end = chunk.rfind(b"\n") + 1                     # complete lines only
-            for line in chunk[:end].decode("utf-8", "replace").splitlines():
+            for line in chunk[:end].decode("utf-8", "replace").split("\n"):
                 try:
                     m = json.loads(line)
                 except ValueError:
                     continue
-                text = (m.get("text") or "").strip() if isinstance(m, dict) and m.get("kind") == "message" else ""
+                raw = m.get("text") if isinstance(m, dict) and m.get("kind") == "message" else None
+                text = raw.strip() if isinstance(raw, str) else ""
                 if not text:
                     continue
                 author = str(m.get("author") or "")
                 who = "Owner" if author == "me" else "@" + hs.get(author, agent_rooms.slug(author))
                 con.execute("INSERT INTO items(src, kind, ref, path, title, body, at) VALUES (?,?,?,?,?,?,?)",
-                            (key, "group", path, path, "", f"{who}: {text}"[:MAX_MESSAGE_CHARS], m.get("at")))
+                            (key, "group", path, path, "", _clean(f"{who}: {text}")[:MAX_MESSAGE_CHARS],
+                             m.get("at") if isinstance(m.get("at"), (int, float)) else None))
             sig["offset"] += end
         con.execute("INSERT OR REPLACE INTO src(key, sig) VALUES (?, ?)", (key, json.dumps(sig)))
         if sig["offset"] >= size:
@@ -332,7 +339,7 @@ def _text_file(name: str) -> bool:
     low = name.lower()
     if low in SKIP_FILES:
         return False
-    return Path(low).suffix in TEXT_EXT or low in MEMORY_NAMES
+    return Path(low).suffix in TEXT_EXT or low.endswith(".env.example") or low in MEMORY_NAMES
 
 
 def _index_one(con: sqlite3.Connection, base: str, fp: str, st: os.stat_result, known: dict) -> None:
@@ -372,7 +379,11 @@ def _file_stat(fp: str, base: str) -> os.stat_result | None:
             return None
         if os.path.islink(fp):
             root = os.path.realpath(base)
-            if os.path.commonpath([os.path.realpath(fp), root]) != root:
+            real = os.path.realpath(fp)
+            if os.path.commonpath([real, root]) != root:
+                return None
+            # the folders the walk skips stay skipped through a link
+            if any(d in SKIP_DIRS or d.startswith(".") for d in Path(os.path.relpath(real, root)).parts[:-1]):
                 return None
     except (OSError, ValueError):                            # UnicodeEncodeError is a ValueError
         return None
@@ -382,16 +393,24 @@ def _file_stat(fp: str, base: str) -> os.stat_result | None:
 def _subdirs(d: str, base: str) -> list[str]:
     """Sub-folders of `d`; a linked folder only when it points inside the workspace (as _file_stat does for files)."""
     try:
-        out, root = [], None
+        out, root = [], os.path.realpath(base)
+        try:
+            if os.path.commonpath([os.path.realpath(d), root]) != root:      # projects/, topics/, agents/ linked outside
+                return []
+        except ValueError:
+            return []
         for e in os.scandir(d):
             if not e.is_dir(follow_symlinks=True) or e.name in SKIP_DIRS or e.name.startswith("."):
                 continue
             if e.is_symlink():
-                root = root or os.path.realpath(base)
+                real = os.path.realpath(e.path)
                 try:
-                    if os.path.commonpath([os.path.realpath(e.path), root]) != root:
+                    if os.path.commonpath([real, root]) != root:
                         continue
                 except ValueError:
+                    continue
+                # the folders the walk skips stay skipped through a link (as in _file_stat), the target itself included
+                if any(n in SKIP_DIRS or n.startswith(".") for n in Path(os.path.relpath(real, root)).parts):
                     continue
             out.append(e.path)
         return sorted(out)
@@ -686,17 +705,25 @@ def search(q: str, kinds: list[str] | None = None, limit: int = 30,
                     WHERE fts MATCH ? AND items.kind IN ({marks}) ORDER BY fts.rowid DESC LIMIT ?)""",
                 (match, *wanted, RANK_MAX)).fetchone()[0] or 0
             # best row per session / file / task (bare columns of MIN)
-            # (MATERIALIZED: bm25/snippet cannot run inside the aggregate itself)
-            rows = con.execute(
+            # (MATERIALIZED: bm25 cannot run inside the aggregate itself)
+            best = con.execute(
                 f"""WITH hits AS MATERIALIZED (
                         SELECT items.kind AS kind, items.ref AS ref, items.path AS path, items.title AS title,
-                               items.at AS at, snippet(fts, 1, char(2), char(3), '…', 16) AS snip,
-                               bm25(fts, 4.0, 1.0) AS score
+                               items.at AS at, fts.rowid AS id, bm25(fts, 4.0, 1.0) AS score
                         FROM fts JOIN items ON items.id = fts.rowid
                         WHERE fts MATCH ? AND fts.rowid >= ? AND items.kind IN ({marks}))
-                    SELECT kind, ref, path, title, at, snip, MIN(score) AS best FROM hits
+                    SELECT kind, ref, path, title, at, id, MIN(score) AS best FROM hits
                     GROUP BY kind, ref ORDER BY best LIMIT ?""",
                 (match, floor, *wanted, limit)).fetchall()
+            # snippets of the shown rows only: snippet() tokenizes the whole text again, so running it on every
+            # matching row (thousands for a common prefix) cost ten times the ranking itself
+            ids = [r[5] for r in best]
+            snips = dict(con.execute(
+                f"""SELECT rowid, snippet(fts, 1, char(2), char(3), '…', 16) FROM fts
+                    WHERE fts MATCH ? AND rowid IN ({','.join('?' * len(ids))})""",
+                (match, *ids)).fetchall()) if ids else {}
+            rows = [(kind, ref, path, title, at, snips.get(rid) or "", score)
+                    for kind, ref, path, title, at, rid, score in best]
             untitled = [f"{r[0][0]}:{r[1]}" for r in rows if r[0] in ("session", "group") and not r[3]]
             titles = dict(con.execute(
                 f"SELECT ref, title FROM items WHERE body='' AND src IN ({','.join('?' * len(untitled))})",

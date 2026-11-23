@@ -268,7 +268,7 @@ def parse_once(value: str, zone: ZoneInfo | None = None) -> str:
         d = dt.datetime.fromisoformat(text)
         if d.tzinfo is not None:
             d = d.astimezone(zone or tz()).replace(tzinfo=None)   # year 1 / 9999 with an offset: out of range
-        return d.strftime("%Y-%m-%dT%H:%M")
+        return d.isoformat(timespec="minutes")      # strftime("%Y") has no zero padding on Linux: year 500 -> "500-..."
     except (ValueError, OverflowError):
         shown = str(value).encode("utf-8", "replace").decode()   # a lone surrogate: the JSON error could not hold it
         raise CronError(f"once_at: '{shown}' is not a date and time (YYYY-MM-DDTHH:MM)", "invalid_once") from None
@@ -785,7 +785,7 @@ def _all_runs() -> list[dict]:
             r = json.loads(line)
         except (ValueError, RecursionError):
             continue
-        if isinstance(r, dict):
+        if isinstance(r, dict) and isinstance(r.get("cron_id"), str):   # a list or dict id cannot key last_runs
             runs.append(r)
     with _runs_lock:
         _runs_cache = (ident, runs)
@@ -853,18 +853,33 @@ def _crontab_file() -> Path | None:
     return Path(p) if p else None
 
 
-def read_crontab() -> str:
+def _read_crontab_strict() -> str:
+    """The crontab as it is. "no crontab for root" is an empty crontab; any other failure raises CronError:
+    a crontab that could not be read is not an empty one (rewriting it would erase the user's own lines)."""
     f = _crontab_file()
     if f is not None:
         try:
-            return f.read_text()
-        except OSError:
+            return f.read_bytes().decode("utf-8", "surrogateescape")   # a line of the user's own may not be UTF-8
+        except FileNotFoundError:
             return ""
+        except OSError as e:
+            raise CronError(f"crontab file cannot be read: {e}", "crontab_error") from None
     try:
-        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+        r = subprocess.run(["crontab", "-l"], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise CronError(f"crontab -l failed: {e}", "crontab_error") from None
+    if r.returncode == 0:
+        return r.stdout.decode("utf-8", "surrogateescape")
+    if b"no crontab for" in r.stderr:
         return ""
-    return r.stdout if r.returncode == 0 else ""      # "no crontab for root" -> empty
+    raise CronError("crontab -l failed: " + r.stderr.decode("utf-8", "replace").strip()[:300], "crontab_error")
+
+
+def read_crontab() -> str:
+    try:
+        return _read_crontab_strict()
+    except CronError:
+        return ""
 
 
 def write_crontab(text: str) -> None:
@@ -872,12 +887,13 @@ def write_crontab(text: str) -> None:
     if f is not None:
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_suffix(f.suffix + ".tmp")
-        tmp.write_text(text)
+        tmp.write_bytes(text.encode("utf-8", "surrogateescape"))
         os.replace(tmp, f)
         return
-    r = subprocess.run(["crontab", "-"], input=text, capture_output=True, text=True, timeout=10)
+    r = subprocess.run(["crontab", "-"], input=text.encode("utf-8", "surrogateescape"), capture_output=True, timeout=10)
     if r.returncode != 0:
-        raise CronError(f"crontab refused the update: {r.stderr.strip()[:300]}", "crontab_error")
+        err = r.stderr.decode("utf-8", "replace").strip()[:300]
+        raise CronError(f"crontab refused the update: {err}", "crontab_error")
 
 
 def align_system_timezone(tz: str) -> bool:
@@ -906,7 +922,8 @@ def align_system_timezone(tz: str) -> bool:
 def split_crontab(text: str) -> tuple[list[str], list[str]]:
     """-> (lines outside the managed block, lines inside it)."""
     outside, inside, in_block = [], [], False
-    for line in text.splitlines():
+    # only "\n" ends a line (str.splitlines() also cuts at \x0c, \x85, \u2028...: a line of the user's own would break)
+    for line in text.split("\n")[:-1] if text.endswith("\n") else text.split("\n"):
         s = line.strip()
         if s == BLOCK_BEGIN:
             in_block = True
@@ -1099,7 +1116,8 @@ def sync_crontab(jobs: list[dict] | None = None) -> str:
                 log.warning("jobs.json cannot be read: crontab left as it is")
                 return read_crontab()
             _remember(jobs, "vanished (jobs.json edited outside Harness Maxxing)")
-        outside, inside = split_crontab(read_crontab())
+        current = _read_crontab_strict()
+        outside, inside = split_crontab(current)
         while outside and not outside[-1].strip():
             outside.pop()
         lines = [ln for ln in inside if not _ours(ln)] + managed_lines(jobs)
@@ -1109,7 +1127,7 @@ def sync_crontab(jobs: list[dict] | None = None) -> str:
                 new.append("")
             new += [BLOCK_BEGIN, *lines, BLOCK_END]
         text = "\n".join(new) + "\n" if new else ""
-        if text != read_crontab():
+        if text != current:
             write_crontab(text)
         return text
 
@@ -1132,7 +1150,7 @@ def external_jobs() -> list[dict]:
             sched, cmd = " ".join(parts[:5]), s.split(None, 5)[5]
         else:
             continue
-        out.append({"schedule": sched, "command": cmd, "human": humanize(sched)})
+        out.append({"schedule": sched, "command": cmd.encode("utf-8", "replace").decode(), "human": humanize(sched)})
     return out
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import time
 
@@ -373,9 +374,13 @@ def test_a_download_that_raises_is_marked_failed(client, sent, monkeypatch):
     doc = team._load()                                  # a download cut by a restart
     doc["chats"][0]["messages"][0]["files"][0] |= {"pending": True, "failed": False}
     team._save(doc)
+    d = team.files_dir()
+    (d / "big.bin").write_bytes(b"")                    # reserved for the download
+    (d / "big.bin.part").write_bytes(b"half")
     team.fail_stale_downloads()
     f = team.messages(dm)["messages"][0]["files"][0]
     assert f.get("failed") and not f.get("pending")
+    assert not (d / "big.bin").exists() and not (d / "big.bin.part").exists()
 
 
 def test_reading_typing_and_seen_do_not_reload_or_rewrite_team_json(client, sent, monkeypatch):
@@ -587,3 +592,66 @@ def test_a_write_from_another_process_refreshes_the_pages(sent, monkeypatch):
     config.write_json(team._path(), doc)                # what `maxxing team send` does in its own process
     team.notice_outside_writes()
     assert seen == [("team",)]
+
+
+def test_a_received_file_name_is_cut_in_bytes_and_keeps_its_extension(tmp_path):
+    from maxxing.api.sessions import reserve_path
+    for raw in ("\u6587" * 120 + ".txt", "\U0001f525" * 120 + ".png", "a" * 300 + ".txt"):
+        name = team._safe_name(raw)
+        assert len(name.encode()) <= 200 and name.endswith((".txt", ".png"))
+        _, fd = reserve_path(tmp_path, name)                 # ENAMETOOLONG before
+        os.close(fd)
+
+
+def test_a_name_the_file_system_refuses_marks_the_download_failed(client, sent, monkeypatch):
+    from maxxing.api import sessions as api_sessions
+
+    def refuse(folder, name):
+        raise OSError(36, "File name too long")
+    monkeypatch.setattr(api_sessions, "reserve_path", refuse)
+    dm, mid = _received_file(monkeypatch, lambda *a, **k: True)
+    f = team.messages(dm)["messages"][0]["files"][0]
+    assert f.get("failed") and not f.get("pending")
+
+
+def _fake_claude(monkeypatch, seen: list, gate=None):
+    import json as _json
+    import subprocess
+
+    def run(cmd, input="", **kw):
+        seen.append(input)
+        if gate:
+            gate.wait(10)
+        return subprocess.CompletedProcess(cmd, 0, _json.dumps({"result": "Gist"}), "")
+    monkeypatch.setattr(team.subprocess, "run", run)
+
+
+def test_the_text_sent_for_a_summary_is_capped(client, sent, monkeypatch):
+    seen: list[str] = []
+    _fake_claude(monkeypatch, seen)
+    cid = team.create_chat("dm", [teampeer.pid(LEA)])["id"]
+    for i in range(30):
+        team.send(cid, f"{i:02d} " + "x" * (team.TEXT_MAX - 3))
+    m = team.summarize(cid)
+    assert len(seen[0]) <= team.SUMMARY_CHARS + 30 and seen[0].rstrip().endswith("x")
+    assert 2 <= m["summary"]["count"] < 30 and "29 xx" in seen[0] and "00 xx" not in seen[0]
+
+
+def test_one_summary_of_a_chat_at_a_time(client, sent, monkeypatch):
+    import threading
+    seen: list[str] = []
+    gate = threading.Event()
+    _fake_claude(monkeypatch, seen, gate)
+    cid = team.create_chat("dm", [teampeer.pid(LEA)])["id"]
+    for t in ("one", "two"):
+        team.send(cid, t)
+    first = threading.Thread(target=team.summarize, args=(cid,))
+    first.start()
+    while not seen:
+        time.sleep(0.01)
+    with pytest.raises(team.TeamError) as e:
+        team.summarize(cid, since=0)
+    assert e.value.code == "busy" and len(seen) == 1
+    gate.set()
+    first.join(10)
+    assert team.summarize(cid, since=0)["kind"] == "summary" and len(seen) == 2

@@ -14,21 +14,23 @@ on the sender's clock)}. People's ids are `teampeer.pid(address)` (the contacts:
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import logging
 import math
+import mimetypes
 import os
 import re
-import logging
-import mimetypes
 import secrets
+import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
-
-import hashlib
 
 from . import bus, config, teampeer
 
@@ -49,6 +51,8 @@ def _summary_model() -> str:
 
 SUMMARY_TIMEOUT_S = 120
 SUMMARY_MESSAGES = 200         # at most this many messages are summarized
+SUMMARY_CHARS = 100_000        # and at most this much text (~25k tokens): the oldest of them are left out
+_summarizing: set[str] = set()  # chats with a summary being written
 FILES_MAX = 10                  # files per message
 GROUPS_PER_CREATOR = 50         # groups another server's user may open here (they all live in team.json)
 COLORS = ("clay", "blue", "violet", "green", "amber", "rose", "teal", "zinc")
@@ -83,11 +87,9 @@ def _load() -> dict:
     if not isinstance(doc, dict):
         if doc is not None or _path().exists():      # unreadable: moved aside (never overwritten, no chat lost)
             dest = _path().with_name(f"team.json.damaged-{time.strftime('%Y%m%d-%H%M%S')}")
-            try:
+            with contextlib.suppress(OSError):
                 os.replace(_path(), dest)
                 log.error("team.json is damaged: kept as %s", dest)
-            except OSError:
-                pass
         doc = {"me": ME, "chats": []}
     doc.setdefault("chats", [])
     return doc
@@ -99,20 +101,14 @@ _peeked: tuple[tuple | None, dict] | None = None
 def _peek() -> dict:
     """team.json for reading only (never change what it returns): parsed again only when the file changed."""
     global _peeked
-    sig = _sig()
     cached = _peeked
-    if sig is None or cached is None or cached[0] != sig:
-        cached = (sig, _load())
-        _peeked = cached
+    if (sig := _sig()) is None or cached is None or cached[0] != sig:
+        cached = _peeked = (sig, _load())
     return cached[1]
 
 
 def _sig() -> tuple | None:
-    try:
-        st = _path().stat()
-        return (st.st_ino, st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
+    return teampeer._sig(_path())
 
 
 _UNSEEN = ("unseen",)
@@ -128,8 +124,7 @@ def _save(doc: dict) -> None:
 
 
 def notice_outside_writes() -> None:
-    """Server side (the outbox worker, every few seconds): team.json written by another process (`maxxing team send`)
-    -> the open pages refetch."""
+    """team.json written by another process (`maxxing team send`): the open pages refetch (outbox worker, every 5 s)."""
     sig = _sig()
     if sig != _written[0]:
         first = _written[0] is _UNSEEN
@@ -160,17 +155,15 @@ def _me() -> dict:
 
 
 def _chat(doc: dict, cid: str) -> dict:
-    for c in doc["chats"]:
-        if c["id"] == cid:
-            return c
-    raise TeamError(404, "not_found", "Chat not found")
+    if (c := next((c for c in doc["chats"] if c["id"] == cid), None)) is None:
+        raise TeamError(404, "not_found", "Chat not found")
+    return c
 
 
 def _message(chat: dict, mid: str) -> dict:
-    for m in chat["messages"]:
-        if m["id"] == mid:
-            return m
-    raise TeamError(404, "not_found", "Message not found")
+    if (m := next((m for m in chat["messages"] if m["id"] == mid), None)) is None:
+        raise TeamError(404, "not_found", "Message not found")
+    return m
 
 
 def _summary(chat: dict, doc: dict) -> dict:
@@ -421,8 +414,7 @@ def _wire(msg: dict) -> dict:
 
 
 def _broadcast(cid: str, chat: dict, event: dict) -> None:
-    """An event of the user (a reaction, an edit...) to every member of a chat with real people. `chat`: as just
-    saved (never read again for this; a new message: _post_mine)."""
+    """An event of the user (a reaction, an edit...) to the members of a chat with real people (`chat` as just saved)."""
     if chat.get("remote"):
         teampeer.send(_addresses(chat), event | {"chat": cid}, None)
 
@@ -488,13 +480,11 @@ def vote(cid: str, mid: str, option: str) -> dict:
         opt = next((o for o in poll.get("options", []) if o["id"] == option), None)
         if opt is None:
             raise TeamError(404, "not_found", "Option not found")
-        if ME in opt["votes"]:
-            opt["votes"].remove(ME)
-        else:
-            if not poll.get("multi"):
-                for o in poll["options"]:
-                    if ME in o["votes"]:
-                        o["votes"].remove(ME)
+        mine = ME in opt["votes"]
+        for o in poll["options"]:
+            if ME in o["votes"] and (o is opt or not (mine or poll.get("multi"))):
+                o["votes"].remove(ME)
+        if not mine:
             opt["votes"].append(ME)
         _save(doc)
     _broadcast(cid, chat, {"type": "vote", "msg": mid, "options": [o["id"] for o in poll["options"] if ME in o["votes"]]})
@@ -540,8 +530,7 @@ def _blank(msg: dict) -> list[dict]:
 
 
 def delete_message(cid: str, mid: str) -> dict:
-    """The user deletes one of their messages, here and at the others. Their own files stay in their folder but are
-    no longer shared."""
+    """The user deletes one of their messages here and at the others; their files stay here but are no longer shared."""
     with _lock:
         doc = _load()
         chat = _writable(doc, cid)
@@ -562,11 +551,9 @@ def _drop_received_file(f: dict) -> None:
     """A downloaded copy of someone's file, when they delete the message (only inside the team folder)."""
     root = (config.workspace() / "team" / "attachments").resolve()
     p = Path(f.get("path") or "")
-    try:
+    with contextlib.suppress(OSError):
         if f.get("path") and root in p.resolve().parents and p.is_file():
             p.unlink()
-    except OSError:
-        pass
 
 
 def update_group(cid: str, name: str | None = None, emoji: str | None = None, add: list[str] | None = None,
@@ -623,16 +610,9 @@ def set_muted(cid: str, muted: bool) -> dict:
     with _lock:
         doc = _load()
         chat = _chat(doc, cid)
-        if muted:
-            chat["muted"] = True
-        else:
-            chat.pop("muted", None)
+        chat.update(muted=True) if muted else chat.pop("muted", None)
         _save(doc)
         return _summary(chat, doc)
-
-
-def _post_shared(cid: str, text: str, **extra) -> dict:
-    return _post_mine(cid, text, **extra)
 
 
 # ---- summary (one claude -p call, no tools) -----------------------------------------------------------------
@@ -644,29 +624,33 @@ SUMMARY_PROMPT = (
     "Bullets of one line. No preamble, no closing sentence, never invent anything that was not said.")
 
 
-def _transcript(doc: dict, msgs: list[dict]) -> str:
+def _transcript(msgs: list[dict]) -> list[str]:
+    """One line per message ("" for those Claude never sees)."""
     people = teampeer.people() | {ME: _me()}
+    name = lambda pid: (people.get(pid) or {}).get("name") or pid   # noqa: E731
     lines = []
     for m in msgs:
-        who = (people.get(m["author"]) or {}).get("name") or m["author"]
         if m.get("kind") in ("summary", "info") or m.get("deleted"):   # a deleted poll has no "poll" left
-            continue
-        if m.get("kind") == "poll":
+            lines.append("")
+        elif m.get("kind") == "poll":
             p = m["poll"]
-            opts = "; ".join(f"{o['label']} ({', '.join((people.get(v) or {}).get('name') or v for v in o['votes']) or 'no vote'})"
-                             for o in p["options"])
-            lines.append(f"{who} [poll] {p['question']}: {opts}")
+            opts = "; ".join(f"{o['label']} ({', '.join(name(v) for v in o['votes']) or 'no vote'})" for o in p["options"])
+            lines.append(f"{name(m['author'])} [poll] {p['question']}: {opts}")
         else:
             names = ", ".join(f["name"] for f in m.get("files") or [])
-            lines.append(f"{who}: {m['text']}" + (f" [files: {names}]" if names else ""))
-    return "\n".join(lines)
+            lines.append(f"{name(m['author'])}: {m['text']}" + (f" [files: {names}]" if names else ""))
+    return lines
 
 
 def summarize(cid: str, ids: list[str] | None = None, since: float | None = None) -> dict:
     """Summarize the chosen messages (`ids`), else those after `since` (default: after the last summary); the
     summary is posted as a message of the user."""
     from .sessions import spawn
+    cmd = [spawn.claude_bin(), "-p", "--output-format", "json", "--model", SUMMARY_MODEL, "--tools", "",
+           "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--system-prompt", SUMMARY_PROMPT]
     with _lock:
+        if cid in _summarizing:              # another tab or device asked already: Claude is not paid twice
+            raise TeamError(409, "busy", "A summary of this chat is already being written")
         doc = _load()
         chat = _chat(doc, cid)
         msgs = [m for m in chat["messages"] if m.get("kind") != "summary"]
@@ -680,34 +664,42 @@ def summarize(cid: str, ids: list[str] | None = None, since: float | None = None
         part = part[-SUMMARY_MESSAGES:]
         if len(part) < 2:
             raise TeamError(409, "nothing_new", "Choose at least two messages to summarize")
-        text = _transcript(doc, part)
+        lines = _transcript(part)
+        while sum(map(len, lines)) > SUMMARY_CHARS:    # a line is ~25 000 characters at most: two always fit
+            part, lines = part[1:], lines[1:]
+        text = "\n".join(x for x in lines if x)
+        _summarizing.add(cid)
     cmd = [spawn.claude_bin(), "-p", "--output-format", "json", "--model", _summary_model(), "--tools", "",
            "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--system-prompt", SUMMARY_PROMPT]
-    t0 = time.time()
     try:
-        r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT_S,
-                           cwd=config.state_dir("claude-titles"), env=spawn.claude_env(None, "default"))
-    except subprocess.TimeoutExpired:
-        raise TeamError(504, "timeout", f"No summary after {SUMMARY_TIMEOUT_S} s") from None
-    except OSError as e:
-        raise TeamError(500, "spawn_failed", f"Claude could not start: {e}") from None
-    try:
-        data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
-    except ValueError:
-        data = {}
-    out = str((data or {}).get("result") or "").strip() if isinstance(data, dict) else ""
-    if r.returncode != 0 or not out or (isinstance(data, dict) and data.get("is_error")):
-        raise TeamError(502, "summary_failed", out or (r.stderr or "").strip()[-300:] or f"exit code {r.returncode}")
-    return _post_shared(cid, out, kind="summary",
-                 summary={"from": part[0]["at"], "to": part[-1]["at"], "count": len(part),
-                          "cost_usd": round(float(data.get("total_cost_usd") or 0), 4),
-                          "duration_ms": int(data.get("duration_ms") or (time.time() - t0) * 1000)})
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT_S,
+                               cwd=config.state_dir("claude-titles"), env=spawn.claude_env(None, "default"))
+        except subprocess.TimeoutExpired:
+            raise TeamError(504, "timeout", f"No summary after {SUMMARY_TIMEOUT_S} s") from None
+        except OSError as e:
+            raise TeamError(500, "spawn_failed", f"Claude could not start: {e}") from None
+        try:
+            data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+        except ValueError:
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        out = str(data.get("result") or "").strip()
+        if r.returncode != 0 or not out or data.get("is_error"):
+            err = out or (r.stderr or "").strip()[-300:] or f"exit code {r.returncode}"
+            raise TeamError(502, "summary_failed", err)
+        return _post_mine(cid, out, kind="summary",
+                          summary={"from": part[0]["at"], "to": part[-1]["at"], "count": len(part),
+                                   "cost_usd": round(float(data.get("total_cost_usd") or 0), 4),
+                                   "duration_ms": int(data.get("duration_ms") or (time.time() - t0) * 1000)})
+    finally:
+        _summarizing.discard(cid)
 
 
 # ---- from a command (`maxxing team`, see cmd_team.py) ---------------------------------------------------------
 def _fold(name: str) -> str:
     """"Léa " and "lea" are the same name for a recipient."""
-    import unicodedata
     return "".join(c for c in unicodedata.normalize("NFKD", str(name or "")) if not unicodedata.combining(c)).casefold().strip()
 
 
@@ -749,7 +741,6 @@ def find_recipient(to: str) -> dict:
 
 def _attach(paths: list[str]) -> list[dict]:
     """Files of the server, copied into the team folder (only files there are sent)."""
-    import shutil
     srcs = [Path(raw).expanduser() for raw in (paths or [])[:FILES_MAX]]
     for raw, src in zip(paths or [], srcs):        # every file checked before the first copy
         if not src.is_file():
@@ -795,7 +786,13 @@ def send_to(to: str, text: str, files: list[str] | None = None) -> dict:
 
 # ---- events from the other servers ---------------------------------------------------------------------------
 def _safe_name(name: str) -> str:
-    name = Path(str(name or "file")).name.strip().replace("\x00", "")[:120]
+    name = Path(str(name or "file")).name.strip().replace("\x00", "")
+    if len(name) > 120 or len(name.encode("utf-8", "replace")) > 200:   # a file name holds 255 bytes (CJK: 3 each)
+        stem, dot, ext = name.rpartition(".")
+        ext = dot + ext if stem and len((dot + ext).encode("utf-8", "replace")) <= 20 else ""
+        room = 200 - len(ext.encode("utf-8", "replace"))
+        base = name[:len(name) - len(ext)].encode("utf-8", "replace")[:room].decode("utf-8", "ignore")
+        name = base[:120 - len(ext)] + ext
     return name if name and name not in (".", "..") else "file"
 
 
@@ -825,7 +822,10 @@ def _remote_message(frm_pid: str, raw: dict) -> dict:
         summ = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
         msg["summary"] = {"count": int(_finite(summ.get("count"), 0)) % 100000, "from": at, "to": at}
     files = []
-    for f in (raw.get("files") or [])[:FILES_MAX]:
+    raw_files = raw.get("files") or []
+    if not isinstance(raw_files, list):
+        raise ValueError("files must be a list")
+    for f in raw_files[:FILES_MAX]:
         if isinstance(f, dict) and f.get("id"):
             name = _safe_name(f.get("name"))
             size = max(int(_finite(f.get("size"), 0)), 0)
@@ -979,10 +979,8 @@ def apply_remote(frm: str, contact: bool, event: dict) -> None:
             if msg is None or msg.get("deleted"):   # never arrived or deleted here: nothing to change
                 return
             who_list = msg.setdefault("reactions", {}).setdefault(emoji, [])
-            if event.get("on") and who not in who_list:
-                who_list.append(who)
-            if not event.get("on") and who in who_list:
-                who_list.remove(who)
+            if bool(event.get("on")) != (who in who_list):
+                who_list.remove(who) if who in who_list else who_list.append(who)
             msg["reactions"] = {e: w for e, w in msg["reactions"].items() if w}
         else:
             raise TeamError(400, "unknown_event", "Unknown event")
@@ -996,22 +994,25 @@ def _fetch(frm: str, cid: str, mid: str, f: dict) -> None:
     from .uploads import free_bytes, limits
     max_b, reserve = limits()
     d = files_dir()
-    ok = False
-    dest = None
+    ok, dest = False, None
     with _lock:
         _queued[0] += 1
         room = _queued[0] <= QUEUE_MAX
     try:
         if room and (not max_b or f["size"] <= max_b) and free_bytes(d) - f["size"] >= reserve:
             with _slots:
-                dest, fd = reserve_path(d, f["name"])  # the name is taken at once: two "image.png" never collide
-                os.close(fd)
                 try:
-                    ok = teampeer.fetch_file(frm, f["fid"], dest, max_b, cid, reserve)
-                except Exception:                       # the file is then marked failed, never pending forever
-                    log.exception("team: download of %s", f["fid"])
-                if not ok:
-                    dest.unlink(missing_ok=True)
+                    dest, fd = reserve_path(d, f["name"])  # the name is taken at once: two "image.png" never collide
+                except OSError:                         # a name the file system refuses: marked failed below
+                    log.exception("team: no place for %s", f["fid"])
+                else:
+                    os.close(fd)
+                    try:
+                        ok = teampeer.fetch_file(frm, f["fid"], dest, max_b, cid, reserve)
+                    except Exception:                   # the file is then marked failed, never pending forever
+                        log.exception("team: download of %s", f["fid"])
+                    if not ok:
+                        dest.unlink(missing_ok=True)
     finally:
         with _lock:
             _queued[0] -= 1
@@ -1048,3 +1049,13 @@ def fail_stale_downloads() -> None:
                         f["failed"] = changed = True
         if changed:
             _save(doc)
+        kept = {str(x["path"]) for c in doc["chats"] for m in c.get("messages") or []
+                for x in m.get("files") or [] if x.get("path")}
+    # the .part file and the empty file reserved for a download the restart cut
+    root = config.workspace() / "team" / "attachments"
+    for f in root.glob("*/*") if root.is_dir() else []:
+        try:
+            if f.is_file() and (f.name.endswith(".part") or (f.stat().st_size == 0 and str(f) not in kept)):
+                f.unlink(missing_ok=True)
+        except OSError:
+            log.exception("team: cleaning %s", f)

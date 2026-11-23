@@ -1,3 +1,4 @@
+import os
 import datetime as dt
 import json
 import subprocess
@@ -189,6 +190,16 @@ def test_humanize(expr, text):
 EXTERNAL = "MAILTO=\"\"\n# my own jobs\n0 3 * * * /usr/bin/backup.sh --all\n@reboot /opt/start.sh\n"
 
 
+def test_a_crontab_line_of_the_user_with_a_form_feed_or_bad_bytes_is_kept_as_it_is(org, monkeypatch):
+    monkeypatch.setattr(crons, "maxxing_bin", lambda: "/usr/local/bin/maxxing")
+    raw = b"30 2 * * * echo a\x0cb\xe2\x80\xa8c\n0 4 * * * echo \xff\xfe\n"
+    org.crontab.write_bytes(raw)
+    j = crons.create_job({"name": "Hello", "schedule": "*/5 * * * *", "command": "echo hi"})
+    assert org.crontab.read_bytes().startswith(raw)
+    crons.delete_job(j["id"])
+    assert org.crontab.read_bytes() == raw
+
+
 def test_crontab_block_preserves_external_lines(org, monkeypatch):
     monkeypatch.setattr(crons, "maxxing_bin", lambda: "/usr/local/bin/maxxing")
     org.crontab.write_text(EXTERNAL)
@@ -272,12 +283,12 @@ def test_crontab_without_file_uses_crontab_command(org, monkeypatch):
     def fake_run(cmd, **kw):
         calls.append((cmd, kw.get("input")))
         if cmd == ["crontab", "-l"]:
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="no crontab for root")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"no crontab for root")
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
     monkeypatch.setattr(crons.subprocess, "run", fake_run)
     crons.create_job({"name": "x", "schedule": "@hourly", "command": "true"})
     written = [i for c, i in calls if c == ["crontab", "-"]]
-    assert written and written[0].startswith(crons.BLOCK_BEGIN)
+    assert written and written[0].startswith(crons.BLOCK_BEGIN.encode())
 
 
 # ---- runs -----------------------------------------------------------------------------------
@@ -862,3 +873,35 @@ def test_cron_list_survives_a_bad_time_in_the_run_history(org, capsys, at):
     crons.runs_path().write_text(json.dumps({"cron_id": j["id"], "ok": True, "at": at}) + "\n")
     assert cmd_cron._handler(types.SimpleNamespace(cron_cmd="list")) == 0
     assert "????" in capsys.readouterr().out
+
+
+def test_a_one_time_date_before_the_year_1000_keeps_four_digits(org):
+    assert crons.parse_once("0500-01-01T00:00") == "0500-01-01T00:00"
+    with pytest.raises(crons.CronError) as e:
+        crons.create_job({"name": "x", "command": "true", "once_at": "0500-01-01T00:00"})
+    assert e.value.code == "invalid_once"
+
+
+def test_a_run_line_with_an_unhashable_cron_id_does_not_break_the_job_list(org):
+    crons.append_run({"cron_id": "a", "at": 1})
+    with open(crons.runs_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"cron_id": [1], "at": 2}) + "\n" + json.dumps({"cron_id": {"x": 1}, "at": 3}) + "\n")
+    assert crons.last_runs()["a"]["at"] == 1
+    assert isinstance(crons.list_jobs(), list)
+
+
+def test_a_failed_crontab_read_does_not_erase_the_users_lines(tmp_path, monkeypatch):
+    """`crontab -l` failing for another reason than "no crontab" must not look like an empty crontab."""
+    log = tmp_path / "writes"
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "crontab").write_text(
+        '#!/bin/sh\nif [ "$1" = "-l" ]; then echo "temporary failure" >&2; exit 1; fi\ncat > "%s"\n' % log)
+    (fake / "crontab").chmod(0o755)
+    monkeypatch.delenv("MAXXING_CRONTAB_FILE", raising=False)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    with pytest.raises(crons.CronError):
+        crons.sync_crontab([])
+    assert not log.exists()                                          # crontab - was never called
+    (fake / "crontab").write_text('#!/bin/sh\necho "no crontab for root" >&2; exit 1\n')
+    assert crons.sync_crontab([]) == ""                              # a real "no crontab" is still an empty one

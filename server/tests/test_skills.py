@@ -90,3 +90,23 @@ def test_a_topic_menu_opens_only_the_skills_it_can_use(mx, monkeypatch):
     got = {s["folder"] for s in skills.for_topic("projects/p0/topics/t1")}
     assert "s-t1" in got and "w" in got and not got & {"s-t0", "s-t2", "x-t1"}
     assert not [o for o in opened if "/p1/" in o or "/t0/" in o or "/t2/" in o], opened
+
+
+def test_a_nul_in_the_topic_path_gives_a_list_not_a_500(mx):
+    from maxxing import skills
+    assert isinstance(skills.for_topic("projects/a\x00b"), list)
+    assert isinstance(skills.for_topic("projects/a/topics/t\x00"), list)
+
+
+def test_the_front_matter_survives_a_bom_comments_and_a_dashed_line():
+    assert skills._front("﻿---\nname: x\n---\n") == {"name": "x"}
+    out = skills._front('---\nname: h\ndisable-model-invocation: true # c\ndescription: "Hi there" # c\n---\n')
+    assert out == {"name": "h", "disable-model-invocation": "true", "description": "Hi there"}
+    assert skills._front("---\nname: h\ndescription: a\n  ----\n  b\n---\n")["description"] == "a ---- b"
+    assert skills._front("---\nname: h\n----\n---\n") == {"name": "h"}
+
+
+def test_a_hash_inside_a_block_scalar_description_is_kept():
+    text = "---\nname: x\ndescription: |\n  Use for C # and F # code\n  also # this\n---\nBody\n"
+    assert skills._front(text)["description"] == "Use for C # and F # code also # this"
+    assert skills._front("---\nname: x\ndescription: plain # comment\n---\n")["description"] == "plain"

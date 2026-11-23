@@ -583,7 +583,7 @@ export type FeedEvent = {
   resolved?: number | null
   resolution?: string
 }
-export type FeedList = { events: FeedEvent[]; more: boolean; unread: number; pending?: number; sources: { source: string; total: number; unread: number }[] }
+export type FeedList = { events: FeedEvent[]; more: boolean; unread: number; unread_errors?: number; pending?: number; sources: { source: string; total: number; unread: number; unread_errors?: number }[] }
 export type FeedRule = 'auto' | 'off' | 'silent' | 'loud'
 export type FeedHookKind = 'stripe' | 'shopify' | 'github' | 'generic'
 export type FeedHook = { id: string; name: string; kind: FeedHookKind; created: number; url: string; has_secret: boolean }
@@ -923,6 +923,7 @@ export type Settings = {
   cpu_priorities?: boolean
   /** Sidebar pages in the order the user dragged them (routes, e.g. "/sessions"); empty = the default order. */
   sidebar_order?: string[]
+  nav_badges_hidden?: string[]   // Settings -> Features -> Badges: sidebar pages whose counter badge is off
   /** Settings -> Features: the Harness Browser (each topic / agent may then be let use it) */
   browser_feature?: boolean
   /** Settings -> Features: Devices (Claude uses the person's computers and phones running Harness Link) */
@@ -1717,4 +1718,23 @@ export type BrowserOwner = {
   /** a sandboxed agent's domains (the only sites its browser opens); null = any public site */
   sites: string[] | null
   asks: BrowserAsk[]
+}
+
+/** Settings -> System -> Disk space (GET /api/system/cleanup): what Harness can free by itself, measured only. */
+export type CleanupPartId = 'leftovers' | 'caches' | 'journal' | 'apt' | 'previews' | 'trash'
+export interface CleanupPart {
+  id: CleanupPartId
+  bytes: number
+  /** ticked when the dialog opens (the trash never is: what is in it can still be restored) */
+  default: boolean
+  items: { path: string; why: string; bytes: number }[]
+}
+export interface CleanupScan {
+  parts: CleanupPart[]
+  disk: { total: number; free: number; pct: number }
+}
+export interface CleanupResult {
+  freed: number
+  parts: { id: CleanupPartId; freed: number; error?: string }[]
+  disk: { total: number; free: number; pct: number }
 }

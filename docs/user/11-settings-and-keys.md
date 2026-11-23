@@ -5,8 +5,9 @@ section: Settings
 
 Everything is configurable from **Settings**; no file editing is needed.
 
-The sections are grouped in six blocks, in this order (on a phone they are the tabs at the top, a thin bar between
-two blocks):
+The sections are grouped in six blocks, in this order. On a phone, Settings opens on the list of every section,
+grouped the same way (one tap each); inside a section the tabs at the top go to the others (a thin bar between two
+blocks):
 
 | Block | Section | What you find |
 |---|---|---|
@@ -31,7 +32,7 @@ two blocks):
 | | **Import** | the memory of another agent (Hermes, OpenClaw, Claude Code, a zip) - see [Import](import); and the way to the other imports: a memory backup (**Backup**), an agent file (Agents page) |
 | | **Backup** | repository, schedule, whitelist, history, restore – see [Backup](backup) |
 | | **Trash** | deleted sessions, topics and files, restore them or empty the trash |
-| **Server** | **System** | health, **CPU priorities** (see [below](#cpu-priorities)), services (start/stop/restart), logs, and the **address of the server**: public URL and files root (the folder the file viewer can show) |
+| **Server** | **System** | health, **disk space** (see [below](#disk-space)), **CPU priorities** (see [below](#cpu-priorities)), services (start/stop/restart), logs, and the **address of the server**: public URL and files root (the folder the file viewer can show) |
 | | **Updates** | the installed version, **Check** and **Update** (with the smart update preflight), **Automatic update**, **What's new** (also shown once after each update; the main new features have a **Show me** button that takes you to them and highlights them), then every version of Harness Maxxing, newest first, with a search |
 | | **About** | the version and the useful links (docs, GitHub, community), the optional **Enterprise key** (only for companies that need one: record it, see it, remove it - see [License](license)), **Support**: Harness Maxxing is free, **Donate** opens the donation page of the website in a new tab (nothing is sent from the app); **Hide the Donate buttons** removes them from What's new and the Feedback window, in every browser - see [License](license#donations) |
 
@@ -40,6 +41,25 @@ The community catalogue (widgets, pages, skills shared by other users) is on the
 [harness-maxxing.com/community](https://harness-maxxing.com/community): Widgets, Pages and Skills link to it.
 Old links keep working: `/settings/stats` opens **Usage**, `/settings/license` and `/settings/support` open **About**, `/settings/packs` and `/settings/projects` open **Templates**, `/settings/extensions` opens
 **Widgets**, `/settings/docs` opens the docs.
+
+## Disk space
+
+**Settings -> System -> Disk space** shows how full the disk is, with two buttons:
+
+- **Free up space** measures what Harness can drop by itself and lists it with its size: old versions and
+  leftovers (previous versions of the components, browsers no longer used, temporary files, oversized logs),
+  download caches (uv, npm, pip, npx: downloaded again when needed; what a running tool such as an MCP server
+  uses stays), the system journal (cut down to its last 200 MB), the system packages apt already installed, the
+  video previews and thumbnails of the file viewer (made again when shown) and the Harness trash. Untick what you
+  want to keep, then **Free**. The previews and the trash are never ticked by default: once emptied, nothing in
+  the trash can be restored. While the components are being updated, old versions and caches are not cleaned
+  (the part says so): run it again afterwards. Your projects, attachments and renders are never touched. From a
+  terminal, `maxxing deps clean --caches` does the first two.
+- **Clean up with Claude** opens a session in the Harness topic with a ready prompt: Claude measures the disk,
+  goes through every project and topic (attachments, renders, `node_modules`, environments, builds, worktrees,
+  other tools' caches), finds where each big folder comes from and whether it keeps growing, and gives you a
+  table of what to delete, move or keep. It deletes nothing without your OK, and suggests fixing what keeps
+  coming back (a size limit, a cleanup in the job that produces it).
 
 ## CPU priorities
 
@@ -84,7 +104,9 @@ soon as a GitHub key is in the vault. An install made before 2.0.0a132 keeps the
 
 Under **Sessions**, indented: **Maxxing mode (beta)** and the **line under the answers** (cost, tokens, duration, model: tick what
 it shows) for everyone, and, saved in this browser only (marked **This browser**): the **Tabs mode** (Alt+T; off = Zones). Below
-the pages: **Harness Browser** (see [Harness Browser](browser)) and **Devices**, off by default (Claude uses your own
+the pages: **Badges**, one switch per page with a counter in the sidebar (Home: unread notifications, red when one is an
+error; Sessions; Team; Agents), all on by default: turn one off and its page shows no number nor dot (the counts stay on
+the page itself); then **Harness Browser** (see [Harness Browser](browser)) and **Devices**, off by default (Claude uses your own
 computers and phones, see [Devices](devices)). Under **Team**, while Team is on: **Team bubbles** (the chat bubbles at the bottom right of every page,
 saved in this browser). The notification when a session finishes is in **Settings -> Notifications**, the Claude plan usage
 widget in **Settings -> Usage**, the presentation mode by default in **Settings -> Security**, the Telegram mode in
@@ -117,7 +139,7 @@ bar at the bottom, the conversation fills the screen. Two buttons sit at the top
   task projects, the Infra sections, the folder, the mailboxes and folders, the notification sources. Pages without
   a list (Home, Git, Settings...) have no ☰.
 - **⊞** (top right) opens everything else, laid out like the sidebar: a search field (the same as ⌘K), every page
-  in your sidebar order (the unread notifications count on the Home tile), the extension pages apart, Feedback and Settings, then the status
+  in your sidebar order (the unread notifications count on the Home tile, red when one is an error), the extension pages apart, Feedback and Settings, then the status
   card - server health (tap it for the issues), CPU / RAM / disk (opens Settings -> System), your Claude plan
   (opens Settings -> Usage), presentation mode, the theme, the docs and General settings. A dot on ⊞ means an
   update is waiting or the server needs attention.

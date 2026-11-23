@@ -167,21 +167,31 @@ def _parse_description(f: Path) -> str:
 def _write_claude_md(folder: Path, kind: str, name: str, description: str | None) -> None:
     """Rewrite heading (+ description when given) keeping whatever the user added after it."""
     f = folder / "CLAUDE.md"
-    try:
-        lines = f.read_text(errors="replace").splitlines()
+    try:       # bytes that are not UTF-8 (café in latin-1) go back as they came: surrogateescape, never U+FFFD
+        lines = f.read_bytes().decode("utf-8", errors="surrogateescape").splitlines()
     except OSError:
         lines = []
     desc = read_description(folder) if description is None else description
     _forget(f)
     if not lines or not any(ln.startswith("# ") for ln in lines):
-        f.write_text(_render_claude_md(kind, name, desc))
+        _put_text(f, _render_claude_md(kind, name, desc))
         return
     start = next(i for i, ln in enumerate(lines) if ln.startswith("# "))
     end = next((i for i in range(start + 1, len(lines))
                 if lines[i].strip() == "@memory.md" or lines[i].startswith("## ")), len(lines))
-    head = [_heading(kind, name), ""] + ([desc.strip(), ""] if desc.strip() else [])
+    if description is None:                              # the description stays as written, byte for byte
+        head = [_heading(kind, name)] + lines[start + 1:end]
+    else:
+        head = [_heading(kind, name), ""] + ([desc.strip(), ""] if desc.strip() else [])
     rest = lines[end:] or ["@memory.md"]
-    f.write_text("\n".join(lines[:start] + head + rest) + "\n")
+    _put_text(f, "\n".join(lines[:start] + head + rest) + "\n")
+
+
+def _put_text(f: Path, text: str) -> None:
+    """Write through a temporary file: a crash never leaves CLAUDE.md empty. Surrogate escapes become their bytes."""
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_bytes(text.encode("utf-8", errors="surrogateescape"))
+    os.replace(tmp, f)
 
 
 def _init_level(folder: Path, kind: str, name: str, description: str) -> None:
@@ -440,14 +450,22 @@ def project_emoji(project: str) -> str:
     return e if isinstance(e, str) else ""
 
 
+DESCRIPTION_MAX = 2000
+
+
 def check_description(value: str | None) -> str | None:
     """A description must be writable as UTF-8 (a lone surrogate would fail half-way through a create)."""
     if value is None:
         return None
+    if len(value) > DESCRIPTION_MAX:
+        raise WorkspaceError(400, "bad_description", f"The description is limited to {DESCRIPTION_MAX} characters")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
         raise WorkspaceError(400, "bad_description", "The description contains an invalid character") from None
+    # CLAUDE.md ends the description at these lines: kept in it, the rest would come back outside of it after an update
+    if any(ln.strip() == "@memory.md" or ln.startswith("## ") for ln in value.splitlines()):
+        raise WorkspaceError(400, "bad_description", "The description cannot hold a line `@memory.md` or one starting with `## `")
     return value
 
 
@@ -518,7 +536,7 @@ def create_project(name: str, description: str = "") -> dict:
     check_description(description)
     ensure_root()
     d = project_dir(name)
-    if d.exists():
+    if os.path.lexists(d):
         raise WorkspaceError(409, "exists", f"Project {name!r} already exists")
     _init_level(d, "project", name, description or "")
     (d / "topics").mkdir(exist_ok=True)
@@ -532,7 +550,7 @@ def create_topic(project: str, name: str, description: str = "") -> dict:
     if not project_dir(check_slug(project)).is_dir():
         raise WorkspaceError(404, "not_found", f"Project {project!r} not found")
     d = project_dir(project) / "topics" / name
-    if d.exists():
+    if os.path.lexists(d):
         raise WorkspaceError(409, "exists", f"Topic {project}/{name} already exists")
     _init_level(d, "topic", name, description or "")
     _changed("created", "topic", topic_path(project, name))
@@ -548,7 +566,7 @@ def update_project(project: str, name: str | None = None, description: str | Non
     new = check_slug(name) if name and name != project else project
     if new != project:
         _ensure_idle(topic_path(project))
-    if new != project and (root() / topic_path(new)).exists():
+    if new != project and os.path.lexists(root() / topic_path(new)):
         raise WorkspaceError(409, "exists", f"{topic_path(new)} already exists")
     if emoji is not None:
         set_project_emoji(project, check_emoji(emoji))
@@ -579,7 +597,7 @@ def update_topic(project: str, topic: str, name: str | None = None, description:
     new = check_slug(name) if name and name != topic else topic
     if new != topic:
         _ensure_idle(topic_path(project, topic))
-    if new != topic and (root() / topic_path(project, new)).exists():
+    if new != topic and os.path.lexists(root() / topic_path(project, new)):
         raise WorkspaceError(409, "exists", f"{topic_path(project, new)} already exists")
     mode = check_permission_mode(permission_mode) if permission_mode is not None else None
     tools = check_allowed_tools(allowed_tools) if allowed_tools is not None else None
@@ -637,7 +655,7 @@ def _rename(old: str, new: str) -> None:
     """Move the folder, then remap session paths, Claude transcripts and Telegram mappings."""
     sessions = _ensure_idle(old)
     src, dst = root() / old, root() / new
-    if dst.exists():
+    if os.path.lexists(dst):
         raise WorkspaceError(409, "exists", f"{new} already exists")
     shutil.move(str(src), str(dst))
     from .sessions import service
@@ -705,7 +723,8 @@ def move_to_trash(src: Path, label: str | None = None, kind: str | None = None) 
     # picked the same name and the second one replaced the first file in the trash (lost for good).
     while True:
         sidecar = dest.with_name(dest.name + ".json")
-        if not os.path.lexists(dest):
+        # the companions of a workspace delete (.sessions, .agents) share the name: none may be taken by another item
+        if not any(os.path.lexists(dest.with_name(dest.name + x)) for x in ("", ".sessions", ".agents")):
             try:
                 os.close(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
                 break

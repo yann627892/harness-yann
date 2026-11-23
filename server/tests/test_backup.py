@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from _conn_helpers import GH_TOKEN, FakeGitHub, bare_app, mx_state  # noqa: F401
-from maxxing import backup, config
+from maxxing import backup, config, crons
 from maxxing.api import backup as backup_api
 
 REPO = "alice/memory"
@@ -729,3 +729,54 @@ def test_a_newline_in_a_name_does_not_get_past_the_deny_list():
     from maxxing import backup
     assert backup.denied("a.pem") and backup.denied("a\nb.pem") and backup.denied("id_rsa\nx")
     assert backup.glob_re("**/*.md").match("a\nb/c.md") and not backup.glob_re("*.md").match("a.md\n")
+
+
+def test_a_repository_name_with_a_line_break_is_refused(gh, ws):
+    r = backup.configure("alice/repo\n.git", GH_TOKEN)
+    assert r["ok"] is False and "owner/name" in r["error"]
+    assert backup.REPO_RE.match("alice/repo\n") is None
+    assert backup._CLAUDE_SETTINGS.search(".claude/settings.json\n") is None
+
+
+def test_restore_skips_a_path_longer_than_the_system_accepts(ws, mx_state):
+    long = "/".join(["a" * 200] * 21) + "/CLAUDE.md"          # every part is fine, the whole is over 4096 bytes
+    assert backup._safe_rel(long) is None
+    r = backup._apply({long: b"x", "memory.md": b"- fact\n"})
+    assert (ws / "memory.md").read_text() == "- fact\n" and r["files"] == 1
+
+
+def test_a_history_file_that_is_not_utf8_does_not_break_the_backup_or_its_history(mx_state):
+    p = backup._history_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b'{"ok": true, "note": "caf\xe9"}\n')
+    assert backup.history()[0]["ok"] is True
+    backup._record({"ok": True})
+    assert len(backup.history()) == 2
+
+
+def test_scanner_reads_a_cut_utf16_file():
+    tok = ("token: ghp_" + "a1B2c3D4e5" * 4).encode("utf-16")
+    assert "GitHub token" in backup.scan_bytes(tok + b"x")          # an odd length: the last byte is half a character
+    assert "GitHub token" in backup.scan_bytes(b"\xff\xfe" + tok[2:] + b"\x00\xd8")   # a lone high surrogate at the end
+
+
+def test_only_the_servers_own_backup_command_is_kept_enabled():
+    assert backup._is_own_job("maxxing backup run") and backup._is_own_job(f"{crons.maxxing_bin()} backup run")
+    for c in ("/tmp/evil/maxxing backup run", "/opt/x/maxxing backup run", "maxxing backup run\n", "maxxing backup run; id"):
+        assert not backup._is_own_job(c), c
+
+
+def test_a_pattern_with_many_stars_is_refused_before_it_can_hang_the_scan():
+    with pytest.raises(backup.BackupError):
+        backup.clean_include(["*a" * 15 + "*b"])
+    assert backup.clean_include(["notes/*/*.md", "a*b*c"]) == ["notes/*/*.md", "a*b*c"]
+
+
+def test_restore_on_a_used_server_keeps_its_permission_mode_and_budget(ws, mx_state):
+    config.update_config(permission_mode="acceptEdits", daily_budget_usd=5)
+    saved = {"permission_mode": "bypassPermissions", "daily_budget_usd": 99999, "language": "fr"}
+    _in_use()
+    backup._apply({f"{backup.META_DIR}/config.json": json.dumps(saved).encode()})
+    cfg = config.load_config()
+    assert cfg["permission_mode"] == "acceptEdits" and cfg["daily_budget_usd"] == 5
+    assert cfg["language"] == "fr"

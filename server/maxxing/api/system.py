@@ -87,6 +87,31 @@ async def service_action(name: str, action: Literal["start", "stop", "restart"])
     return {"ok": True}
 
 
+class CleanupBody(BaseModel):
+    parts: list[str]
+
+
+@router.get("/system/cleanup")
+async def cleanup_scan(force: bool = False):
+    """Disk space Harness can free by itself (Settings -> System -> Disk space): measured, nothing deleted."""
+    from .. import cleanup
+    return {"parts": await asyncio.to_thread(cleanup.scan, force), "disk": health.disk()}
+
+
+@router.post("/system/cleanup")
+async def cleanup_run(body: CleanupBody):
+    from .. import cleanup
+    if not body.parts:
+        raise _err(400, "nothing_chosen", "Choose at least one part to clean")
+    try:
+        r = await asyncio.to_thread(cleanup.run, body.parts)
+    except ValueError as e:
+        raise _err(400, "unknown_part", str(e)) from None
+    health.invalidate_cache()
+    bus.invalidate("health")
+    return {**r, "disk": health.disk()}
+
+
 def _logs(unit: str, lines: int) -> list[str]:
     r = subprocess.run(["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso"],
                        capture_output=True, text=True, timeout=20)
@@ -132,9 +157,13 @@ def _refresh_remote() -> None:
             with _ver_lock:                            # it has moved to git (a few minutes after the start)
                 _ver.update(latest=latest, behind=behind, upstream_behind=upstream_behind)
             return
-        if _git("fetch", "--quiet", "origin", timeout=30, auth=True) is not None:
-            latest = _git("rev-parse", "--short", "FETCH_HEAD")
-            b = _git("rev-list", "--count", "HEAD..FETCH_HEAD")
+        from ..cmd_core import _current_branch, valid_branch
+        branch = _current_branch()                     # the installed branch, as `maxxing update --check` compares
+        if not valid_branch(branch):
+            branch = "main"
+        if _git("fetch", "--quiet", "origin", "--", branch, timeout=30, auth=True) is not None:
+            latest = _git("rev-parse", "--short", f"origin/{branch}")
+            b = _git("rev-list", "--count", f"HEAD..origin/{branch}")
             behind = int(b) if b and b.isdigit() else None
         else:
             line = _git("ls-remote", "origin", "HEAD", timeout=20, auth=True)

@@ -46,7 +46,7 @@ from . import bus, config
 
 log = logging.getLogger("maxxing.backup")
 
-REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+REPO_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}\Z")
 TOKEN_RE = re.compile(r"\A[\x21-\x7e]{1,255}\Z")   # printable ASCII: it goes into an HTTP header
 ALWAYS = ["**/CLAUDE.md", "**/memory.md", "CUSTOMIZATIONS.md", "customizations/*.patch", "projects/*/.maxxing.json",
           "projects/*/topics/*/.maxxing.json", "projects/.order.json", "projects/*/topics/*/agents/*/agent.json",
@@ -106,8 +106,10 @@ LEAKS: list[tuple[str, re.Pattern[bytes]]] = [(k, re.compile(p.encode())) for k,
 
 # Config keys restored from a backup (paths, network and Telegram ids are server-specific).
 RESTORABLE_CONFIG = ("timezone", "language", "default_model", "permission_mode", "dashboard", "extensions",
-                     "usage_widget", "tasks_page", "git_page", "infra_page", "team_page", "agents_page", "mail_page", "browser_feature", "devices_feature", "maxxing_mode", "sidebar_order",
+                     "usage_widget", "tasks_page", "git_page", "infra_page", "team_page", "agents_page", "mail_page", "browser_feature", "devices_feature", "maxxing_mode", "sidebar_order", "nav_badges_hidden",
                      "daily_budget_usd")
+# Settings a restore on a server already in use leaves as they are: they decide what Claude may do and spend.
+HELD_CONFIG = ("permission_mode", "daily_budget_usd")
 
 
 class BackupError(Exception):
@@ -352,7 +354,7 @@ def remove_schedule() -> None:
 MAX_INCLUDE = 100            # patterns
 MAX_PATTERN = 200            # characters
 MAX_DEEP = 3                 # `**` per pattern: each one is a `.*` the regex may backtrack over
-MAX_STARS = 16               # `*` per pattern: each one is a `[^/]*`, `*a*a*a…` backtracks as well
+MAX_STARS = 5                # `*` per pattern: each one is a `[^/]*`, `*a*a*a…` backtracks (15 of them hang a regex scan)
 
 
 def clean_schedule(schedule: Any) -> str:
@@ -488,11 +490,8 @@ def scan_bytes(data: bytes) -> list[str]:
     """Secret kinds found in a blob (empty = clean); UTF-16 text (BOM, or NULs between ASCII) is decoded first."""
     blobs = [data]
     if data[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(data) > 1 and data.count(b"\0") * 3 > len(data)):
-        for enc in ("utf-16", "utf-16-le", "utf-16-be"):
-            try:
-                blobs.append(data.decode(enc).encode())
-            except UnicodeDecodeError:
-                continue
+        for enc in ("utf-16", "utf-16-le", "utf-16-be"):      # "replace": a cut or odd-length file is read as far as it goes
+            blobs.append(data.decode(enc, "replace").encode())
     return sorted({kind for kind, rx in LEAKS for b in blobs if rx.search(b)})
 
 
@@ -660,7 +659,7 @@ def _history_path() -> Path:
 def _record(entry: dict) -> None:
     p = _history_path()
     try:
-        lines = p.read_text().splitlines() if p.exists() else []
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []
     except OSError:
         lines = []
     # a file name that is not UTF-8 (a lone surrogate from os.walk) is written as "?", not raised from run()
@@ -676,7 +675,7 @@ def history(limit: int = 100) -> list[dict]:
     """Most recent first."""
     out = []
     try:
-        for ln in _history_path().read_text().splitlines():
+        for ln in _history_path().read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 e = json.loads(ln)
             except ValueError:
@@ -771,6 +770,8 @@ def _safe_rel(name: str) -> str | None:
     if p.is_absolute() or ".." in p.parts or not name or name.startswith("/"):
         return None
     if any(len(part.encode(errors="replace")) > 255 for part in p.parts):   # no file system takes it (ENAMETOOLONG)
+        return None
+    if len(name.encode(errors="replace")) > 4000:                          # PATH_MAX is 4096 with the workspace in front
         return None
     return p.as_posix()
 
@@ -963,6 +964,9 @@ def _apply(files: dict[str, bytes], hold: bool | None = None) -> dict:
         try:
             saved = json.loads(cfg_blob)
             changes = {k: saved[k] for k in RESTORABLE_CONFIG if k in saved}
+            if hold:                                     # what loosens the rules of this server is not taken from a repository
+                for k in HELD_CONFIG:
+                    changes.pop(k, None)
             if isinstance(saved.get("telegram"), dict):
                 changes["telegram"] = {k: v for k, v in saved["telegram"].items()
                                        if k in ("notify_crons", "notify_system", "login_alerts", "reply_mode", "reply_mode_chosen") and v is not None}
@@ -1069,7 +1073,7 @@ def _hold_new_jobs(blob: bytes) -> tuple[bytes, list[str], list[str]]:
     names, ids = [], []
     for j in (data.get("jobs") if isinstance(data, dict) else None) or []:
         if isinstance(j, dict) and j.get("enabled", True) and _job_key(j) not in current \
-                and not (j.get("kind", "shell") == "shell" and _OWN_JOB.match(str(j.get("command") or ""))):
+                and not (j.get("kind", "shell") == "shell" and _is_own_job(str(j.get("command") or ""))):
             j["enabled"] = False
             names.append(str(j.get("name") or j.get("id")))
             ids.append(str(j.get("id")))
@@ -1080,7 +1084,10 @@ def _job_key(j: dict) -> tuple:
     return (j.get("id"), *(str(j.get(k) or ("shell" if k == "kind" else "")) for k in _JOB_CODE))
 
 
-_OWN_JOB = re.compile(r"^(/[\w./-]+/)?maxxing backup run$")       # Harness' own memory backup job
+def _is_own_job(command: str) -> bool:
+    """Harness' own memory backup job: this server's `maxxing` binary, no other folder."""
+    from . import crons
+    return command in {f"{b} backup run" for b in ("maxxing", "/usr/local/bin/maxxing", crons.maxxing_bin())}
 
 
 def _current_jobs() -> list[dict]:
@@ -1109,7 +1116,7 @@ def _hold_new_extension_code(restored: list[str]) -> list[str]:
     return ids
 
 
-_CLAUDE_SETTINGS = re.compile(r"(^|/)\.claude/settings(\.local)?\.json$")
+_CLAUDE_SETTINGS = re.compile(r"(^|/)\.claude/settings(\.local)?\.json\Z")
 
 
 # Claude Code settings that run a command or redirect Claude (hooks, status line, key helpers, environment, the

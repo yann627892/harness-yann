@@ -21,10 +21,11 @@ _FIELD = re.compile(r"^([\w-]+):[ \t]*(.*)$")
 
 def _front(text: str) -> dict[str, str]:
     """`key: value` pairs of the front matter (a value may go on over indented or folded lines)."""
+    text = text.removeprefix("\ufeff")                           # a BOM from an editor
     if not text.startswith("---"):
         return {}
-    end = text.find("\n---", 3)
-    body = text[3:end if end > 0 else len(text)]
+    end = re.search(r"\n---[ \t]*(?:\r?\n|\Z)", text[3:])         # the closing line is `---` alone, not `----`
+    body = text[3:3 + end.start()] if end else text[3:]
     out: dict[str, str] = {}
     key = ""
     for line in body.split("\n"):                                # not splitlines(): U+2028, U+0085... are no line ends in YAML
@@ -35,9 +36,13 @@ def _front(text: str) -> dict[str, str]:
         elif key and line[:1] in (" ", "\t"):
             out[key] = f"{out[key]} {line.strip()}".strip()
     for k, v in out.items():
-        v = re.sub(r"^[|>][-+]?", "", v).strip()                  # a block scalar header: | |- |+ > >- >+
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
-            v = v[1:-1]
+        block = bool(re.match(r"^[|>]", v))                       # a block scalar: a # inside it is text
+        v = re.sub(r"^[|>][-+]?", "", v).strip()                  # its header: | |- |+ > >- >+
+        q = re.match(r"""^(['"])(.*?)\1(?:[ \t]+#.*)?$""", v)
+        if q and not block:                                       # quoted, maybe followed by a comment
+            v = q.group(2)
+        elif not block:
+            v = re.split(r"[ \t]#", v, maxsplit=1)[0].strip()      # a trailing ` # comment`
         out[k] = " ".join(v.split())
     return out
 
@@ -75,7 +80,7 @@ def _utf8(p: Path) -> bool:
 def _scan(root: Path, origin: str, skip: set[str] | None = None, **where: str) -> list[dict]:
     try:
         folders = sorted(p for p in root.iterdir() if _utf8(p) and p.is_dir() and (p / "SKILL.md").is_file())
-    except OSError:
+    except (OSError, ValueError):               # ValueError: a NUL in the path
         return []
     out = []
     for p in folders:
@@ -101,7 +106,7 @@ def _server_skills() -> list[dict]:
 def _subfolders(root: Path) -> list[Path]:
     try:
         return sorted(p for p in root.iterdir() if _utf8(p) and p.is_dir() and not p.name.startswith("."))
-    except OSError:
+    except (OSError, ValueError):
         return []
 
 

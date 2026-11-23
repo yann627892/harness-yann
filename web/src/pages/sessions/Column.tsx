@@ -77,7 +77,7 @@ import { SessionBrowserBar } from '@/features/browser/SessionBrowser'
 import { SessionDevicesBar } from '@/features/devices/SessionDevices'
 import { MaxxingControls, MaxxingMeter } from './MaxxingMeter'
 import { notifySendFailed, notifySent, useMaxxingEnabled } from './maxxing'
-import { MobileTabsSlot, TabsToggle } from './Tabs'
+import { MobileTabsSlot } from './Tabs'
 import { AsidePanel, useAside } from './Aside'
 import { LayoutPicker } from './LayoutPicker'
 import { MIN_W } from './layouts'
@@ -395,7 +395,9 @@ export function SessionColumn({ col, sid, variant, index, count, place, agentRun
   const navigate = useNavigate()
   const { data: session, isError, error } = useSessionSeeded(sid)
   // The stream lives here; only the thread re-renders on new events (LiveThread), not the column and its composer.
-  useSessionStream(sid)
+  // A hidden tab keeps no stream: over HTTP/1.1 (local mode) the browser allows 6 connections per host, and
+  // one stream per open tab queued the sends. Shown again, it resumes from the last event (?from=next).
+  useSessionStream(place?.hidden ? null : sid)
   const deleted = useLogSelect(sid, (st) => st.deleted)
   const pending = usePendingFor(sid)
   const { data: ws } = useWorkspace()
@@ -985,7 +987,6 @@ function ColumnHeader({
           <TouchSessionsButton className="-ml-2" />
           <Logo className="min-w-0 flex-1 gap-2 [&_img]:size-6" nameClassName={maxxing ? 'max-[479px]:sr-only' : undefined} />
           <div className="flex shrink-0 items-center">
-            <TabsToggle />
             {maxxing && <MaxxingControls compact />}
             {menu}
           </div>

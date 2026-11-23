@@ -736,10 +736,33 @@ def test_an_action_with_a_line_separator_stays_in_the_log(dv):
     assert [a["tool"] for a in store.actions()] == ["click", "type"]
 
 
+def test_an_action_log_with_invalid_utf8_is_still_read(dv):
+    store.log_action("d1", "click", {"x": 1}, True, 5)
+    f = store.home() / "actions.jsonl"
+    f.write_bytes(b"\xff{}\n" + f.read_bytes())
+    assert [a["tool"] for a in store.actions(30)] == ["click"]
+
+
 def test_device_turn_ids_reject_a_trailing_newline():
     from maxxing.devices import turns
     assert turns.SID_RE.match("abcdef")
     assert not turns.SID_RE.match("abcdef\n")
+
+
+def test_a_device_ask_whose_alive_check_raises_is_not_left_pending(monkeypatch):
+    import asyncio
+    from maxxing.devices import asks
+    monkeypatch.setattr(asks, "_announce", lambda d: None)
+    monkeypatch.setattr(asks, "ASK_WAIT_S", 0.3)
+
+    async def alive():
+        raise RuntimeError("boom")
+
+    async def go():
+        with pytest.raises(RuntimeError):
+            await asks.ask("sess09", "web", {"id": "dev1", "name": "x"}, "go", alive=alive)
+    asyncio.run(go())
+    assert asks.pending(session="sess09") == [] and not asks._futs
 
 
 def test_a_device_ask_survives_a_lone_surrogate_and_a_cancel_during_the_announce(monkeypatch):
@@ -784,3 +807,31 @@ def test_a_hello_with_a_lone_surrogate_in_caps_is_still_recorded(dv):
                       "caps": ["screen", "\ud800abc"], "screen": {"w": 1920, "h": 1080, "scale": 1}})
         wait_for(lambda: (dv.get("/api/devices").json()["devices"][0].get("hello") or {}).get("v") == "9.9.9", 5)
         assert ws.receive_json()["t"] == "access"
+
+
+def test_a_device_ask_answered_with_a_lone_surrogate_note_stays_encodable(monkeypatch):
+    import asyncio
+    from maxxing.devices import asks
+    monkeypatch.setattr(asks, "_announce", lambda d: None)
+
+    async def go():
+        t = asyncio.create_task(asks.ask("sess08", "web", {"id": "dev1", "name": "x"}, "go"))
+        await asyncio.sleep(0.05)
+        rid = asks.pending(session="sess08")[0]["id"]
+        done = asks.decide(rid, "done", "x\ud800")
+        json.dumps(done).encode("utf-8")
+        assert done["note"] == "x?"
+        await t
+    asyncio.run(go())
+
+
+def test_a_huge_number_from_the_app_or_a_tool_is_refused_not_a_crash(dv):
+    from maxxing.devices import tools
+    with pytest.raises(tools.Refused):
+        tools._num({"x": 10 ** 400}, "x")
+    p = _pair(dv, os_name="windows", name="pc", caps=CAPS_PC)
+    with _ws(dv, p["token"]) as ws:
+        ws.send_json({"t": "hello", "v": "0.1.0", "os": "windows", "arch": "amd64", "name": "pc", "caps": CAPS_PC,
+                      "screen": {"w": 10 ** 400, "h": 1080, "scale": 1}})
+        ws.send_json({"t": "paused", "on": True})
+        wait_for(lambda: dv.get("/api/devices").json()["devices"][0]["paused"], 5)

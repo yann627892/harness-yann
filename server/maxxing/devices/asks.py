@@ -74,7 +74,7 @@ async def ask(session: str, owner: str, dev: dict, message: str, alive=None) -> 
             except asyncio.TimeoutError:
                 if alive is not None and not await alive():
                     _finish(d, "expired")
-    except asyncio.CancelledError:
+    except BaseException:                          # cancelled, or alive() / the announcement failed: never left pending
         _finish(d, "expired")
         raise
     finally:
@@ -85,7 +85,7 @@ async def ask(session: str, owner: str, dev: dict, message: str, alive=None) -> 
 def _finish(d: dict, status: str, note: str = "") -> None:
     if d["status"] != "pending":
         return
-    d.update(status=status, note=(note or "")[:500], decided_at=time.time())
+    d.update(status=status, note=_clean(note or "")[:500], decided_at=time.time())
     f = _futs.get(d["id"])
     if f is not None and not f.done():
         f.set_result(status)

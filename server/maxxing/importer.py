@@ -18,6 +18,7 @@ or commands (`.claude/commands/`). A report is written in imports/<stamp>/IMPORT
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import lzma
 import re
@@ -38,6 +39,8 @@ MAX_FILES = 20000
 MAX_TOTAL = 500 * 1024 * 1024          # uncompressed
 MAX_FILE = 100 * 1024 * 1024
 SCAN_MAX = 5 * 1024 * 1024             # files scanned for secrets (larger: binary data, kept)
+TEXT_EXT = frozenset({".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".cfg", ".ini", ".csv", ".log",
+                      ".py", ".js", ".ts", ".sh", ".html", ".xml", ".jsonl"})   # text over SCAN_MAX is refused, not kept unchecked
 SCAN_TOTAL = 50 * 1024 * 1024          # bytes scanned per zip; files past it are not imported
 JUNK_PARTS = {"__MACOSX", ".git", "node_modules", ".venv", "venv", "__pycache__", ".DS_Store", "Thumbs.db"}
 # Harness's own folder settings (a topic's permission mode, the project order): set in the app, never by an export.
@@ -210,12 +213,14 @@ def _plan(zf: zipfile.ZipFile, scans: dict[str, list[str] | None]) -> dict[str, 
     entries, skipped = _entries(zf)
     scanned = 0
     root = workspace.root()
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + _secrets.token_hex(2)    # two imports in one second never share a folder
     projects: dict[str, dict] = {}
     skills: dict[str, dict] = {}
     items: list[dict] = []
     secrets_found: list[dict] = []
     renamed: list[dict] = []
+    memo: dict[tuple, str] = {}                  # (names in use, slug, source) -> name already given
+    next_n: dict[tuple, int] = {}                # (names in use, slug) -> first "-N" not tried yet
 
     def unique(raw: str, taken: dict[str, dict], on_disk: Path, source: str = "") -> str:
         """Each source folder gets its own name: "Блог" and "Продажи" (or "My Blog" and "my-blog") both slug
@@ -223,11 +228,17 @@ def _plan(zf: zipfile.ZipFile, scans: dict[str, list[str] | None]) -> dict[str, 
         already in `on_disk`: a "-2" picked here never lands in an unrelated existing one. `source` tells two
         folders of the same name apart (skills in two categories)."""
         base = name = slug(raw)
-        n = 2
+        key = (id(taken), base, source or raw)
+        if key in memo and memo[key] in taken:
+            return memo[key]
+        n = next_n.get((id(taken), base), 2) if name in taken or (on_disk / name).exists() else 2
         while ((name in taken and taken[name]["source"] != (source or raw))
                or (name != base and name not in taken and (on_disk / name).exists())):
             name = f"{base[:44].rstrip('-')}-{n}"
             n += 1
+        if name != base:
+            next_n[(id(taken), base)] = n
+        memo[key] = name
         return name
 
     def proj(raw: str) -> dict:
@@ -253,6 +264,11 @@ def _plan(zf: zipfile.ZipFile, scans: dict[str, list[str] | None]) -> dict[str, 
     for info, p in entries:
         parts = p.parts
         data_kind = "file"
+        name_b = info.filename.encode("utf-8", "replace")
+        if name_kinds := sorted({kind for kind, rx in backup.LEAKS if rx.search(name_b)}):
+            # a secret in the NAME of a file would be written to the disk, the report and the API answer
+            secrets_found.append({"file": "(name hidden: it holds a secret)", "kinds": name_kinds})
+            continue
         if parts[0] == "projects" and len(parts) >= 6 and parts[2] == "topics" and parts[4] == "agents":
             # an agent runs by itself (triggers, permissions): never planted by an import, created in Harness
             skipped.append({"file": info.filename, "reason": "agent folder (not imported: create agents in Harness)"})
@@ -284,6 +300,10 @@ def _plan(zf: zipfile.ZipFile, scans: dict[str, list[str] | None]) -> dict[str, 
         else:
             dest = PurePosixPath("imports", stamp, *parts)       # tasks.md, crons.md, SECRETS.md, the rest
             data_kind = "aside"
+        if info.file_size > SCAN_MAX and p.suffix.lower() in TEXT_EXT:
+            skipped.append({"file": info.filename,
+                            "reason": f"text file over {SCAN_MAX // 1024 // 1024} MB (cannot be checked for secrets)"})
+            continue
         if info.file_size <= SCAN_MAX:
             if info.filename not in scans:
                 if scanned + info.file_size > SCAN_TOTAL:
@@ -400,6 +420,36 @@ def _check_dest(dest: Path, root: Path) -> None:
 _APPLY_LOCK = threading.Lock()
 
 
+_IMPORT_REF_RE = re.compile(r"(?<!\S)@(?!memory\.md(?!\S))(?=[~/.\w])(?=\S*[~/.])\S*")
+
+
+def _defang_imports(text: str) -> str:
+    """Claude Code loads `@path` in a CLAUDE.md / memory.md into the context: an imported file must not pull in
+    another file of this server (a key, a credential). The reference stays readable, in a code span."""
+    return _IMPORT_REF_RE.sub(lambda m: f"`{m.group(0)}`", text)
+
+
+def _strip_skill_hooks(text: str) -> str:
+    """Remove the `hooks:` field of the front matter of a SKILL.md: a hook runs a command by itself."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        return text
+    out, skipping = [lines[0]], False
+    for ln in lines[1:end]:
+        if re.match(r"hooks\s*:", ln):
+            skipping = True
+            continue
+        if skipping and (not ln.strip() or ln[:1] in (" ", "\t", "-")):
+            continue
+        skipping = False
+        out.append(ln)
+    return "\n".join(out + lines[end:])
+
+
 def apply(path: Path) -> dict[str, Any]:
     """One import applied at a time (a double click on Apply raced on the projects and topics it creates)."""
     from . import workspace
@@ -440,14 +490,23 @@ def _apply(path: Path) -> dict[str, Any]:
                             pass
         except _UNREADABLE:
             raise _unreadable() from None
-        for pr in plan["projects"]:
-            if not (root / "projects" / pr["name"]).is_dir():
-                workspace.create_project(pr["name"])
-                created_projects.append(pr["name"])
-            for t in pr["topics"]:
-                if not (root / "projects" / pr["name"] / "topics" / t["name"]).is_dir():
-                    workspace.create_topic(pr["name"], t["name"])
-                    created_topics.append(f"{pr['name']}/{t['name']}")
+        try:
+            for pr in plan["projects"]:
+                if not (root / "projects" / pr["name"]).is_dir():
+                    workspace.create_project(pr["name"])
+                    created_projects.append(pr["name"])
+                for t in pr["topics"]:
+                    if not (root / "projects" / pr["name"] / "topics" / t["name"]).is_dir():
+                        workspace.create_topic(pr["name"], t["name"])
+                        created_topics.append(f"{pr['name']}/{t['name']}")
+        except Exception:                                    # a topic that cannot be made: no half-created project is left behind
+            for t in reversed(created_topics):
+                with contextlib.suppress(Exception):
+                    workspace.delete_topic(*t.split("/"))
+            for name in reversed(created_projects):
+                with contextlib.suppress(Exception):
+                    workspace.delete_project(name)
+            raise
         new_levels = {f"projects/{p}" for p in created_projects} | {
             f"projects/{t.split('/')[0]}/topics/{t.split('/')[1]}" for t in created_topics}
         for item in plan["_items"]:
@@ -475,6 +534,10 @@ def _apply(path: Path) -> dict[str, Any]:
                 plan["skipped"].append({"file": item["src"],
                                         "reason": "a folder, a file or a link is in the way (not imported)"})
                 continue
+            if item["kind"] == "skill" and dest.name.lower() == "skill.md":
+                data = _strip_skill_hooks(data.decode("utf-8", errors="replace")).encode("utf-8")
+            elif dest.name in ("CLAUDE.md", "memory.md"):
+                data = _defang_imports(data.decode("utf-8", errors="replace")).encode("utf-8")
             rel_parent = str(PurePosixPath(item["dest"]).parent)
             is_md_level = dest.name in ("memory.md", "CLAUDE.md") and item["kind"] in ("project", "topic", "root_memory") \
                 and len(PurePosixPath(item["dest"]).parts) in (1, 3, 5)

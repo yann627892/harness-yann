@@ -8,9 +8,8 @@
 import * as React from 'react'
 import { loadGroups, useT, type TFn } from '@/i18n'
 import { toast } from '@/components/ui'
-import { uploadAttachment } from '@/lib/queries'
 import { api, errorMessage, isApiError } from '@/lib/api'
-import { busyEnd, busyStart } from '@/lib/busy'
+import { cancelUpload, onUploads, startUpload, uploadsOf } from '@/pages/sessions/uploads'
 import { fromDraftAtt, toDraftAtts, type Att } from '@/pages/sessions/Composer'
 import { DRAFT_EVENT, loadAtts, loadDraft, saveAtts, saveDraft } from '@/pages/sessions/store'
 import { pastedFile, pastedName } from '@/pages/sessions/pasteAsFile'
@@ -18,7 +17,7 @@ import { quotesMarkdown } from '@/pages/sessions/util'
 export { insertAtCaret } from '@/features/composer/text'
 
 /** Files a message (the server's agents.ATTACH_MAX). */
-export const MAX_FILES = 10
+const MAX_FILES = 10
 
 /** What a failed send brings back into the box of draft `key` (text first, then what was typed meanwhile; its
  *  uploaded files after those already there, MAX_FILES at most). The box of that key when one is open, else its stored
@@ -29,16 +28,7 @@ const joinBack = (back: string, cur: string) => [back, cur.trim()].filter(Boolea
 /** `back` after `cur` (the paths not there yet); past MAX_FILES files that can go, the rest stays shown, in error. */
 function mergeAtts(cur: Att[], back: Att[], tooMany: string): Att[] {
   let room = MAX_FILES - cur.filter((c) => !c.error).length
-  const add = back
-    .filter((b) => !b.path || !cur.some((c) => c.path === b.path))
-    .map((b) => {
-      if (b.error) return b
-      if (room > 0) {
-        room--
-        return b
-      }
-      return { ...b, error: tooMany }
-    })
+  const add = back.filter((b) => !b.path || !cur.some((c) => c.path === b.path)).map((b) => (b.error || room-- > 0 ? b : { ...b, error: tooMany }))
   return [...cur, ...add]
 }
 /** The files the server refused (400 `bad_attachment` / `too_many_attachments`) marked in error, so that a send
@@ -55,10 +45,7 @@ function markRefused(atts: Att[], err: unknown): Att[] {
 /** A send of draft `key` failed (`err`: why): its text and files back into the box. Only the files that were sent
  *  (uploaded, not in error) come back, those the server refused shown in error and never stored with the draft. */
 export function bringBackDraft(key: string, text: string, atts: Att[], t: TFn, err?: unknown) {
-  const files = markRefused(
-    atts.filter((a) => a.path && !a.error).map((a) => ({ ...a, lid: Math.random().toString(36).slice(2) })),
-    err,
-  )
+  const files = markRefused(atts.filter((a) => a.path && !a.error).map((a) => ({ ...a, lid: Math.random().toString(36).slice(2) })), err)
   if (text) {
     const open = textBack.get(key)
     if (open) open(text)
@@ -147,14 +134,17 @@ export function withQuote(text: string, quote: string, from?: string | null) {
 export function useAttachments(path: string, url?: string, opts: { draftKey?: string; putText?: (text: string, start: number, end: number) => void } = {}) {
   const t = useT()
   const { draftKey } = opts
-  const [atts, setAtts] = React.useState<Att[]>(() => (draftKey ? loadAtts(draftKey).map(fromDraftAtt) : []))
+  // files still uploading from a previous visit come back with their progress (see pages/sessions/uploads.ts)
+  const [atts, setAtts] = React.useState<Att[]>(() => (draftKey ? [...loadAtts(draftKey).map(fromDraftAtt), ...uploadsOf(draftKey).map((u) => ({ lid: u.lid, name: u.name, size: u.size, path: null, progress: u.progress, error: null, preview: null }))] : []))
   React.useEffect(() => {
     if (draftKey) saveAtts(draftKey, toDraftAtts(atts))
   }, [atts, draftKey])
   useBringBack(attsBack, draftKey, (back: Att[]) => setAtts((cur) => mergeAtts(cur, back, t('agents.attach.tooMany', { n: MAX_FILES }))))
   const putText = React.useRef(opts.putText)
   putText.current = opts.putText
-  const ctrls = React.useRef(new Map<string, AbortController>())
+  const mine = React.useRef(new Set<string>()) // uploads started here (no draft: cancelled with the box)
+  const keyRef = React.useRef(draftKey)
+  keyRef.current = draftKey
   const previews = React.useRef(new Set<string>())
   // "Paste as text" notices of this box: gone with it, or once its message is sent (their file left the box).
   const notices = React.useRef(new Set<string | number>())
@@ -166,11 +156,12 @@ export function useAttachments(path: string, url?: string, opts: { draftKey?: st
   React.useEffect(() => {
     alive.current = true
     const live = previews.current
-    const up = ctrls.current
+    const up = mine.current
     return () => {
       alive.current = false
       dismissNotices()
-      for (const c of up.values()) c.abort()
+      // with a draft the uploads go on and land in it (uploads.ts); without one nothing would keep them
+      if (!keyRef.current) for (const lid of up) cancelUpload(lid)
       for (const p of live) URL.revokeObjectURL(p)
     }
   }, [dismissNotices])
@@ -194,33 +185,37 @@ export function useAttachments(path: string, url?: string, opts: { draftKey?: st
         const preview = f.type.startsWith('image/') ? URL.createObjectURL(f) : null
         if (preview) previews.current.add(preview)
         setAtts((a) => [...a, { lid, name: f.name || 'file', size: f.size, path: null, progress: 0, error: null, preview }])
-        const ctrl = new AbortController()
-        ctrls.current.set(lid, ctrl)
-        busyStart()
-        uploadAttachment(path, f, (l, tot) => setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, progress: tot ? l / tot : 0 } : x))), ctrl.signal, url)
-          .then((saved) => {
-            if (!alive.current) return
-            fresh.current.add(saved.path)
-            setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, path: saved.path, name: saved.name, progress: 1 } : x)))
-          })
-          .catch((e) => {
-            if ((e as Error)?.name === 'AbortError') return
-            setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, error: errorMessage(e) } : x)))
-            toast.error(t('sessions.uploadFailed', { name: f.name }))
-          })
-          .finally(() => {
-            ctrls.current.delete(lid)
-            busyEnd()
-          })
+        mine.current.add(lid)
+        startUpload(keyRef.current ?? '', path, f, lid, url)
       }
       return lids
     },
     [path, url, t],
   )
+  // Uploads keep going when the box goes away (another agent, another page): this box follows those of its draft.
+  React.useEffect(
+    () =>
+      onUploads((e) => {
+        const { lid } = e.up
+        const ours = draftKey ? e.up.key === draftKey : mine.current.has(lid)
+        if (!ours || !alive.current) return false
+        if (e.kind === 'progress') setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, progress: e.up.progress } : x)))
+        else if (e.kind === 'done') {
+          fresh.current.add(e.path)
+          setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, path: e.path, name: e.name, progress: 1 } : x)))
+        } else {
+          setAtts((a) => a.map((x) => (x.lid === lid ? { ...x, error: errorMessage(e.error) } : x)))
+          toast.error(t('sessions.uploadFailed', { name: e.up.name }))
+        }
+        if (e.kind !== 'progress') mine.current.delete(lid)
+        return true
+      }),
+    [draftKey, t],
+  )
   const live = React.useRef(atts)
   live.current = atts
   const remove = (lid: string) => {
-    ctrls.current.get(lid)?.abort()
+    cancelUpload(lid)
     const x = live.current.find((y) => y.lid === lid)
     if (x?.preview) {
       URL.revokeObjectURL(x.preview)

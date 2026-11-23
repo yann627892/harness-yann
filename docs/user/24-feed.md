@@ -8,8 +8,8 @@ important e-mails, any script's result - in one place instead of chat messages.
 
 ## Where you see it
 
-- **Sidebar**: the unread count sits on **Home** (a dot when the sidebar is folded); on a phone, on the Home
-  tile of the **⊞** menu. On a computer with the second bar closed, rest the mouse on **Home** to show the list of
+- **Sidebar**: the unread count sits on **Home** (a dot when the sidebar is folded), red when one of them is an
+  error; on a phone, on the Home tile of the **⊞** menu. Settings -> Features -> **Badges** -> Home turns it off. On a computer with the second bar closed, rest the mouse on **Home** to show the list of
   sources.
 - **Dashboard**: a panel next to the widgets (wide screens). The bell in the dashboard's header shows the unread
   count and hides / shows the panel; on a narrow screen it opens the list.
@@ -78,6 +78,16 @@ signing secret if you have it, **Create**: copy the URL into the service. The di
   or that you deleted, for 30 days). A signed *Generic JSON* body identical to one received in the last 24 hours is
   a duplicate too: to send the same alert again within the day, put a time or an `id` in it. Up to 120 deliveries
   per minute per source.
+
+A *Generic JSON* source with a signing secret takes only signed requests: the sender adds the header
+`X-Signature: sha256=<hex>`, the HMAC-SHA256 of the exact body with the secret as the key. A missing or wrong
+signature is refused (401). From a shell, with the secret in `$SECRET`:
+
+```bash
+body='{"title": "Backup done", "level": "success"}'
+sig=$(printf %s "$body" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
+curl -H "X-Signature: sha256=$sig" --data-binary "$body" https://your-server/api/hooks/TOKEN
+```
 
 ## From any script
 

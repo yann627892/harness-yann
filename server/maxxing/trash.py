@@ -171,6 +171,20 @@ def _is_extra(p: Path) -> bool:
     return p.name.endswith((".json", ".sessions", ".agents")) and not p.with_name(p.name + ".json").exists()
 
 
+def _deleted_at(p: Path, side: dict) -> float:
+    """When it went to the trash. Without a valid date in the sidecar: the newer of the item and its sidecar (the
+    item keeps the date of the original file, so an old file would be purged at once)."""
+    at = side.get("at")
+    if at:
+        return float(at)
+    t = p.lstat().st_mtime
+    try:
+        t = max(t, p.with_name(p.name + ".json").lstat().st_mtime)
+    except OSError:
+        pass
+    return t
+
+
 def _entries() -> list[Path]:
     t = trash_dir()
     out = []
@@ -234,7 +248,7 @@ def _build(t: Path, root: Path) -> list[dict[str, Any]]:
             continue
         side = _side(p)
         try:
-            at = float(side.get("at") or p.lstat().st_mtime)
+            at = _deleted_at(p, side)
         except OSError:                            # removed meanwhile
             continue
         kind = "previous_versions" if not side and p.name.startswith("backup-restore-") else _kind(p, side)
@@ -261,6 +275,33 @@ def _item(item_id: str) -> Path:
 
 
 _restore_lock = threading.Lock()
+
+
+def _move_back(p: Path, dest: Path) -> None:
+    """Put p at dest. Across disks the item is copied to a temporary name next to dest and renamed in place
+    before the source is removed, so a source that cannot be removed completely never costs the copy."""
+    try:
+        os.rename(p, dest)
+        return
+    except OSError:
+        pass
+    tmp = dest.with_name(f".{dest.name[:200]}.restoring-{os.getpid()}")
+    try:
+        if p.is_dir() and not p.is_symlink():
+            shutil.copytree(p, tmp, symlinks=True)
+        else:
+            shutil.copy2(p, tmp, follow_symlinks=False)
+        os.rename(tmp, dest)
+    except OSError:                                         # a copy that stopped half way: no partial copy left
+        if tmp.is_dir() and not tmp.is_symlink():
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            tmp.unlink(missing_ok=True)
+        raise
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    else:
+        p.unlink(missing_ok=True)
 
 
 def _free(dest: Path) -> Path:
@@ -301,7 +342,8 @@ def _put_sessions(folder: Path, old_prefix: str | None = None, new_prefix: str |
         sid = meta_p.stem
         if not store.is_valid_id(sid):
             continue
-        if store.meta_path(sid).exists():              # that id is in use again: its copy stays in the folder
+        if store.meta_path(sid).exists() or store.log_path(sid).exists():   # that id is in use again (or its log is still
+            # there): its copy stays in the folder, nothing is overwritten
             damaged = True
             continue
         try:
@@ -316,11 +358,17 @@ def _put_sessions(folder: Path, old_prefix: str | None = None, new_prefix: str |
             meta["path"] = new_prefix + path[len(old_prefix):]
         meta["state"] = "idle" if meta.get("state") == "running" else meta.get("state", "idle")
         meta.update(pid=None, queue=[])
-        config.write_json(store.meta_path(sid), meta)
-        log_p = meta_p.with_suffix(".log")
-        if log_p.exists():
-            shutil.move(str(log_p), str(store.log_path(sid)))
-        meta_p.unlink()
+        try:
+            config.write_json(store.meta_path(sid), meta)
+            log_p = meta_p.with_suffix(".log")
+            if log_p.exists():
+                shutil.move(str(log_p), str(store.log_path(sid)))
+            meta_p.unlink()
+        except (OSError, ValueError):                  # e.g. a title with a lone surrogate, a full disk: the rest goes on
+            if meta_p.with_suffix(".log").exists():     # the log did not come back: no half-restored session
+                store.meta_path(sid).unlink(missing_ok=True)
+            damaged = True
+            continue
         done += 1
     if not damaged:
         shutil.rmtree(folder, ignore_errors=True)
@@ -351,22 +399,28 @@ def restore(item_id: str) -> dict[str, Any]:
             path = ""
         if not (workspace.root() / path).is_dir():          # its topic was deleted since: workspace root
             path = ""
-        for mp in p.glob("*.json"):
-            try:
-                meta = json.loads(mp.read_text())
-                meta["path"] = path
-                config.write_json(mp, meta)
-            except (OSError, ValueError, TypeError, RecursionError):
-                pass
-        n = _put_sessions(p)
-        if p.exists():                                      # a damaged file stayed: the item stays in the trash
-            raise TrashError(409, "not_restorable", "This session file is damaged and cannot be restored")
-        p.with_name(p.name + ".json").unlink(missing_ok=True)
+        with _restore_lock:                                 # a double click: the second finds the item gone
+            if not p.exists():
+                raise TrashError(404, "not_found", "This item is no longer in the trash")
+            for mp in p.glob("*.json"):
+                try:
+                    meta = json.loads(mp.read_text())
+                    meta["path"] = path
+                    config.write_json(mp, meta)
+                except (OSError, ValueError, TypeError, RecursionError):
+                    pass
+            n = _put_sessions(p)
+            if p.exists():                                      # a damaged file stayed: the item stays in the trash
+                raise TrashError(409, "not_restorable", "This session file is damaged and cannot be restored")
+            p.with_name(p.name + ".json").unlink(missing_ok=True)
         bus.invalidate("sessions", "workspace", "trash")
         return {"ok": True, "kind": kind, "restored_to": path, "sessions": n}
     original = Path(side["original"])
     try:
-        parents = original.resolve().parents                # a sidecar never sends a file out of the roots
+        if original.name in ("", ".", ".."):
+            raise TrashError(409, "not_restorable", "This item cannot be restored from here")
+        rp = original.parent.resolve()                      # not the place itself: a link standing there is no reason to refuse
+        parents = [rp, *rp.parents]                         # a sidecar never sends a file out of the roots
     except (OSError, RuntimeError):                         # a name too long, a loop of symbolic links
         raise TrashError(409, "not_restorable", "This item cannot be restored from here") from None
     if not any(r.resolve() in parents for r in (config.workspace(), config.files_root())):
@@ -384,7 +438,7 @@ def restore(item_id: str) -> dict[str, Any]:
         with _restore_lock:                                 # two restores of the same name must not pick the same free one
             dest = _free_dir_name(original) if kind in ("project", "topic", "agent") else _free(original)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(p), str(dest))
+            _move_back(p, dest)
     except OSError as e:                                    # the folder it was in is now a file, a read-only disk...
         raise TrashError(409, "not_restorable", f"Cannot put it back there: {e.strerror or e}") from None
     n = 0
@@ -403,6 +457,13 @@ def restore(item_id: str) -> dict[str, Any]:
         except (ValueError, OSError):                       # its crons, thread and state stay in the box
             log.exception("agents of %s not restored (state left in %s)", dest, box)
     p.with_name(p.name + ".json").unlink(missing_ok=True)   # last: what is left without it is purged as orphans
+    if sess.is_dir():                                       # conflicting copies stayed: a listed item, not an orphan
+        try:
+            config.write_json(sess.with_name(sess.name + ".json"),
+                              {"original": sess.name, "at": time.time(), "kind": "session",
+                               "title": "Sessions left after a restore", "path": ""})
+        except (OSError, ValueError):
+            log.exception("sessions left in %s", sess)
     if kind == "project":                                   # its agent groups get their conversations back
         try:
             from . import agent_rooms
@@ -469,7 +530,7 @@ def purge_old(days: int = KEEP_DAYS) -> int:
     n = 0
     for p in _entries():
         try:
-            at = float(_side(p).get("at") or p.lstat().st_mtime)
+            at = _deleted_at(p, _side(p))
         except OSError:                                 # a broken link or an item removed meanwhile
             continue
         if at < cutoff:
@@ -499,6 +560,7 @@ def trash_session(sid: str) -> Path:
                 pass
         n += 1
         dest = trash_dir() / f"{base}-{n}"
+    moved: list[tuple[Path, Path]] = []
     try:
         config.write_json(sidecar, {"original": sid, "at": time.time(), "kind": "session",
                                     "title": meta.get("title") or "Session", "path": meta.get("path") or ""})
@@ -507,7 +569,14 @@ def trash_session(sid: str) -> Path:
             src = store._path(sid, ext)                 # noqa: SLF001 - same package family
             if src.exists():
                 shutil.move(str(src), str(dest / f"{sid}{ext}"))
+                moved.append((dest / f"{sid}{ext}", src))
     except BaseException:
+        for done, src in moved:                         # the session stays in the store, not half in the trash
+            try:
+                shutil.move(str(done), str(src))
+            except OSError:
+                log.exception("putting back %s failed", src)
+        shutil.rmtree(dest, ignore_errors=True)
         sidecar.unlink(missing_ok=True)
         raise
     store.remove(sid)                                   # locks and run markers

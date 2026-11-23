@@ -251,3 +251,41 @@ def test_an_unread_session_that_failed_is_counted_as_an_error(monkeypatch):
             {"path": p, "archived": True, "state": "error", "unread": True}]
     monkeypatch.setattr(service, "list_sessions", lambda archived=None: rows)
     assert workspace._session_stats()[p] == {"sessions": 3, "archived": 1, "running": 0, "unread": 2, "errors": 1}
+
+
+def test_updating_a_project_keeps_the_bytes_of_the_rest_of_claude_md(client, mx):
+    client.post("/api/workspace/projects", json={"name": "acme", "description": "Shop"})
+    f = mx["ws"] / "projects/acme/CLAUDE.md"
+    f.write_bytes(f.read_bytes() + b"\n## Notes\ncaf\xe9 latin-1\n")
+    r = client.patch("/api/workspace/projects/acme", json={"description": "New shop"})
+    assert r.status_code == 200, r.text
+    got = f.read_bytes()
+    assert b"## Notes\ncaf\xe9 latin-1\n" in got and b"New shop" in got and b"\xef\xbf\xbd" not in got
+    assert not (mx["ws"] / "projects/acme/CLAUDE.md.tmp").exists()
+
+
+def test_a_description_with_a_claude_md_marker_line_is_refused(client, mx):
+    for bad in ("a\n@memory.md\nb", "a\n## Notes\nb"):
+        r = client.post("/api/workspace/projects", json={"name": "acme", "description": bad})
+        assert r.status_code == 400 and r.json()["error"] == "bad_description"
+    assert client.post("/api/workspace/projects", json={"name": "acme", "description": "a\nb ## c"}).status_code == 200
+    r = client.patch("/api/workspace/projects/acme", json={"description": "x\n@memory.md\ny"})
+    assert r.status_code == 400
+
+
+def test_a_broken_symlink_in_the_way_is_a_409_not_a_500(client, mx):
+    (mx["ws"] / "projects").mkdir(exist_ok=True)
+    (mx["ws"] / "projects" / "dang").symlink_to(mx["ws"] / "nowhere")
+    r = client.post("/api/workspace/projects", json={"name": "dang"})
+    assert r.status_code == 409 and r.json()["error"] == "exists", r.text
+    assert client.post("/api/workspace/projects", json={"name": "ok"}).status_code == 200
+    (mx["ws"] / "projects" / "ok" / "topics" / "t").symlink_to(mx["ws"] / "nowhere")
+    r = client.post("/api/workspace/projects/ok/topics", json={"name": "t"})
+    assert r.status_code == 409 and r.json()["error"] == "exists", r.text
+
+
+def test_a_huge_description_is_refused(client, mx, topic):
+    r = client.post("/api/workspace/projects", json={"name": "big", "description": "x" * 100_000})
+    assert r.status_code == 400 and r.json()["error"] == "bad_description"
+    assert not (mx["ws"] / "projects/big").exists()
+    assert client.post("/api/workspace/projects", json={"name": "big", "description": "x" * 2000}).status_code == 200

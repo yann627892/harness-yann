@@ -420,6 +420,7 @@ def list_events(source: str | None = None, unread: bool = False, before: int | N
     """Newest first. `pending`: only the alerts waiting for a click (buttons, not resolved). The totals of every
     source come along, with `pending` = how many alerts wait (first page only: "Load more" does not need it)."""
     limit = max(1, min(int(limit or 50), 200))
+    source = _utf8(source)                           # a lone surrogate: SQLite cannot take it (UnicodeEncodeError)
     where, args = ["at>?"], [time.time() - RETENTION_DAYS * 86400]
     if source:
         where.append("source=?")
@@ -436,7 +437,8 @@ def list_events(source: str | None = None, unread: bool = False, before: int | N
                          (*args, limit + 1)).fetchall()
     sources = source_counts()
     out = {"events": [_row(r) for r in rows[:limit]], "more": len(rows) > limit,
-           "unread": sum(s["unread"] for s in sources), "sources": sources}
+           "unread": sum(s["unread"] for s in sources), "unread_errors": sum(s["unread_errors"] for s in sources),
+           "sources": sources}
     if not before:
         out["pending"] = pending_count()
     return out
@@ -473,9 +475,10 @@ def _db_stamp(path: Path) -> tuple:
 
 
 def _aggregate(c: sqlite3.Connection, cutoff: float) -> list[dict]:
-    srcs = c.execute("SELECT source, COUNT(*) total, SUM(read=0) unread, MAX(at) last FROM events WHERE at>? "
-                     "GROUP BY source ORDER BY MAX(at) DESC", (cutoff,)).fetchall()
-    return [{"source": r["source"], "total": r["total"], "unread": r["unread"] or 0, "last": r["last"]} for r in srcs]
+    srcs = c.execute("SELECT source, COUNT(*) total, SUM(read=0) unread, SUM(read=0 AND level='error') errors, "
+                     "MAX(at) last FROM events WHERE at>? GROUP BY source ORDER BY MAX(at) DESC", (cutoff,)).fetchall()
+    return [{"source": r["source"], "total": r["total"], "unread": r["unread"] or 0, "unread_errors": r["errors"] or 0,
+             "last": r["last"]} for r in srcs]
 
 
 def _kept(name: str, compute):

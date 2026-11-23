@@ -401,3 +401,110 @@ async def test_an_aborted_request_stops_its_query(monkeypatch):
             return True
     r = await asyncio.wait_for(search_api.search(Gone(), q="de", kinds="", limit=30), 5)
     assert r["cancelled"]
+
+
+def test_a_group_line_with_a_non_text_value_does_not_stop_the_index(client, topic, mx):
+    assert client.put("/api/settings", json={"agents_page": True}).status_code == 200
+    for name in ("writer", "editor"):
+        r = client.post("/api/agents", json={"topic_path": topic, "name": name, "display_name": name.capitalize(),
+                                             "sandbox": False})
+        assert r.status_code == 200, r.text
+    r = client.post("/api/agent-groups", json={"project": "acme", "name": "team", "display_name": "Team",
+                                               "goal": "Write.", "members": [
+                                                   {"path": f"{topic}/agents/writer", "role": "writes"},
+                                                   {"path": f"{topic}/agents/editor", "role": "edits"}]})
+    assert r.status_code == 200, r.text
+    room = config.state_dir("agents", "rooms") / "acme__team.jsonl"
+    room.write_text(json.dumps({"kind": "message", "text": 5, "at": "x"}) + "\n"
+                    + json.dumps({"kind": "message", "text": "cut \ud800 zqxsurrogate", "at": 1.0}) + "\n"   # a lone surrogate
+                    + json.dumps({"kind": "message", "text": "zqxgroupline", "at": 1.0}) + "\n")
+    (config.workspace() / "fresh.md").write_text("zqxfreshfile321\n")
+    search.refresh()
+    assert [r["title"] for r in _q(client, "zqxfreshfile321")] == ["fresh.md"]
+    assert _q(client, "zqxgroupline") and _q(client, "zqxsurrogate")
+
+
+def test_env_example_files_are_indexed(client, mx):
+    d = config.workspace() / "projects" / "acme" / "topics" / "blog"
+    d.mkdir(parents=True)
+    (d / ".env.example").write_text("ZQX_FOO_BAR=1\n")
+    search.refresh()
+    assert [r["title"] for r in _q(client, "ZQX_FOO_BAR")] == [".env.example"]
+
+
+def test_a_link_into_a_hidden_or_skipped_folder_is_not_indexed(client, mx):
+    ws = config.workspace()
+    (ws / ".hid").mkdir()
+    (ws / ".hid" / "k.md").write_text("zqxhiddenlink789\n")
+    (ws / "node_modules").mkdir()
+    (ws / "node_modules" / "n.md").write_text("zqxhiddenlink789\n")
+    os.symlink(ws / ".hid" / "k.md", ws / "sl1.md")
+    os.symlink(ws / "node_modules" / "n.md", ws / "sl2.md")
+    (ws / "real.md").write_text("zqxhiddenlink789 dans une vraie note\n")
+    search.refresh()
+    assert [r["title"] for r in _q(client, "zqxhiddenlink789")] == ["real.md"]
+
+
+def test_snippets_come_from_the_best_row_of_each_shown_result(mx):
+    # snippets are made for the shown rows only, after the ranking: each one must still be its own session's text
+    ids = {_session("", f"Run {i}", [("user", f"harbour report number{i} filed"),
+                                     ("assistant", f"the harbour harbour harbour summary number{i}")])
+           for i in range(40)}
+    search.refresh()
+    r = search.search("harbour", limit=5)["results"]
+    assert len(r) == 5 and {x["id"] for x in r} <= ids
+    for x in r:
+        n = x["title"].split()[1]
+        assert "\x02harbour\x03" in x["snippet"] and f"number{n}" in x["snippet"]
+        assert "summary" in x["snippet"]                       # the best row (most hits), not the first message
+    one = search.search("number7 report")["results"]
+    assert len(one) == 1 and one[0]["title"] == "Run 7" and "\x02number7\x03" in one[0]["snippet"]
+
+
+def test_a_unicode_line_separator_in_a_message_does_not_split_the_log_line(client, mx):
+    sid = _session("", "Separators", [("user", "second zebraxyz")])
+    with open(store.log_path(sid), "a", encoding="utf-8") as f:     # a writer that keeps non-ASCII text as it is
+        f.write(json.dumps({"type": "mx_user", "text": "avant\u2028zebraxyz apres", "attachments": [], "source": "web",
+                            "at": 1.0}, ensure_ascii=False) + "\n")
+    search.refresh()
+    rows = search._db().execute("SELECT count(*) FROM items WHERE src=? AND body LIKE '%zebraxyz%'", (f"s:{sid}",)).fetchone()
+    assert rows[0] == 2
+
+
+def test_a_title_with_a_lone_surrogate_does_not_stop_the_index(client, mx):
+    bad = _session("", "x", [("assistant", "broken quokkatitle")])
+    p = store.meta_path(bad)
+    p.write_text(p.read_text().replace('"title": "x"', '"title": "a\\ud800b"'), encoding="utf-8")   # valid JSON
+    good = _session("", "Saine", [("assistant", "fine quokkaword")])
+    search.refresh()
+    assert [x["id"] for x in search.search("quokkaword")["results"]] == [good]
+
+
+def test_a_folder_link_to_a_hidden_or_skipped_folder_is_not_indexed(client, mx):
+    ws = config.workspace()
+    (ws / ".hid").mkdir()
+    (ws / ".hid" / "memory.md").write_text("zqxfolderlink321\n")
+    (ws / "projects" / "p" / "attachments").mkdir(parents=True)
+    (ws / "projects" / "p" / "attachments" / "memory.md").write_text("zqxfolderlink321\n")
+    topics = ws / "projects" / "p" / "topics"
+    topics.mkdir(parents=True)
+    os.symlink(ws / ".hid", topics / "hid")
+    os.symlink(ws / "projects" / "p" / "attachments", topics / "att")
+    real = topics / "real"
+    real.mkdir()
+    (real / "notes.md").write_text("zqxfolderlink321 dans une vraie note\n")
+    search.refresh(True, True)
+    hits = [r["path"] for r in _q(client, "zqxfolderlink321")]
+    assert len(hits) == 1 and hits[0].endswith("projects/p/topics/real/notes.md")
+
+
+def test_a_container_folder_linked_outside_the_workspace_is_not_indexed(client, mx, tmp_path):
+    ws = config.workspace()
+    outside = tmp_path / "outside"
+    (outside / "t").mkdir(parents=True)
+    (outside / "t" / "memory.md").write_text("zqxcontainer654\n")
+    (outside / "t" / "notes.md").write_text("zqxcontainer654\n")
+    (ws / "projects" / "p").mkdir(parents=True)
+    os.symlink(outside, ws / "projects" / "p" / "topics")
+    search.refresh(True, True)
+    assert _q(client, "zqxcontainer654") == []

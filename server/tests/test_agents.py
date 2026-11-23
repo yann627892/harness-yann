@@ -397,6 +397,28 @@ def test_cron_trigger_goes_through_the_agent(client, topic, monkeypatch):
     assert client.get("/api/workspace/tree").json()["projects"][0]["topics"][0]["agents"] == []
 
 
+def test_a_batch_put_back_for_a_busy_agent_keeps_the_events_added_meanwhile(mx):
+    d = agents.Debouncer()
+    d.add(A, "t_1", "mail 1", "feed", 0)
+    [(path, tid, batch)] = d.due()
+    d.add(A, "t_1", "mail 2", "feed", 0)                 # arrives while fire() answered "busy"
+    d.requeue(path, tid, batch)
+    assert d.pending[(A, "t_1")]["texts"] == ["mail 1", "mail 2"]
+
+
+def test_a_result_with_a_lone_surrogate_is_still_written(client, topic):
+    _on(client)
+    _create(client)
+    agents.post(A, "result", "a \ud800 b", ok=True)
+    assert agents.thread(A)[-1]["text"] == "a ? b"
+
+
+def test_an_absurd_created_date_in_agent_json_is_replaced_by_now(mx):
+    for v in (1e300, -1e300, 10**40, 10**400, float("nan")):
+        assert 0 < agents.clean({"created": v})["created"] < 32503680000
+    assert agents.clean({"created": 1700000000})["created"] == 1700000000
+
+
 def test_events_waiting_for_a_busy_agent_keep_only_what_its_turn_reads(monkeypatch, mx):
     from maxxing import agents
     d = agents.Debouncer()
@@ -1054,3 +1076,33 @@ def test_a_rule_with_a_lone_surrogate_is_refused(client, topic):
         assert r.status_code == 400 and r.json()["error"] == "bad_rule", r.text
     assert client.get("/api/agents").status_code == 200
     assert agents.clean({"rules": [{"tool": "Bash", "match": "a\ud800"}]})["rules"][0]["match"] == "a?"
+
+
+def test_a_lone_surrogate_in_tools_folders_or_triggers_is_not_a_500(client, topic):
+    _on(client)
+    _create(client)
+    h = {"Content-Type": "application/json"}
+    trig = {"kind": "feed", "source": "shop", "match": "a\ud800", "prompt": "b\udfff"}
+    for body in ({"allowed_tools": ["\ud800"]}, {"disallowed_tools": ["Bash\udfff"]}, {"writable": ["a\ud800"]},
+                 {"triggers": [trig]}):
+        r = client.patch("/api/agents/acme/blog/writer", content=json.dumps(body), headers=h)
+        assert r.status_code < 500, (body, r.text)
+    assert agents.clean({"allowed_tools": ["\ud800", "Read"]})["allowed_tools"] == ["Read"]
+    assert agents.clean({"writable": ["a\ud800"]})["writable"] == []
+    t = agents.clean({"triggers": [trig]})["triggers"][0]
+    assert t["match"] == "a?" and t["prompt"] == "b?"
+    with pytest.raises(agents.AgentError):
+        agents.clean({"writable": ["a\ud800"]}, strict=True)
+
+
+def test_continue_in_sessions_keeps_the_pending_compaction_summary(client, topic):
+    from maxxing.sessions import store
+    _on(client)
+    _create(client)
+    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    sid = run["session"]["id"]
+    wait_idle(client, sid)
+    with store.edit(sid) as e:
+        e["seed"] = "SUMMARY OF THE EARLIER TURNS"
+    copy = client.post(f"/api/agents/acme/blog/writer/runs/{sid}/continue").json()["session"]
+    assert store.read(copy["id"])["seed"] == "SUMMARY OF THE EARLIER TURNS"

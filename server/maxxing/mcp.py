@@ -183,7 +183,10 @@ def _url_masked(url: str, mask: str = MASK) -> str:
         parts = []
         for part in q.split("&"):
             k, eq, v = part.partition("=")
-            parts.append(f"{k}{eq}{mask}" if eq and not _only_refs(v) else part)
+            if not eq:                          # `?sk_live_...`: a bare token
+                parts.append(mask if _has_literal(part) else part)
+            else:
+                parts.append(f"{k}{eq}{mask}" if not _only_refs(v) else part)
         return "&".join(parts)
     frag = u.fragment if _only_refs(u.fragment) else mask
     if _has_literal(netloc.rsplit("@", 1)[-1] + u.path) or any(TOKEN_SEGMENT_RE.match(s) for s in u.path.split("/")):
@@ -255,15 +258,25 @@ def _refs(cfg: dict) -> set[str]:
     return {m.group(1) for v in vals for m in REF_RE.finditer(str(v))}
 
 
+def _command_secret(cmd: Any) -> bool:
+    """A literal secret written in the `command` itself (`add-json` accepts anything there)."""
+    return isinstance(cmd, str) and _secret_args([cmd])[0]
+
+
+EXPORT_KEYS = ("type", "command", "args", "env", "headers", "url", "disabled")
+
+
 def _public(cfg: dict) -> dict:
     headers, lh = _masked(cfg.get("headers"), plain=PLAIN_HEADERS)
     env, le = _masked(cfg.get("env"))
     args = [MASK if hid else str(a) for a, hid in zip(_list(cfg.get("args")), _secret_args(cfg.get("args")))]
     url = cfg.get("url")
     shown = _url_masked(str(url)) if url else url
-    return {"type": _kind(cfg), "url": shown, "command": cfg.get("command"),
+    command = cfg.get("command")
+    hide = _command_secret(command)
+    return {"type": _kind(cfg), "url": shown, "command": MASK if hide else command,
             "args": args, "headers": headers, "env": env,
-            "literal_secret": lh or le or MASK in args or shown != url,
+            "literal_secret": lh or le or MASK in args or shown != url or hide,
             "keys": sorted(_refs(cfg))}
 
 
@@ -741,7 +754,9 @@ def export() -> list[dict]:
     out = []
 
     def item(name: str, cfg: dict, rel: str | None) -> dict:
-        c = dict(cfg)
+        c = {k: v for k, v in cfg.items() if k in EXPORT_KEYS}      # unknown keys (oauth.clientSecret...) never leave
+        if _command_secret(c.get("command")):
+            c["command"] = ""
         for k in ("headers", "env"):
             if k in c:
                 c[k] = _blank_secrets(c[k])
@@ -955,7 +970,7 @@ def login_finish(key: str, redirect: str, wait: float = 60.0) -> dict:
         lg = _logins.get(key)
         if lg is None or lg.closed.is_set():
             raise McpError(404, "login_expired", "this connection attempt expired: start again")
-        if not redirect.isascii() or not re.match(r"\Ahttps?://\S+\Z", redirect):
+        if not redirect.isascii() or not redirect.isprintable() or not re.match(r"\Ahttps?://\S+\Z", redirect):
             raise McpError(400, "bad_redirect", "paste the full address of the page you landed on")
         if lg.finishing:
             raise McpError(409, "busy", "this connection is already being finished")

@@ -3,6 +3,114 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
+## Unreleased
+
+Changed:
+- **Dependencies updated** (minor and patch versions only): web (@tanstack/react-query 5.108.0 -> 5.108.3, lucide-react 1.74.0 -> 1.77.0, react-router 8.5.1 -> 8.5.2, tailwind-merge 3.7.0 -> 3.7.1) and server (fastapi 0.163.2 -> 0.165.0, pydantic 2.14.3 -> 2.14.4, pyyaml 6.0.3 -> 6.0.4, certifi, filelock, ctranslate2, av).
+
+## 2.0.0-alpha.164 - 2026-11-23
+
+Fixed:
+- **With several sessions open, a message no longer stays on "Sending…" (local or Tailscale access, plain HTTP).**
+  Each open tab kept a live connection and the browser allows only six per server: the send waited for a free one and
+  never left. Only the sessions on screen keep one now; a tab you come back to catches up at once.
+
+## 2.0.0-alpha.163 - 2026-11-22
+
+Fixed:
+- **An agent stopped by a usage limit could pay for its retry again and again.** If saving its state failed right
+  after the "carry on" message, every pass of the server sent it again; it is now marked sent at once.
+- **Team: Summarize on a very long chat failed** (the whole history went to the model). The text sent is capped at
+  100,000 characters, the oldest messages left out, and one summary of a chat runs at a time (no second paid call
+  from another tab).
+- **Team: files dropped while others were still uploading** left the first ones stuck on "…" and the message could
+  not be sent.
+
+Changed:
+- Agents and Team: lighter code (about 1,100 lines less, same behaviour).
+
+## 2.0.0-alpha.162 - 2026-11-22
+
+Fixed:
+- **Downloads in the iPhone / iPad app.** A file that took more than a moment to arrive opened inside the app,
+  with no way to save it or go back. It now goes to the share sheet (Save to Files, AirDrop...): at once when it
+  is quick, else from a **Save** button on a "File ready" notice.
+- **Notices at the bottom on a phone.** They appeared at the top, over the buttons of the page; they now show at
+  the bottom, within thumb reach. A tap on a notice no longer goes through to the file preview behind it, nor
+  closes it.
+
+## 2.0.0-alpha.161 - 2026-11-21
+
+Changed:
+- **Tool calls read in plain words.** Each card of a session says what Claude does ("Runs the tests", "Searches
+  “useT”", "Reads app.py", "Restarts the service") with the real command in grey after it, instead of `Bash: cd … &&
+  grep …`. A command that deletes or rewrites things for good carries a red **Deletes or rewrites** badge.
+- **Reads in a row fold into one line.** Three files read and two searches in a row show as "Explored 3 files · 2
+  searches"; a click lists them. Anything that writes or runs something keeps its own card.
+
+## 2.0.0-alpha.160 - 2026-11-21
+
+New:
+- **Free up the video previews and thumbnails too.** Settings -> System -> Free up space has a new part, unticked
+  by default, for the lighter video copies of the player and the file thumbnails (made again when shown).
+- **Mark all sessions as read in one click.** The double tick at the top of the session list (as in Agents), and
+  **Mark all as read** in the right-click menu of a project or a topic for its sessions only.
+- **Comment a document, then send every comment to the session at once.** In the file viewer of a document opened
+  from a session, select a passage and click **Comment**: as many as you want, they wait under the document like
+  queued messages. **Send to the session** posts them as one message, each passage quoted with its comment.
+- **Turn off the badge of any page.** Settings -> Features -> **Badges** has one switch per page with a counter in the
+  sidebar (Home, Sessions, Team, Agents), all on by default: off, that page shows no number nor dot.
+
+Changed:
+- **Search answers faster while you type.** A common word or the first letters of one no longer slow the search
+  palette down: the results come back several times sooner on a well-filled workspace.
+- **A shorter bar in the file viewer.** Copy, download, Open in Files and Parent folder moved to its ⋮ menu,
+  Preview / Source and Edit are icons: the file name has room again, on a phone too.
+- **Shorter memory files by default: 100 lines (10 KB) instead of 200.** Every session reads the memory of its
+  folder on each call, so the daily compaction now keeps them at half the size and long sessions cost fewer tokens.
+  An installation that kept the default gets it at the next 05:00 compaction; Settings -> Memory sets another limit.
+- **The Home badge turns red when a notification is an error,** as the Sessions badge does for a failed session.
+
+Fixed:
+- **Freeing up disk space no longer breaks a tool in use.** The download caches a running tool needs (an MCP
+  server started with npx, for example) stay, and a cleanup that meets an update of the components waits for the
+  next time instead of removing the version being installed.
+- **A click anywhere in the message box now puts the cursor in it.** Its margins and the empty part of its bar
+  used to leave the cursor outside, so what you typed went nowhere.
+- **A file still uploading no longer vanishes when you go to another session or page.** The upload goes on and
+  the file is back in the message box when you return. Same in the message box of an agent or a group.
+- **After a compaction, Claude no longer answers its own summary.** A compacted session (automatic or **Compact
+  context**) used to run one more turn in which Claude read the summary and summed it up again, so the same points
+  came twice in a row. The summary now simply waits: your next message starts the fresh context with it, and that
+  extra turn is no longer paid.
+- **On a phone, the open sessions show as tabs in Zones mode too.** They were missing unless Tabs mode was on; a
+  sideways swipe now goes from one to the next in both modes.
+
+## 2.0.0-alpha.159 - 2026-11-19
+
+New:
+- **Free up disk space from Settings -> System.** A new **Disk space** card shows how full the disk is. **Free up
+  space** lists what Harness can drop by itself with its size (old versions, download caches, system logs, apt
+  packages, the trash), you untick what you want to keep; your projects and files are never touched. **Clean up
+  with Claude** opens a session where Claude goes through every project, finds where the big folders come from
+  and asks you before deleting anything.
+
+Changed:
+- **On a phone, an edit shown in a session wraps its long lines.** About 34 characters of a line fitted at 360 px,
+  so every change made by Claude had to be scrolled sideways, line by line, to be read; each line now wraps in its
+  column, next to its + / - mark. A computer shows the diff as before. Thanks to Anthony14FR.
+- **On a phone, Settings opens on the list of its sections.** The 26 sections were only in a strip to swipe
+  sideways (about six screens wide); they are now listed by group, one tap each. A computer still opens on General.
+  Thanks to Anthony14FR.
+- **On a phone, the Tasks page explains how to select on a touch screen.** The hint under the tasks no longer
+  talks about Ctrl/⌘ + click there: it says to tap the round box. Thanks to Anthony14FR.
+
+Fixed:
+- **On a phone, the Files page opens on the folder.** It opened on an empty viewer asking to pick a file "on the
+  left", with the folder hidden in the menu; the folder is now the page until you open a file.
+- **On a phone, the Send button stays on the screen.** With many buttons under the message box (agent
+  conversations, a running turn), the row now wraps instead of pushing Send off the right edge.
+
 ## 2.0.0-alpha.158 - 2026-11-19
 
 New:

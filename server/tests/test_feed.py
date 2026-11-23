@@ -45,6 +45,15 @@ def test_post_list_group_dedupe_read(client, mx):
     assert client.get("/api/feed", params={"limit": 1, "before": page["events"][0]["id"]}).json()["events"]
 
 
+def test_unread_errors_count_for_the_home_badge(client, mx):
+    feed.post("Boom", level="error", source="shop")
+    feed.post("Fyi", level="info", source="shop")
+    d = client.get("/api/feed").json()
+    assert d["unread"] == 2 and d["unread_errors"] == 1 and d["sources"][0]["unread_errors"] == 1
+    feed.mark_read(everything=True)
+    assert client.get("/api/feed").json()["unread_errors"] == 0
+
+
 def test_rules_and_telegram_routing(client, mx, monkeypatch):
     sent = []
     from maxxing.telegram import gateway
@@ -434,3 +443,8 @@ def test_feed_read_with_a_lone_surrogate_source_is_not_a_500(client, mx):
 def test_an_action_id_with_a_trailing_newline_is_refused():
     with pytest.raises(feed.FeedError):
         feed.post("Bad", actions=[{"id": "fix\n"}])
+
+
+def test_feed_list_with_a_lone_surrogate_source_is_not_a_500(client, mx):
+    assert feed.list_events(source="a\ud800")["events"] == []
+    assert client.get("/api/feed", params={"source": "a%ED%A0%80"}).status_code == 200

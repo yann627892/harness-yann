@@ -61,7 +61,7 @@ def test_a_session_header_on_a_phone_leaves_room_to_read():
     # one tab repeated the title under it, the tabs stayed while typing, and held sideways only ~90 px were left to read
     src = (WEB / "pages" / "sessions" / "index.tsx").read_text()
     assert "const several = useSessionsUI((s) => s.cols.length > 1)" in src
-    assert "<MobileTabsSlot.Provider value={tabs && several ? <TabsBar" in src
+    assert "<MobileTabsSlot.Provider value={several ? <TabsBar" in src  # the phone always shows its open sessions as tabs
     column = (WEB / "pages" / "sessions" / "Column.tsx").read_text()
     assert '<div data-kbd-hide="" data-tabs="">{tabs}</div>' in column
     css = (WEB / "styles" / "globals.css").read_text()
@@ -70,6 +70,14 @@ def test_a_session_header_on_a_phone_leaves_room_to_read():
         r"\[data-col\] \[data-kbd-hide\]:not\(\[data-tabs\]\) \{\s*display: none;",
         css,
     )  # the place rows go, the tabs stay (switching session with several open)
+
+
+def test_the_send_button_wraps_under_the_tools_instead_of_leaving_the_screen():
+    # an agent conversation has model, gauge, new chat, call, Stop, microphone and Send: wider than a 412 px phone, the
+    # right group shrank to nothing and Send was cut by the right edge; the bar wraps so every button stays in sight
+    src = (WEB / "features" / "composer" / "MessageBox.tsx").read_text()
+    assert '<div className="@container flex min-w-0 flex-wrap items-center gap-1 px-1.5 pb-1.5">' in src
+    assert '<div className="ml-auto flex min-w-0 items-center gap-1.5">' in src
 
 
 def test_a_diff_keeps_its_line_numbers_and_hunk_heads_in_sight_when_scrolled_sideways():
@@ -322,3 +330,70 @@ def test_the_chips_of_empty_task_projects_are_big_enough_to_tap():
     overview = (WEB / "features" / "tasks" / "Overview.tsx").read_text()
     chip = re.search(r'<button[^>]*onClick=\{\(\) => onPick\(p\.id\)\}[^>]*className="([^"]*)"', overview)
     assert chip and "pointer-coarse:h-10" in chip[1].split()
+
+
+def test_the_tasks_footer_hint_has_a_touch_text_without_ctrl_click():
+    src = (WEB / "pages" / "tasks" / "index.tsx").read_text()
+    assert re.search(r'className="pointer-coarse:hidden">\{t\(\'tasks\.footerHint\'\)\}', src)
+    assert re.search(r'className="hidden pointer-coarse:inline">\{t\(\'tasks\.footerHintTouch\'\)\}', src)
+    for lang in ("en", "fr"):
+        touch = re.search(r"'tasks\.footerHintTouch': '((?:[^'\\]|\\.)*)'", (WEB / "i18n" / f"{lang}.ts").read_text())
+        assert touch and "Ctrl" not in touch[1], lang
+
+
+def test_settings_opens_on_the_list_of_its_sections_on_a_phone():
+    routes = (WEB / "routes.tsx").read_text()
+    assert "path: 'settings/:section?'" in routes and "path: 'settings', element: <Navigate" not in routes
+    src = (WEB / "pages" / "settings" / "index.tsx").read_text()
+    assert 'return mobile ? <SettingsList /> : <Navigate to="/settings/general" replace />' in src
+    lst = src[src.index("function SettingsList"):src.index("function SettingsPage")]
+    assert "SETTINGS_GROUPS.map" in lst and "min-h-12" in lst, "every section, grouped, big enough to tap"
+
+
+def test_files_on_a_phone_is_the_folder_until_a_file_is_open():
+    # a phone landed on an empty viewer ("pick a file on the left") with the folder behind the drawer (#151)
+    src = (WEB / "pages" / "files" / "index.tsx").read_text()
+    assert "const inline = mobile && !file" in src and "inline={inline}" in src and "{!inline && (" in src
+    page_list = (WEB / "components" / "shell" / "PageList.tsx").read_text()
+    assert "if (here && panel === 'list') useTouchNav.getState().setPanel(null)" in page_list
+
+
+def test_the_agent_limits_ignore_a_number_that_overflows_once_scaled():
+    # 1e308 * 60 (minutes -> seconds) is Infinity: JSON.stringify sends null for it
+    src = (WEB / "features" / "agents" / "parts.tsx").read_text(encoding="utf-8")
+    assert re.search(r"if \(Number\.isFinite\(v\)\) onChange\(\{ \.\.\.value, \[k\]: v \}\)", src)
+
+
+def test_the_inline_page_list_keeps_its_filter_and_tools():
+    # on a phone with nothing open, the list is the page: its ListHead (filter, view, sort, hidden files) must be there
+    src = (WEB / "components" / "shell" / "PageList.tsx").read_text()
+    inline = src[src.index("  if (here) {"):src.index("  if (!slot) return null")]
+    assert "<ListHead" in inline and "search={search}" in inline and "{actions}" in inline
+
+
+def test_the_key_checks_of_an_agent_are_big_enough_to_tap():
+    src = (WEB / "features" / "agents" / "parts.tsx").read_text()
+    row = re.search(r'<label key=\{n\} className="([^"]*)"', src)
+    assert row and "pointer-coarse:min-h-10" in row[1].split()
+
+
+def test_an_inline_edit_diff_wraps_its_lines_on_a_phone():
+    # at 360 px about 34 characters of a diff line fit: every edit had to be scrolled sideways to be read
+    src = (WEB / "pages" / "sessions" / "Items.tsx").read_text()
+    view = src[src.index("export function DiffView"):src.index("function ToolOutput")]
+    row = re.search(r"'flex min-w-max px-2([^']*)'", view)
+    assert row and "max-md:min-w-0" in row[1].split()
+    text = re.search(r'<span className="whitespace-pre ([^"]*)">\{l\.s', view)
+    assert text and {"max-md:whitespace-pre-wrap", "max-md:[overflow-wrap:anywhere]"} <= set(text[1].split())
+
+
+def test_the_quote_button_is_big_enough_to_tap():
+    src = (WEB / "pages" / "sessions" / "Quote.tsx").read_text()
+    btn = re.search(r"'(mx-queue-in [^']*)'", src)
+    assert btn and "pointer-coarse:h-10" in btn[1].split() and "window.innerHeight - 56" in src
+
+
+def test_the_open_url_link_of_the_infra_type_view_is_big_enough_to_tap():
+    src = (WEB / "features" / "infra" / "TypeView.tsx").read_text()
+    link = re.search(r'target="_blank".{0,200}?className="([^"]*)"', src, re.S)
+    assert link and "pointer-coarse:size-10" in link[1].split()

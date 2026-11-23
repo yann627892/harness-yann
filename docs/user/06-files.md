@@ -10,8 +10,9 @@ Nothing outside that folder is reachable from the UI.
 
 - Breadcrumbs at the top, folders first, then files with size and date. On a computer the folder's listing sits
   in the second bar next to the sidebar (see [Sessions](04-sessions.md#layout)), with **Filter this folder** and
-  its toolbar; a file you click opens in the page, beside it. On a phone the listing opens from **☰** at the top
-  left: opening a folder keeps it open, opening a file closes it.
+  its toolbar; a file you click opens in the page, beside it. On a phone the folder is the page itself until you
+  open a file (no empty viewer, nothing to open first); with a file open, **☰** at the top left shows the folder
+  again (opening a folder keeps it open, opening a file closes it).
 - Search finds files and folders by name in the workspace.
 - Drag files from your computer onto the page to **upload** them into the current folder - or
   onto a folder row to upload them straight into that folder. One upload is limited to 2 GB, and
@@ -114,16 +115,22 @@ phone).
 - A **folder** opens as a grid with thumbnails; click a file to open it, then ← / → browse that folder.
   **Parent folder** goes one level up. Several files can be selected, downloaded or deleted there too (see
   [Select several files](#select-several-files)).
-- **Edit** (text files: markdown, txt, code, CSV, HTML) opens the file in the Files page, ready to edit - in a new
-  tab on a computer, in place on a phone.
+- The bar keeps the name, **Preview / Source**, **Edit** (text files: markdown, txt, code, CSV, HTML: the file in the
+  Files page, ready to edit - a new tab on a computer, in place on a phone), the text size, ← / →, fullscreen and close.
+  The rest is in its **⋮** menu: copy, download, Open in Files, Parent folder (on a phone, Edit too).
 - **Open in Files** opens the file in the Files page - a new tab on a computer (the viewer stays open), in place
   on a phone.
 - **Copy the text** copies what the file says: a text, code or CSV file as it is, a PDF as the text read in its
   pages (a scan has none), a workbook as cells that paste into a spreadsheet. A Markdown or HTML file and a Word
   document give two choices: the **source** (Markdown for a document) or **plain text**, the words as you read them
-  without the marks. On a phone it is in the **⋯** menu; in the Files page, in the menu of the file.
+  without the marks. In the **⋮** menu of the viewer; in the Files page, in the menu of the file.
 - **Download** (also on a phone; a picture on screen is saved at once, without downloading it again); on a folder,
   **Download as zip**. **Esc** to close.
+- **Comment a document for the session** (a file opened from a session, in Preview): select a passage, **Comment**,
+  type, Enter. The passage stays highlighted; add as many as you want, on several files. They wait under the
+  document (kept in this browser if you close the viewer): click a passage to scroll to it, a comment to change it,
+  × to remove it. **Send to the session** posts them all as one message, each passage quoted with its comment. On a
+  phone the list folds to one line with its send button.
 
 ## Edit
 

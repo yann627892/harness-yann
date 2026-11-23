@@ -1,6 +1,7 @@
 """Trash: list, restore (topics with their sessions, files, single sessions), delete, empty, purge."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 import time
@@ -607,3 +608,206 @@ def test_a_session_is_in_the_trash_with_its_sidecar_before_anything_can_empty_it
     monkeypatch.setattr(config, "write_json", real)
     assert emptied == [0] and len(_items(client)) == 1      # nothing was there to empty yet; the session stays
 
+
+
+def test_two_restores_of_the_same_session_end_in_a_trash_error_not_a_crash(client, topic, monkeypatch):
+    import threading
+    import time
+    s = client.post("/api/sessions", json={"path": topic, "message": "x NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    client.delete(f"/api/sessions/{s['id']}")
+    item = _items(client)[0]["id"]
+    real = trash._put_sessions
+    monkeypatch.setattr(trash, "_put_sessions", lambda *a, **k: (time.sleep(0.3), real(*a, **k))[1])
+    out: list = []
+
+    def go():
+        try:
+            out.append(trash.restore(item))
+        except Exception as e:  # noqa: BLE001
+            out.append(e)
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert sum(isinstance(o, dict) for o in out) == 1
+    assert all(isinstance(o, (dict, trash.TrashError)) for o in out), out
+
+
+def test_a_failed_move_of_a_session_to_the_trash_leaves_it_in_the_store(client, topic, mx, monkeypatch):
+    from maxxing.sessions import store
+    s = client.post("/api/sessions", json={"path": topic, "message": "hello NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    real, calls = trash.shutil.move, []
+
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real(src, dst)
+    monkeypatch.setattr(trash.shutil, "move", flaky)
+    with pytest.raises(OSError):
+        trash.trash_session(s["id"])
+    assert store.read(s["id"])["title"] and store.log_path(s["id"]).exists()
+    assert not list(trash.trash_dir().glob("*session*"))
+
+
+def _across_disks(monkeypatch):
+    real = os.rename
+
+    def rename(src, dst, *a, **k):
+        if Path(src).parent == trash.trash_dir():
+            raise OSError(errno.EXDEV, "cross-device")
+        return real(src, dst, *a, **k)
+    monkeypatch.setattr(trash.os, "rename", rename)
+
+
+def test_a_failed_restore_leaves_no_partial_copy(client, topic, mx, monkeypatch):
+    item = _trash_file(mx, topic, "half.txt")
+    _across_disks(monkeypatch)
+
+    def half(src, dst, **k):
+        Path(dst).write_text("part")                    # a copy across disks that stops half way
+        raise OSError("disk full")
+    monkeypatch.setattr(trash.shutil, "copy2", half)
+    r = client.post(f"/api/trash/{item.stem}/restore")
+    assert r.status_code == 409
+    assert not list((mx["ws"] / topic).glob("*half*")) and item.exists()
+
+
+def test_a_restore_across_disks_keeps_the_copy_when_the_source_cannot_be_emptied(client, topic, mx, monkeypatch):
+    from maxxing import workspace
+    d = mx["ws"] / topic / "box"
+    d.mkdir()
+    (d / "a.txt").write_text("a")
+    (d / "b.txt").write_text("b")
+    workspace.move_to_trash(d)
+    (item,) = _items(client)
+    _across_disks(monkeypatch)
+
+    def rmtree(path, *a, **k):
+        (Path(path) / "a.txt").unlink()                 # the removal stops after a.txt
+        if not k.get("ignore_errors"):
+            raise OSError(errno.EPERM, "not permitted")
+    monkeypatch.setattr(trash.shutil, "rmtree", rmtree)
+    assert client.post(f"/api/trash/{item['id']}/restore").status_code == 200
+    assert sorted(q.name for q in d.iterdir()) == ["a.txt", "b.txt"]
+
+
+def test_restoring_a_project_with_a_session_title_that_cannot_be_written_does_not_crash(client, mx, topic):
+    s1 = client.post("/api/sessions", json={"path": topic, "message": "hi NOTOOL"}).json()
+    s2 = client.post("/api/sessions", json={"path": topic, "message": "hi NOTOOL"}).json()
+    wait_idle(client, s1["id"]); wait_idle(client, s2["id"])
+    assert client.delete("/api/workspace/projects/acme").status_code == 200
+    item = _items(client)[0]
+    folder = next(p for p in config.state_dir("trash").iterdir() if p.is_dir() and any(p.glob("*.json")))
+    meta = sorted(q for q in folder.glob("*.json") if q.stem == s2["id"])[0]
+    data = json.loads(meta.read_text()); data["title"] = "\ud800"
+    meta.write_text(json.dumps(data))                   # json.dumps escapes it: a lone surrogate once loaded
+    r = client.post(f"/api/trash/{item['id']}/restore")
+    assert r.status_code == 200, r.text
+
+
+def test_a_folder_named_like_a_companion_is_not_mixed_with_the_sessions_of_a_deleted_topic(client, topic, mx, monkeypatch):
+    from maxxing import workspace
+    monkeypatch.setattr(workspace.time, "strftime", lambda *a, **k: "20260101-000000")   # the same second
+    name = topic.rsplit("/", 1)[-1]
+    odd = mx["files"] / f"topic-{name}.sessions"
+    odd.mkdir()
+    (odd / "precious.txt").write_text("keep")
+    workspace.move_to_trash(odd)
+    sid = client.post("/api/sessions", json={"path": topic, "message": "NOTOOL hi"}).json()["id"]
+    wait_idle(client, sid)
+    workspace.delete_topic(topic.split("/")[1], name)
+    assert sorted(x.name for x in trash.trash_dir().joinpath(f"20260101-000000-topic-{name}.sessions").iterdir()) == ["precious.txt"]
+    for it in [i for i in _items(client) if i["name"].endswith(f"topic-{name}")]:
+        assert client.post(f"/api/trash/{it['id']}/restore").status_code == 200
+    kept = [i for i in _items(client) if i["name"].endswith(".sessions")]
+    assert kept, "the folder must still be in the trash"
+    assert (trash.trash_dir() / kept[0]["id"] / "precious.txt").read_text() == "keep"
+
+
+def test_session_copies_left_by_a_topic_restore_stay_listed_and_are_not_purged(client, topic, mx):
+    from maxxing import workspace
+    from maxxing.sessions import store
+    s = client.post("/api/sessions", json={"path": topic, "message": "zebra NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    meta = store.read(s["id"])
+    workspace.delete_topic(topic.split("/")[1], topic.rsplit("/", 1)[-1])
+    config.write_json(store.meta_path(s["id"]), meta)       # that session id exists again: its copy cannot go back
+    (it,) = [i for i in _items(client) if i["kind"] == "topic"]
+    assert client.post(f"/api/trash/{it['id']}/restore").status_code == 200
+    left = [i for i in _items(client) if i["kind"] == "session"]
+    assert len(left) == 1
+    old = time.time() - 31 * 86400
+    for q in trash.trash_dir().iterdir():
+        if q.name.endswith(".sessions"):
+            os.utime(q, (old, old))
+    trash.purge_old()
+    assert [i["id"] for i in _items(client) if i["kind"] == "session"] == [left[0]["id"]]
+
+
+def test_restoring_a_session_never_overwrites_a_log_that_is_already_there(client, topic):
+    from maxxing.sessions import store
+    s = client.post("/api/sessions", json={"path": topic, "message": "zebra NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    client.delete(f"/api/sessions/{s['id']}")
+    store.log_path(s["id"]).write_text("mine")              # a log of that id stands there without its meta
+    it = _items(client)[0]
+    assert client.post(f"/api/trash/{it['id']}/restore").status_code == 409
+    assert store.log_path(s["id"]).read_text() == "mine" and [i["id"] for i in _items(client)] == [it["id"]]
+
+
+def test_a_session_whose_log_cannot_move_stays_listed_after_its_topic_is_restored(client, topic, monkeypatch):
+    import shutil
+    from maxxing import workspace
+    from maxxing.sessions import store
+    s = client.post("/api/sessions", json={"path": topic, "message": "zebra NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    workspace.delete_topic(topic.split("/")[1], topic.rsplit("/", 1)[-1])
+    real = shutil.move
+
+    def move(src, dst, *a, **k):
+        if str(src).endswith(".log"):
+            raise OSError("disk full")
+        return real(src, dst, *a, **k)
+    monkeypatch.setattr(trash.shutil, "move", move)
+    (it,) = [i for i in _items(client) if i["kind"] == "topic"]
+    assert client.post(f"/api/trash/{it['id']}/restore").status_code == 200
+    assert not store.meta_path(s["id"]).exists()
+    assert [i["kind"] for i in _items(client)] == ["session"]     # still there to restore again, not hidden
+
+
+def test_a_link_standing_in_the_place_of_a_deleted_file_does_not_stop_its_restore(client, topic, mx, tmp_path):
+    from maxxing import workspace
+    d = mx["ws"] / topic
+    (d / "a.txt").write_text("x")
+    workspace.move_to_trash(d / "a.txt")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("outside")
+    os.symlink(elsewhere, d / "a.txt")
+    (item,) = _items(client)
+    assert client.post(f"/api/trash/{item['id']}/restore").status_code == 200
+    assert elsewhere.read_text() == "outside" and (d / "a (restored).txt").read_text() == "x"
+
+
+def test_a_topic_deleted_from_the_file_manager_comes_back_with_a_slug_name(client, topic, mx):
+    config.save_config({**config.load_config(), "files_root": str(mx["tmp"])})    # the workspace is under the files root
+    assert client.post("/api/files/delete", json={"path": str(mx["ws"] / topic)}).json() == {"ok": True}
+    assert client.post("/api/workspace/projects/acme/topics", json={"name": "blog"}).status_code == 200
+    (it,) = [i for i in _items(client) if i["kind"] == "topic"]
+    r = client.post(f"/api/trash/{it['id']}/restore").json()
+    assert r["ok"] and (mx["ws"] / "projects/acme/topics/blog-restored").is_dir()
+
+
+def test_an_old_item_with_a_damaged_sidecar_is_not_purged_at_once(client, topic, mx):
+    from maxxing import workspace
+    f = mx["ws"] / topic / "old.txt"
+    f.write_text("x")
+    os.utime(f, (time.time() - 90 * 86400,) * 2)
+    workspace.move_to_trash(f)
+    side = next(trash.trash_dir().glob("*old.txt.json"))
+    side.write_text("{not json")
+    assert trash.purge_old() == 0
+    assert any(trash.trash_dir().glob("*old.txt"))

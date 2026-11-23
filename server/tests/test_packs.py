@@ -137,3 +137,21 @@ def test_basics_makes_no_folder_through_a_linked_project(client, mx, tmp_path):
     (ws / "projects/general").symlink_to(outside, target_is_directory=True)
     client.post("/api/packs/basics/install")
     assert list(outside.iterdir()) == []
+
+
+def test_a_file_where_a_folder_goes_is_a_clean_error(client, mx):
+    ws = workspace.ensure_root()
+    shutil_target = ws / "projects" / "general"
+    if shutil_target.is_dir():
+        import shutil
+        shutil.rmtree(shutil_target)
+    shutil_target.write_text("in the way")
+    r = client.post("/api/packs/basics/install")
+    assert r.status_code == 409 and r.json()["error"] == "blocked", r.text
+
+
+def test_a_pack_job_with_a_bad_timeout_does_not_stop_the_install(client, mx):
+    data = {"id": "x", "crons": [{"name": "Weekly", "topic": "", "prompt": "p", "timeout_s": "soon"}]}
+    workspace.create_project("shop")
+    assert packs._create_jobs(data, "shop") == ["Weekly"]
+    assert [j["timeout_s"] for j in crons.list_jobs() if j["name"] == "Weekly"] == [900]

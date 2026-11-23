@@ -5,6 +5,126 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
+## Unreleased
+
+- Dependencies: `npm update` in `web/` and `uv lock --upgrade` in `server/` (minor and patch only). Majors left alone: emojibase-data 18, mermaid 12. `templates/` untouched.
+
+## 2.0.0-alpha.164 - 2026-11-23
+
+- `SessionColumn`: `useSessionStream(place?.hidden ? null : sid)`: a hidden tab (tabs view) closes its SSE. Over
+  HTTP/1.1 (local / Tailscale mode, no Caddy h2) one `EventSource` per open tab + `/api/stream` filled the browser's 6
+  connections per host and queued `POST /messages` (#178). Shown again, the stream resumes from `get(id).next`.
+
+## 2.0.0-alpha.163 - 2026-11-22
+
+- Agents / Team refactor, no behaviour change: shared helpers (`agents._edit_state`, api `_errors` / `_existing`,
+  `cmd_agents._fail` + dispatch table, `agent_rooms._need` / `_at` / `_rewrite`, `agent_guard._deny_secrets` /
+  `_deny_edit`, `teampeer._sig` / `_drop_key`); web: `features/agents/chat.tsx` (shared by AgentPage and
+  GroupPage), `FormDialog` (Appearance.tsx), Team `TeamDialog` / `Footer` / `Tick` / `nameOf` / `unreadOf`
+  (people.tsx), dead `describe_change`, `context`, `_post_shared`, `TriggerChips`, `whereOf` removed.
+- `agents.retry_limits`: `retried` saved right after the send (a failing snapshot / budget step resent the paid
+  retry each pass). Test: `test_limit_retry.py::test_agent_limit_retry_is_sent_once_when_what_follows_the_send_fails`.
+- `team.summarize`: input capped by `team.SUMMARY_CHARS` (100,000, oldest dropped; `count` / `from` match what was
+  sent), one at a time per chat (`409 busy`). Tests: `test_team.py::test_the_text_sent_for_a_summary_is_capped`,
+  `test_one_summary_of_a_chat_at_a_time`.
+- Team composer: uploads use `mutateAsync().then` (React Query only ran the callbacks of the last `mutate()`).
+
+## 2.0.0-alpha.162 - 2026-11-22
+
+- iOS standalone download (`features/files/download.ts` `shareOrOpen`): the file is read up to 120 s
+  (`SHARE_READ_MS`, 50 MB cap unchanged, "Preparing" toast after 0.6 s); read within `SHARE_WAIT_MS` -> `navigator.share`
+  at once, later (or `NotAllowedError`) -> `toast.action` "File ready" / Save (30 s) whose tap opens the sheet.
+  `location.assign` (opens in the app, no way back) only above 50 MB, without file sharing, or on a read error.
+  New keys `files.preparing|ready|save`.
+- Toaster (`components/ui/toast.tsx`): `bottom-center` on mobile (was `top-center`), `offset` and `mobileOffset`
+  (sonner uses the latter under 600 px) = `calc(var(--safe-bottom-ui) + 8px)`. Wrapped in a `contents` div that stops
+  `pointerdown` (Radix DismissableLayer listens on the document: a tap on a toast closed the viewer), and
+  `[data-sonner-toast]:not([data-visible=false]) { pointer-events: auto }` (a modal sets none on the body).
+
+## 2.0.0-alpha.161 - 2026-11-21
+
+- Thread: `web/src/pages/sessions/toolLabel.ts`. `toolLabel(name, input, t, rel)` -> `{title, detail, kind, danger}`:
+  Bash uses `input.description` (only ~1/3 of real Bash calls carry one), else `bashAction(command)` recognises the
+  first real command of the line (skips `cd`, env assignments, `env -u`, `sudo`, `timeout`, loop words,
+  redirections, here-docs; parses at most `PARSE_MAX` = 4000 chars, split without `\s*` to stay linear). Unknown
+  tools (MCP…) return an empty title: the card keeps name + server summary. `isDangerous` (rm -rf, git push --force,
+  reset --hard, branch -D, clean -f, DROP/TRUNCATE, DELETE FROM, mkfs, dd) sets the badge, on the full command.
+- Grouping: `groupRows` (Thread.tsx) folds runs of >= `GROUP_MIN` (3) tool items where `groupable` (Items.tsx) is
+  true into `ToolGroup`, keyed by the first item. `toolKind` is the security boundary of the fold: a Bash line is
+  read/search/list/look only if EVERY segment (`&&`, `||`, `;`, `|`) classifies as such; refused outright: `$(`,
+  backticks, `<(`/`>(`, newlines, a lone `&`, any `>` except to /dev/null or fd dup, `tee`, `find -delete/-exec/-ok/
+  -fprint`, `--output`, `rg --pre`, `sort -o`, `git -c/--config-env/--exec-path`, `sed -i`, longer than PARSE_MAX,
+  dangerous. Sub-agents and background tasks never group.
+- `RunningRow` shows the label of the pending tool instead of `use.summary`.
+- i18n: namespace `tl` in the on-demand group `tlabel` (not declared on the sessions route: it would overflow the
+  first-load dictionary budget; listed in ON_DEMAND of test_web_i18n_groups).
+
+## 2.0.0-alpha.160 - 2026-11-21
+
+- Tests: the bare-token fixture of `test_mcp_safety.py` is built by concatenation, so the leak scanners of the
+  maintainers' push hooks no longer take it for a live key. `CHANGELOG.md`: one Fixed section in Unreleased.
+- Cleanup: `deps.run_lock` (flock on `tools/deps-run.lock`, not deps.lock that `write_record` takes inside an
+  update) wraps `deps.update` and a real `deps.clean`; a clean during an update raises `deps.Busy` (row error in
+  Settings, `deps clean` prints "skipped" and exits 0). Caches: `_in_use` reads /proc (cmdline, cwd, exe) and
+  keeps the uv cache and each `~/.npm/_npx/<hash>` a process runs from. `tmp/uploads` (upload spool) is kept.
+  Journal estimate capped at the archived files (`JOURNAL_DIRS`), the only ones `--vacuum-size` removes. New
+  part `previews` (off by default): `state/videos/*.mp4` not played in `COPY_KEEP_S` (never `.part.mp4`) and
+  `state/thumbs/*.webp`.
+- MessageBox (sessions, agents, groups, Team): a mousedown on the box outside its own controls (button, link, field,
+  `[role]`, attachments strip) focuses the textarea, caret at the end, with `preventDefault` (no stray selection).
+- Composer uploads: in-flight uploads live in `pages/sessions/uploads.ts` (per draft key, outside the component), no
+  longer aborted on unmount. A remounted composer shows them again (`uploadsOf`) and follows them (`onUploads`); a
+  file that finishes with no composer open on its draft is written to the stored draft (`saveAtts`). The draft key
+  change moves them (`moveUploads`).
+  `features/agents/attach.tsx` (agents, groups) uses the same store; a box without a draft key still cancels its
+  uploads when it goes away.
+- Sessions, mark all as read: `useMarkAllRead` (lib/queries/sessions.ts) posts `/seen` for each unread session, with
+  the optimistic patch of the list, each session and the topic counters (unread, errors). Tree: the double tick in
+  `ListHeader` (all unread live sessions) and `MarkAllReadItem` in the project / topic menus (right click, ⋯,
+  drill-down). No new route.
+- Search: `search.search` ranks first (bm25 only, best rowid per kind/ref), then runs `snippet()` on the shown rows
+  only (`rowid IN (...)`, at most `limit`). `snippet()` re-tokenizes the whole text, so it ran on every matching row
+  before (up to `RANK_MAX`): 114-162 ms -> 13-19 ms for 3-letter prefixes on a 4,700-item index, same results.
+- Compaction: no `seed` queue item after a summary turn any more. `Runner._post` stores the seed in the session meta
+  (`seed`, with the new `csid` and `fresh`) and resets `context_tokens` to `base_tokens`; `Runner.turn` gives it to the
+  next item as `preface` and drops it once the thread exists (`saw_init`). A compacted session therefore counts one
+  turn less (turn + summary, no third). Hand-off unchanged (`seed` item in the new session).
+- Viewer comments: `features/files/docComments.tsx` (zustand, localStorage `mx-doc-comments`, per session). The session
+  is the thread the file was opened from (`data-sid` on `[data-thread]`, set in `FilePreview.show`, reset when the
+  viewer closes). Passages marked with the CSS Custom Highlight API (`::highlight(mx-doc-comment)`), sent with
+  `useSendMessage` as one message. Viewer bar: copy / download / Files / parent folder only in the ⋮ menu (all sizes;
+  test ids `viewer-download`, `viewer-open-files`, `viewer-zip` gone, `viewer-more-download` stays).
+- Memory: `memory.DEFAULT_MAX_LINES` 200 -> 100 (10 KB). Only installs without `memory_max_lines` in config.json
+  follow it; the next compaction shrinks every memory.md over 100 lines / 10 KB. Token test with Romain (11-20).
+- Badges: setting `nav_badges_hidden` (routes among `api/settings.BADGE_PAGES` = `/`, `/sessions`, `/team`, `/agents`;
+  default `[]`, restored from a backup), Settings -> Features -> Badges (`BadgesPicker` in `sections/Features.tsx`),
+  read by `nav.useBadgeOn(route)` in the sidebar entries and the phone ☰ (Sessions). `GET /api/feed` adds
+  `unread_errors` (total and per source, `feed._aggregate`): the Home badge takes the `error` tone; the optimistic
+  mark-read lowers it too.
+- Phone: `MobileOverlay` shows the tabs and the swipe whenever 2+ sessions are open, in both modes (was Tabs mode
+  only); the phone header's `TabsToggle` (now useless) is gone, with `tabs.tabs` / `tabs.tabsTip`.
+
+## 2.0.0-alpha.159 - 2026-11-19
+
+- Disk space (Settings -> System): `maxxing/cleanup.py` (`scan`, cached 60 s; `run(parts)` measures each part before
+  and after) over five parts `leftovers` / `caches` (`deps.clean`, new `leftovers=` flag to clean the caches alone),
+  `journal` (`journalctl --vacuum-size=200M`), `apt` (`apt-get clean`), `trash` (`trash.empty`, off by default);
+  system commands go through `cleanup._sh`, stubbed in every test by `conftest`. Routes `GET/POST
+  /api/system/cleanup` (API.md). `DiskCard` + `CleanupDialog` in `System.tsx`; "Clean up with Claude" =
+  `draftUrl(useHarnessTopic(), t('system.cleanupPrompt'))`.
+- Sessions: `DiffView` (`pages/sessions/Items.tsx`, the inline Edit / Write diff) wraps under `md`: rows drop
+  `min-w-max` (`max-md:min-w-0`), the text span is `max-md:whitespace-pre-wrap [overflow-wrap:anywhere]`. Desktop
+  keeps `whitespace-pre` + horizontal scroll. Test: `test_web_mobile.py::test_an_inline_edit_diff_wraps_its_lines_on_a_phone`.
+- Files (#151): touch with no file open renders `PageList` `inline` (the listing is the page, no viewer section,
+  the "Open the folder" button of the empty state removed); `PageList` in place closes the drawer's `list` level
+  (it would be empty). Composer (#148): the right group of `MessageBox` wraps.
+- Settings (PR #156 of Anthony14FR): route `settings/:section?` (was a redirect for `settings`); `SettingsRoute`
+  renders `SettingsList` (groups of `SETTINGS_SECTIONS`, 48 px rows) when `useIsMobile()` and no section, else the
+  redirect to General. Test in `test_web_mobile.py`.
+- Tasks (`pages/tasks/index.tsx`, PR #150 of Anthony14FR): footer hint split in two spans, `tasks.footerHint`
+  (`pointer-coarse:hidden`) and new `tasks.footerHintTouch` (en+fr, `hidden pointer-coarse:inline`). Test in
+  `test_web_mobile.py`.
+
 ## 2.0.0-alpha.158 - 2026-11-19
 
 - Web (from Anthony14FR's PRs #138 #140 #143 #145, rewritten): `useMarkAllSeen()` (`queries/agentGroups.ts`) posts
