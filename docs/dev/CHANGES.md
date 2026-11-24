@@ -5,8 +5,128 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
-## Unreleased
+## 2.0.0-alpha.167 - 2026-11-24
 
+- `agent_guard.check_cli`: for `heavy`, a `-h`/`--help` after the command's first word is the command's (REMAINDER),
+  not help: the checks run (it ran as root outside the sandbox).
+- `cmd_agents` export: `--output` refused when `_turn()["path"]` (an agent turn); stdout stays.
+- `gitsafe.SAFE_GIT`: `-c diff.ignoreSubmodules=all -c submodule.recurse=false` (a submodule's own
+  `.git/modules/<sub>/config` filters ran on `status`; `_filter_overrides` only sees the main repo).
+- `backup._apply` hold: `_keep_local_rules` keeps the local `SECURITY_FIELDS` + `SECURITY_LIMITS` of `agent.json` and
+  `permission_mode`/`allowed_tools`/`browser`/`devices` of `.maxxing.json` (new agent -> `enabled: false`, new folder
+  -> rules dropped), reported in `held["rules"]`; `_hold_new_jobs` only trusts local jobs that are enabled;
+  `extensions.disabled` = union of the saved list, the current one and the held extensions.
+
+## 2.0.0-alpha.166 - 2026-11-23
+
+- `openSync.ts`: ids shared on a phone in Zones too (`sync.ids` and the `active` dependency removed; base no longer
+  dropped when the phone leaves Tabs). Front: `sync.mine` = the session in front here at the last agreement; `flush`
+  sends `front` only when it changed here since (`f !== sync.mine && f !== sync.front`), so a front of another device
+  that is not open here is no longer answered with ours (it undid a link on the phone). `view` keeps `mine` = `before`
+  while a change made here is still to send. POST answers go through `sent()`: `setQueryData(qk.openSessions)` when
+  newer, so a remounted page no longer applies the older cached GET (it brought the previous front back).
+- `pages/sessions/index.tsx` State -> URL (desktop): reads `useSessionsUI.getState()` instead of the rendered
+  `focusedCol`/`cols`: on a fresh load with `?session=X`, the URL effect's `openSession(X)` of the same pass is no
+  longer overwritten by the persisted front (which then came back through the URL effect).
+- `Composer.tsx`: `autoFocus` focuses only if `focused === colKey` when it runs (the composer mounts after the
+  session data: the last column to load stole the front in Zones).
+
+## 2.0.0-alpha.165 - 2026-11-23
+
+- Harness Link 0.1.1 (`server/maxxing/link.json`, release `link-v0.1.1`): Android main screen redesigned (`LogoView.kt`
+  draws the LINK logo of `link/console.go` cell by cell, `activity_main.xml` cards, `colors`/`themes`/`dimens`, status
+  dot drawables), `versionCode` 2 / `versionName` 0.1.1. Desktop binaries rebuilt with VERSION=0.1.1, code unchanged.
+- Devices, Add a device -> Android: an APK button under the QR code (`devices-add-apk`) links to the invite's
+  `downloads.android` (`/api/devices/download/android?code=`, the personalised APK); texts `devices.add.apk` / `.apkHelp`.
+- `sessions/opened.py`: `open_sessions.json` also keeps `tabs` (bool) and `front` (session id), set by `POST /api/sessions/open
+  {tabs?, front?}` (a change bumps `rev`, same value = no rev); keys absent until a browser sends them. `openSync.ts`:
+  sends the mode / focused session when they change here (debounced with the cols), applies the other device's unless
+  changed here since the last agreement (`sync.tabs` / `sync.front`, `sync.start` = front at mount so a link is not
+  undone); the query runs on a phone in Zones too (ids still shared only in tabs view). Phone: `/sessions` with nothing
+  on screen waits for the shared list and opens its `front`; a front applied while a session is shown updates the URL.
+- Phone: `ViewSwitch` (now `className`-able, `pointer-coarse:size-10`) in the `mobile` session header and the mobile new-session
+  header; `MobileOverlay` gives the chips when `tabs` (was `cols.length > 1` in both modes), swipe still on `several`.
+- Slimming pass (no behaviour change, ~-2 000 lines): dead code removed across server, web and Harness Link (e.g.
+  Telegram health watcher superseded by feed alerts, `crons._run_claude`, `SessionPreviewCard`, `UsageIndicator`,
+  `FilePreview`, unused ui parts and hooks), duplicates merged (`security.secret_key`, `vault.set_note_expose`,
+  shared OSV lookup in `depcheck`/`deps`, one `LiveTokens` class for browser/devices live views, `useDebounced`,
+  `STATUS_TONE`), 80 unused i18n keys and 3 unused Radix packages dropped. `maxxing team send --file` reserves the
+  target name atomically (`reserve_path`); `imap._date` tolerates a malformed server date.
+- `FeedSettings` source row: the name column is `flex-1 basis-40` (was `flex-1`, basis 0): the `flex-wrap` row now
+  wraps the `w-44` rule select under the name below ~22 rem instead of truncating the name; guarded by
+  `test_web_mobile.py::test_a_notification_source_keeps_its_name_readable_on_a_phone`.
+- Settings -> Memory, memory files table: the path cell adds `max-md:whitespace-normal max-md:[overflow-wrap:anywhere]`
+  to `truncate` (the `title` is unreachable on touch); guarded by
+  `test_web_mobile.py::test_the_memory_files_list_shows_whole_paths_on_a_phone`.
+- Mail attachments in the file viewer: `POST /api/mail/{id}/attachments/view` (`imap.attachments_of`, one fetch)
+  copies them to `<workspace>/mail/attachments/<id>/<folder hash>-<uid>/<index>/<name>` (rewritten at each view, dirs
+  older than a day pruned; `409 outside` when the workspace is not under the files root: `MessageView` then opens /
+  downloads as before for the rest of the page's life). Composer chips (`AttachmentChip`, all `MessageBox`es) open
+  the uploaded file in the viewer (`list` = the uploaded files of the message). Test:
+  `test_mail_connection.py::test_attachments_open_in_the_file_viewer`.
+- Jarvis (`jarvis.py`, `api/jarvis.py`, `cmd_jarvis.py`, page `web/src/pages/jarvis`): config `jarvis_feature` (off) and
+  `jarvis` (DEFAULTS: model, root, ask_first, internals, daily, brief, dream). Its folder is the reserved project
+  `projects/jarvis` (marker `"system": "jarvis"` in its `.maxxing.json`; an owner's project of that name is never taken,
+  `create_project("jarvis")` is refused), topic `main` in mode bypass, from `templates/jarvis/` (CLAUDE.md and
+  `.claude/` kept up to date by each version, the rest only when missing; `rules.md` written from the settings;
+  `brain/**` added to `backup.include`). Hidden unless `internals`: `workspace.tree()`, `list_topics()`,
+  `GET /api/sessions` without `path`, `search.search()` (`jarvis.hides`).
+- State `<state>/jarvis/state.json` (current conversation, past ones, last brief / night pass, digest mark) and the
+  work board `<state>/jarvis/work.json` (`{next, items: [{id, session, path, title, brief, state, ...}]}`, 300 kept).
+  `maxxing sessions new|send` from a turn of Jarvis's conversation (or with `--report-to me|<session>` from any turn)
+  registers the target session; `service.on_turn_end` -> `jarvis.on_turn_end` reports each ended turn (queue empty,
+  not a turn the owner typed) into the conversation as a relayed message (`relay.report`, hops = the work's + 1).
+  `maxxing agents run` from Jarvis registers the run's session too. Sessions it starts get mode bypass when `root`.
+- Server loop (`api/jarvis.py`, 30 s): `jarvis.tick` sends the morning brief (a new conversation when `daily`) and
+  starts the night pass (a separate session, skill `jarvis-dream`, `maxxing jarvis digest [--mark]`) once a day after
+  their local time. API `GET /api/jarvis`, `POST /open|/new|/brief|/dream|/work/{ref}/close`, `PUT /settings`; bus
+  topic `jarvis`. New CLI `maxxing jarvis …` and `maxxing topics list|new`. The scheduled night pass runs on
+  `dream_model` (default `sonnet`) and is skipped when no session, memory.md or tasks.json moved since the last mark
+  (`jarvis.quiet_since`). `SessionColumn own`: no session header (title, place, options window), no fork, archive,
+  delete or terminal (Jarvis's page).
+- Jarvis setting `compact_tokens` (default 150000; 0 = the server's; 100k/150k/200k/300k): `config.session_config(cfg,
+  path)` gives its conversation's turns their own `auto_compact_tokens` (idle and smart-resume thresholds capped by
+  it, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from it); `Session.compact_tokens` (null elsewhere) feeds the composer gauge.
+- `relay_message(..., short=True)` (`maxxing sessions new|send` that reports back): `relay.short` makes
+  `runner.build_prompt` append `SHORT_ANSWER_NOTE` (final answer of 6 lines at most, the long parts in a file; not
+  displayed). The skill `jarvis` no longer asks for the 5-line report itself.
+- Jarvis setting `telegram` (`off` | `important` (default) | `all`): `jarvis.rings(session)` decides for its
+  conversation in `telegram/gateway.rings` (the session's bell is not used): `important` = a turn from the brief
+  (`source` cron), a failed turn, or an answer that ends on a question; never a turn from Telegram, a summary or the
+  night pass. `finished_message` of Jarvis: title "Jarvis", its whole last answer (`jarvis.last_answer`, 2500
+  characters), link `/jarvis`.
+- Jarvis's templates are rendered with `cmd_core.template_vars` (+ `{{SKILLS_DIR}}`); its CLAUDE.md says where
+  Harness's commands, skills and docs are; skill `jarvis` § 4 = rules to create projects, topics and agents.
+- Jarvis page: Work panel hidden/shown (`mx.jarvis.workOpen`) and resized (`mx.jarvis.workWidth`, `ResizeEdge
+  edge="left"`, new prop), settings in a `Dialog` (`JarvisSettingsDialog`) instead of a popover.
+- Jarvis's backstage agent `projects/jarvis/topics/main/agents/backstage` (`jarvis._ensure_agent`: made at `ensure`,
+  role from `templates/jarvis/agent/CLAUDE.md`, model = `dream_model`, `silent`, $3/day): the night pass is
+  `agents.fire(AGENT_PATH, prompt=DREAM_TEXT)`; the brief opens the new conversation, fires the agent with
+  `PREPARE_TEXT` and registers a board item `kind: brief` (hidden from `JarvisStatus.work` unless `internals`); its end
+  sends `[Morning brief]` + the prepared text into the conversation (source cron), else Jarvis makes it itself.
+  `agents.list_agents` leaves out Jarvis's project when it is hidden (`jarvis.hides`).
+- `jarvis._asks` ignores links, code and inline code, and reads the last two lines only. `jarvis.current_for`:
+  `telegram/gateway.bound` sends a reply to a past conversation of Jarvis to its current one; `rings` and
+  `finished_message` run off the gateway loop. TimeField saves 0.5 s after a complete time (and when the window
+  closes). Composer placeholder of Jarvis's page: `jarvis.placeholder`.
+- Web Push (#167): `maxxing/webpush.py` (VAPID/ES256 on P-256 in pure Python, RFC 6979 nonce, empty pushes, devices + key
+  pair in `webpush.json` 0600, in-memory queue, allowed push hosts, no redirect followed) and `api/push.py` (`/api/push/*`,
+  API.md#push; `startup()` registers a turn-end callback with the Telegram bell's rule, for every session). `web/sw/sw.js`:
+  `push` (POST `/api/push/pending`, one notification per session, tag `mx-session-<id>` = the in-page one, so no
+  double; a visible focused window skips it except on iOS where every push must show one) and `notificationclick`.
+  `features/notify/{push.ts,PushSettings.tsx}`. `showSystemNotification` falls back to `registration.showNotification`
+  when `new Notification()` throws (Android). Tests: `test_webpush.py`.
+- Dashboard: `widgets._clock()` / `_reset()` format with `_zone()` (config `timezone`) like `day()` and the cron
+  cards, and compare with today's date in that zone; they used `datetime.fromtimestamp(at)` (server local time).
+  Test: `test_dashboard.py::test_usage_times_in_the_workspace_time_zone`.
+- Tests: `test_dashboard.py::test_day_timeline` freezes `widgets.time` at 00:05 of today; it failed every evening
+  (after ~21:36 fewer than `MAX_PLANNED` one-minute runs are left, the lane is not dense).
+- Thread: "Show earlier" no longer mounts a whole page in one render. Loaded rows: `loadEarlier` sets `growTo` to
+  `from - PAGE` and shows `STEP` rows, the progressive first-render effect (one `STEP` slice per idle callback,
+  `prevHeight` anchoring) reveals the rest. A page fetched from the server (`items` gain `added` rows at the head):
+  `start` moves to `start + added - STEP` during the render and grows back to the old `start` the same way. Longest
+  task on a 4 MB log 223 -> 144 ms (945 -> 639 ms at 4x CPU slowdown); on 120 loaded rows 268 -> 117 ms
+  (876 -> 400 ms at 4x). Same final rows, reading position kept.
 - Dependencies: `npm update` in `web/` and `uv lock --upgrade` in `server/` (minor and patch only). Majors left alone: emojibase-data 18, mermaid 12. `templates/` untouched.
 
 ## 2.0.0-alpha.164 - 2026-11-23

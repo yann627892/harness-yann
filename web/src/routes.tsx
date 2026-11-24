@@ -18,7 +18,7 @@ const page = (load: () => Promise<PageModule>, groups: Group[] = []) => async ()
 
 let client: QueryClient | null = null
 
-export const routes: RouteObject[] = [
+const routes: RouteObject[] = [
   {
     Component: Root,
     errorElement: <RouteError />,
@@ -44,6 +44,7 @@ export const routes: RouteObject[] = [
           // Feature pages — implemented in src/pages/<name>/index.tsx
           // `files.*` is asked by the file menu and the preview, both on demand: the group loads then, and
           // translate() falls back while it arrives. Preloading it here breaks the first-load dictionary budget.
+          { path: 'jarvis', lazy: page(() => import('./pages/jarvis'), ['jarvis', 'files']) },
           { path: 'sessions/*', lazy: page(() => import('./pages/sessions')) },
           { path: 'files/*', lazy: page(() => import('./pages/files'), ['files', 'media', 'ctext']) },
           { path: 'tasks/*', lazy: page(() => import('./pages/tasks'), ['tasks']) },

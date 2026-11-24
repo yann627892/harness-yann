@@ -8,9 +8,9 @@ type T = TFn
 type Input = Record<string, unknown>
 
 /** What a call does, for the grouping of read-only calls ("Explored 4 files · 2 searches"). */
-export type ToolKind = 'read' | 'search' | 'list' | 'look' | 'other'
+type ToolKind = 'read' | 'search' | 'list' | 'look' | 'other'
 
-export type ToolLabel = {
+type ToolLabel = {
   /** The sentence shown in front ("Runs the tests"). */
   title: string
   /** What it runs, shown after it in monospace (command, path, pattern…); '' = nothing more. */
@@ -28,9 +28,9 @@ const one = (s: string, max = 160) => {
 
 /** Commands that delete or rewrite for good, whatever the sentence in front says. */
 const DANGER =
-  /(^|[;&|(]\s*|\s)(rm\s+-[a-z]*[rf]|rm\s|rmdir\s|shred\s|mkfs|dd\s+if=|truncate\s)|git\s+(reset\s+--hard|clean\s+-[a-z]*f|push\s+[^|;&]*(--force|-f\b)|branch\s+-D|checkout\s+--\s|restore\s)|\b(drop|truncate)\s+(table|database|schema)\b|\bdelete\s+from\b|>\s*\/dev\/sd/i
+  /(^|[;&|(]\s*|\s)(rm\s+-[a-z]*[rf]|rm\s|rmdir\s|shred\s|mkfs|dd\s+if=|truncate\s)|git\s+(reset\s+--hard|clean\s+-[a-z]*f|push\s+[^|;&]{0,200}(--force|-f\b)|branch\s+-D|checkout\s+--\s|restore\s)|\b(drop|truncate)\s+(table|database|schema)\b|\bdelete\s+from\b|>\s*\/dev\/sd/i
 
-export function isDangerous(command: string): boolean {
+function isDangerous(command: string): boolean {
   return DANGER.test(command)
 }
 
@@ -79,7 +79,7 @@ const firstArg = (args: string[]) => {
 }
 
 /** A Bash line without a sentence -> [i18n key, its values, kind], or null (the raw command is shown). */
-export function bashAction(command: string): [string, Record<string, string>, ToolKind] | null {
+function bashAction(command: string): [string, Record<string, string>, ToolKind] | null {
   const w = mainCommand(command)
   if (!w.length) return null
   const cmd = base(w[0])
@@ -315,7 +315,14 @@ export function toolLabel(name: string, input: Input, tr: T, rel: (path: string)
 
 /** Options that make a read-only command write or run something (`find -delete`, `sort -o`, `rg --pre`, `git -c`). */
 const UNSAFE_OPT = /^(-delete|-exec\S*|-ok\S*|-fprint\S*|-fls|--output\S*|--pre\S*)$/
-const UNSAFE_BY_CMD: Record<string, RegExp> = { sort: /^-o/, git: /^(-c|--config-env\S*|--exec-path\S*)$/, sed: /^(-[a-z]*i|--in-place)/ }
+const UNSAFE_BY_CMD: Record<string, RegExp> = {
+  sort: /^-[a-zA-Z]*o/,
+  fd: /^(-[a-zA-Z]*[xX]|--exec\S*)$/,
+  xxd: /^-[a-zA-Z]*r/,
+  tree: /^-[a-zA-Z]*o/,
+  journalctl: /^--(vacuum|rotate|flush|sync|relinquish)\S*$/,
+  date: /^(-[a-zA-Z]*s|--set\S*)$/,
+  git: /^(-c|--config-env\S*|--exec-path\S*)$/, sed: /^(-[a-z]*i|--in-place)|[/;{}'"0-9][wW]['"]?$/ }
 
 /** The kind of a call without its texts (grouping in the thread). A group is folded, so a Bash line joins one only
  *  when EVERY command in it only reads: no pipe into another program, no `$(…)`, no second line, no background job,
@@ -336,6 +343,7 @@ export function toolKind(name: string, input: Input): ToolKind {
     if (words[0] === 'cd' && words.length <= 2) continue
     const by = UNSAFE_BY_CMD[words[0].split('/').pop() || '']
     if (words.slice(1).some((w) => UNSAFE_OPT.test(w) || by?.test(w))) return 'other'
+    if (words[0] === 'uniq' && words.slice(1).filter((w) => !w.startsWith('-')).length > 1) return 'other' // uniq IN OUT writes OUT
     const k = bashAction(seg)?.[2]
     if (!k || k === 'other') return 'other'
     kind ??= k

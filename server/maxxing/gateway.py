@@ -326,7 +326,10 @@ def set_default_provider(provider: str, secrets: dict | None = None) -> None:
                 change["default_model"] = dm
     elif not cur or not _CLAUDE_ID.fullmatch(cur):
         from . import claude_models
-        change["default_model"] = claude_models.latest_of("sonnet")
+        ids = claude_models.latest()                  # newest of each family, FAMILIES order
+        dm = next((m for m in ids if claude_models.family(m) == "sonnet"), ids[0] if ids else "")
+        if dm:
+            change["default_model"] = dm
     config.update_config(**change)
 
 

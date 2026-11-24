@@ -446,6 +446,17 @@ def test_a_remote_date_before_1970_is_clamped(client, monkeypatch):
     assert team.messages(dm)["messages"][0]["at"] == 0
 
 
+def test_a_remote_conversation_keeps_only_its_newest_messages(client, monkeypatch):
+    key = _setup(monkeypatch)
+    monkeypatch.setattr(team, "MAX_CHAT_MESSAGES", 3)
+    dm = team.dm_id("http://127.0.0.1:8801", LEA)
+    for i in range(5):
+        ev = _msg(dm, mid=f"m_0000000{i}")
+        ev["message"]["at"] = time.time() - 10 + i
+        assert _post(client, key, ev).status_code == 200
+    assert [m["id"] for m in team.messages(dm)["messages"]] == ["m_00000002", "m_00000003", "m_00000004"]
+
+
 def test_normalize_keeps_the_brackets_of_an_ipv6_literal():
     assert teampeer.normalize("https://[2001:DB8::1]:8443/x") == "https://[2001:db8::1]:8443"
     assert teampeer.normalize("http://[::1]") == "http://[::1]"
@@ -532,3 +543,35 @@ def test_a_slow_hello_address_does_not_hold_the_global_lock(client, monkeypatch)
     finally:
         release.set()
         t.join(5)
+
+
+def test_a_peers_file_that_does_not_parse_is_kept_before_it_is_rewritten(client, monkeypatch):
+    _setup(monkeypatch)
+    teampeer.create_invite()
+    path = teampeer._path()
+    path.write_text(path.read_text()[:-5])              # cut: no longer JSON
+    teampeer.create_invite()
+    assert list(path.parent.glob("peers.json.damaged-*"))
+
+
+def test_a_download_keeps_a_received_file_named_like_its_temporary_one(tmp_path, monkeypatch):
+    import httpx
+    from maxxing import teampeer
+
+    class R:
+        status_code = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def iter_bytes(self, n): raise httpx.ReadError("cut")
+
+    class C:
+        def stream(self, *a, **k): return R()
+
+    monkeypatch.setattr(teampeer, "_http", lambda: C())
+    monkeypatch.setattr(teampeer, "_key_to", lambda *a: b"k")
+    monkeypatch.setattr(teampeer, "_sign", lambda *a: {})
+    monkeypatch.setattr(teampeer, "own_address", lambda: "me")
+    monkeypatch.setattr(teampeer, "_check_target", lambda a: "http://x")
+    (tmp_path / "a.part").write_text("kept")
+    assert teampeer.fetch_file("peer", "f1", tmp_path / "a", 100, "chat") is False
+    assert (tmp_path / "a.part").read_text() == "kept"

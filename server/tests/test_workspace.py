@@ -67,6 +67,16 @@ def test_rename_remaps_sessions_and_telegram(client, topic, mx):
     assert wait_idle(client, s["id"])["state"] == "idle"
 
 
+def test_a_topic_rename_reads_the_session_store_twice_not_three_times(client, topic, monkeypatch):
+    from maxxing.sessions import service
+    calls = []
+    real = service.list_sessions
+    monkeypatch.setattr(service, "list_sessions", lambda *a, **k: calls.append(1) or real(*a, **k))
+    r = client.patch("/api/workspace/projects/acme/topics/blog", json={"name": "news"})
+    assert r.status_code == 200, r.text
+    assert len(calls) == 2                      # one to check and move, one for the counters of the answer
+
+
 def test_rename_keeps_the_scheduled_jobs_of_the_topic(client, topic, mx):
     from maxxing import crons
     j = crons.create_job({"name": "Digest", "kind": "claude", "topic_path": topic, "prompt": "hi"})
@@ -289,3 +299,47 @@ def test_a_huge_description_is_refused(client, mx, topic):
     assert r.status_code == 400 and r.json()["error"] == "bad_description"
     assert not (mx["ws"] / "projects/big").exists()
     assert client.post("/api/workspace/projects", json={"name": "big", "description": "x" * 2000}).status_code == 200
+
+
+def test_parallel_edits_of_a_claude_md_do_not_share_a_temporary_file(client, mx):
+    import threading
+    from maxxing import workspace
+    assert client.post("/api/workspace/projects", json={"name": "par"}).status_code == 200
+    errors: list[BaseException] = []
+
+    def work(n):
+        try:
+            for i in range(40):
+                workspace.update_project("par", description=f"d{n}-{i}")
+        except BaseException as e:      # noqa: BLE001
+            errors.append(e)
+    ts = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errors, errors[:1]
+    assert "@memory.md" in (mx["ws"] / "projects/par/CLAUDE.md").read_text()
+
+
+def test_claude_md_that_is_a_pipe_or_a_device_does_not_hang_or_crash_the_tree(mx):
+    import os
+    from maxxing import config, workspace
+    ws = config.workspace()
+    for name, make in (("fifo", lambda p: os.mkfifo(p)), ("zero", lambda p: p.symlink_to("/dev/zero"))):
+        d = ws / "projects" / name
+        d.mkdir(parents=True)
+        make(d / "CLAUDE.md")
+        make(d / ".maxxing.json")
+        assert workspace.read_description(d) == ""
+        assert workspace._folder_meta(d) == {}
+    big = ws / "projects" / "big"
+    big.mkdir()
+    (big / "CLAUDE.md").write_text("# Big\n\n" + "x" * (workspace.SMALL_FILE_MAX * 4))
+    assert len(workspace.read_description(big)) <= workspace.SMALL_FILE_MAX
+
+
+def test_a_description_with_a_nul_or_control_character_is_refused(client, mx, topic):
+    for bad in ("a\x00b", "a\x07b"):
+        r = client.post("/api/workspace/projects", json={"name": "pnul", "description": bad})
+        assert r.status_code == 400 and r.json()["error"] == "bad_description"
+    assert not (mx["ws"] / "projects/pnul").exists()
+    assert client.post("/api/workspace/projects", json={"name": "pnul", "description": "two\nlines\tok"}).status_code == 200

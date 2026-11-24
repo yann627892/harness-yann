@@ -599,6 +599,9 @@ def _handler(a) -> int:
     if a.agents_cmd == "export":
         from . import agent_format
         md = agent_format.export_md(path)
+        if a.output and _turn()["path"]:     # root writing any file an agent names: stdout only
+            return _fail("Refused in an agent turn: `--output` writes a file with the owner's rights. "
+                         "Run it without `--output`.")
         if a.output:
             try:
                 with open(a.output, "w", encoding="utf-8") as f:
@@ -679,6 +682,7 @@ def _handler(a) -> int:
     if a.agents_cmd == "run" and not sender:
         r = agents.fire(path, trigger="manual", source="command line",
                         **({"text": text} if a.data else {"prompt": text}))
+        _jarvis_board(path, r, text, turn["depth"] + 1)
         return _print_fire(path, r, a.json)
     if a.agents_cmd == "run" and sender == path and turn.get("manager"):
         # the owner asked its conversation to run the automation now: a run of its own (a new session, shown as an
@@ -697,7 +701,25 @@ def _handler(a) -> int:
     else:
         trigger, source = "agent:session", "session"
     r = agents.fire(path, trigger=trigger, text=text, source=source, depth=turn["depth"] + 1)
+    if not agents.is_agent_path(sender):
+        _jarvis_board(path, r, text, turn["depth"] + 1)
     return _print_fire(path, r, a.json)
+
+
+def _jarvis_board(path: str, r: dict, text: str, hops: int) -> None:
+    """`agents run` from Jarvis's conversation: the run goes on its work board (its answer comes back to Jarvis)."""
+    from . import agent_guard, jarvis
+    meta = agent_guard.turn_meta()
+    if not (isinstance(r, dict) and meta and meta.get("path") == jarvis.PATH and jarvis.feature_on()):
+        return
+    s = r.get("session")
+    if isinstance(s, dict) and s.get("id"):
+        sid = s["id"]
+    elif r.get("waiting"):
+        sid = ""                        # it waits for the run in progress: bound to its session when it ends
+    else:
+        return
+    jarvis.register(sid, path, f"agent {_name(path, path)}", text, hops=hops)
 
 
 def _name(path: str, default: str) -> str:

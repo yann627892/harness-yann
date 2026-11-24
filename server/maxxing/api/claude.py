@@ -8,7 +8,6 @@ import shutil
 import re
 import subprocess
 import time
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -54,10 +53,6 @@ def claude_version() -> str | None:
         v = None
     _version_cache[key] = (time.time(), v)
     return v
-
-
-def auth_method() -> tuple[str | None, str]:
-    return claude_auth.auth_method()
 
 
 def auth_status() -> dict:
@@ -128,9 +123,8 @@ def check_now() -> dict | None:
     """One background verification if due (no real call in the last 6 h, none attempted here
     in the last 6 h); returns the test result or None when nothing was done."""
     global _last_attempt
-    if time.time() - _last_attempt < claude_auth.CHECK_EVERY_S or not claude_auth.needs_check():
-        return None
-    if not _resolved_bin():
+    if (time.time() - _last_attempt < claude_auth.CHECK_EVERY_S or not claude_auth.needs_check()
+            or not _resolved_bin()):
         return None
     _last_attempt = time.time()
     return run_test(source="check", timeout_s=CHECK_TIMEOUT_S)

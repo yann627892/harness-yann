@@ -107,6 +107,7 @@ Session = {
   plan_ready: bool,                   // a plan-mode turn finished OK: its plan waits for POST /plan/approve
   approvals: int,                     // tool calls waiting for the user's Allow / Deny (agent with `approvals`)
   device_asks: int,                   // ask_human requests on the person's devices waiting for them (Devices)
+  compact_tokens: int | null,         // its own compaction threshold (Jarvis's conversation: Jarvis settings), null = the server's
   code_repos: [str]                   // git repositories its turns changed (Changes view, terminal tabs), at most 8
 }
 ```
@@ -134,7 +135,7 @@ Session = {
 | GET | `/api/sessions/{id}/events?from=0` | – | forward reading `{events:[Event], next:int, state, more:bool}` (≤ 4 MB of log per call; `more` = call again from `next`) · `reset:true` when `from` is beyond the end / not a line boundary |
 | GET | `/api/sessions/{id}/stream?from=0` | – | **SSE**. `event: events` `data: {events, next}` · `event: state` `data: Session` · `event: reset` `data: {}` then end of stream when the log was rewritten or shrank (or `from` is stale): reload with `?tail=` · heartbeat comment every 15 s. New lines and state changes are pushed ~0.05-0.15 s after they are written (inotify on the sessions folder; without it the stream polls every 0.1 s while the session runs) |
 | GET | `/api/sessions/search?q=` | – | `[{id, title, path, snippet, at}]` (served by the full-text index, see Search; max 50) |
-| GET / POST | `/api/sessions/open` | POST `{open?:[id], close?:[id], order?:[id]}` | `{ids:[id]\|null, rev}` — the sessions open on screen, shared by every browser of the user (a column on a computer, a tab on a phone): ids in the order they were opened, `null` while no browser has shared its own; `rev` grows with each change (a browser ignores an answer older than the one it applied). POST opens, closes, then sorts by `order` (ids it does not name stay after); bus topic `open_sessions`. A deleted session leaves the list |
+| GET / POST | `/api/sessions/open` | POST `{open?:[id], close?:[id], order?:[id], tabs?:bool, front?:id}` | `{ids:[id]\|null, rev, tabs?, front?}` — the sessions open on screen, shared by every browser of the user (a column on a computer, a tab on a phone), with the Tabs / Zones mode and the session in front last chosen on one of them: ids in the order they were opened, `null` while no browser has shared its own; `rev` grows with each change (a browser ignores an answer older than the one it applied). POST opens, closes, then sorts by `order` (ids it does not name stay after); bus topic `open_sessions`. A deleted session leaves the list |
 | POST | `/api/uploads?path=<topic path>` | multipart `file` (multi) | `{files:[{path, name, size, mime}]}` saved in `<topic>/attachments/YYYY-MM/` · each file `413 too_large` over `upload_max_mb`, `507 disk_full` when it would leave less than `upload_min_free_mb` free on the destination disk (all or nothing: the files saved before it in the same request are removed); the whole request, all its files together, is capped too (see Conventions) |
 
 `from`/`next`/`start`/`before` = byte offsets in the raw log (always line boundaries). Backward reads scan at
@@ -909,6 +910,7 @@ Mail calls run on their own pool of 8 threads; a server that timed out is not tr
 | GET | `/api/mail/{id}/messages?folder=&page=&size=&q=&unread=&flagged=` | – | `{folder, total, exists, page, size, messages: [{uid, from, to, subject, date, seen, flagged, answered, size, attachments}]}` (newest first; `q` = server-side IMAP TEXT search) |
 | GET | `/api/mail/{id}/message?folder=&uid=&seen=1` | – | `{uid, folder, from, to, cc, bcc, reply_to, subject, date, message_id, in_reply_to, references, text, html, remote_images, attachments: [{index, filename, content_type, size}], seen, flagged, answered}` (marks it read unless `seen=0`; `html` without scripts, `cid:` images inlined) |
 | GET | `/api/mail/{id}/attachment?folder=&uid=&index=&inline=` | – | the file (`inline` only for images and PDF; `CSP: sandbox`) |
+| POST | `/api/mail/{id}/attachments/view` | `{folder, uid, indexes: [int]}` (≤ 100) | `{paths: {index: path}}`: copies of those attachments (one IMAP fetch) under `<workspace>/mail/attachments/<id>/<folder hash>-<uid>/<index>/<name>` for the file viewer, rewritten at each view, copies older than a day removed (`attachments`: out of the memory backup) · `404 not_found` · `409 outside` (workspace outside the files root: the UI downloads instead) |
 | POST | `/api/mail/{id}/actions` | `{folder, uids, action: seen\|unseen\|flag\|unflag\|move\|archive\|trash\|junk\|inbox\|delete, target?}` | `{ok, moved_to}` (`delete` only from trash / junk; an archive folder is created when missing) |
 | GET | `/api/mail/{id}/compose?mode=reply\|replyall\|forward\|draft&folder=&uid=` | – | `{to, cc, bcc?, subject, text, in_reply_to, references, attachments}`: the fields a composer starts with (signature then quote for a reply, forwarded header + body, a draft as saved; never oneself in reply all) |
 | POST | `/api/mail/{id}/send` | multipart: `data` = JSON `MailDraft` `{to, cc, bcc, subject, text, in_reply_to?, references?, reply?: {folder, uid}, forward?: {folder, uid, indexes}, draft?: {folder, uid}}`, `files` (≤ 30, ≤ 25 MB in total with the forwarded ones) | `{ok, message_id, recipients, refused, sent_folder}`: sent through the SMTP of the mailbox (plain text), copy filed in Sent (not for Gmail / Outlook, which do it), `reply` flagged answered, `draft` dropped. Capped: ≤ 20 recipients a message, `mail_send_per_day` (config, default 100) recipients a mailbox a day (`<state>/mail/sent-count.json`; a failed send gives them back) |
@@ -1030,6 +1032,19 @@ Built-in card links are SPA routes: `/sessions/<id>`, `/sessions`, `/tasks?task=
 | GET | `/api/memory` | – | `{max_lines, max_bytes (the weight that goes with the line limit: 1 KB for 10 lines, 0 = no limit), files:[{path (workspace-relative), level:"global"\|"project"\|"topic"\|"agent", lines, bytes, over:bool (above the limit, in lines or in weight), heavy:bool (in weight)}]}` |
 | POST | `/api/memory/compact` | – | `{session: Session}` — a session at the workspace root runs the memory-compaction skill now with the limit (lines and weight) |
 
+## Push (Web Push, Settings -> Notifications -> Mobile notifications)
+
+Web Push (VAPID) with no dependency: ES256 on P-256 in pure Python (`webpush.py`, checked against the RFC 6979 vector) and **empty** pushes - nothing of the conversation goes through the browser vendor's push service. The service worker is woken, then asks `POST /api/push/pending` (same origin, the app's cookie + `X-Maxxing: 1`) what to show. State: `webpush.json` in the state dir (mode 0600: VAPID key pair + devices); the queue of what a device has not fetched yet is in memory (20 items, 24 h). Endpoints are only accepted for the browsers' push services (https, `fcm.googleapis.com`, `*.push.services.mozilla.com`, `web.push.apple.com`, `*.notify.windows.com`), so the server never calls another address. A turn rings every device when a person's session ends (same rule as the Telegram bell: not a job, an agent, a Telegram or a system turn; failed turns too); `404` / `410` from the push service remove the device.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/push/key` | – | `{key}`: the application server key (uncompressed P-256 point, base64url) to subscribe with |
+| GET | `/api/push/devices` | – | `[{id, label, at}]` (`id` = first 16 hex digits of the SHA-256 of the endpoint) |
+| POST | `/api/push/devices` | `{endpoint, label?}` | `{id, label}` (registers or refreshes) · `400 bad_endpoint` (not a known push service, or 20 devices) |
+| DELETE | `/api/push/devices/{id}` | – | `{ok: true}` · `404` |
+| POST | `/api/push/test` | – | `{sent}`: devices woken with a test notification |
+| POST | `/api/push/pending` | `{device}` | `{items: [{title, body, url, tag}]}`: what the woken device shows, then forgets (`[]` for an unknown device) |
+
 ## Stats
 
 | Method | Path | Body | Response |
@@ -1086,6 +1101,27 @@ and `topic`); `name` falls back to the folder; `hidden` = `disable-model-invocat
 |---|---|---|---|
 | GET | `/api/skills` | - | `{skills: Skill[]}` (product and user first, then workspace, then project by project, its topics after it) |
 | GET | `/api/skills?path=projects/<p>/topics/<t>` | - | `{skills: Skill[]}`: only those a session of that topic sees (product, user, workspace, its project, the topic itself): the composer's `/` menu |
+
+## Jarvis
+
+Settings -> Features -> `jarvis_feature` (off by default; `PUT /api/settings`). One assistant whose conversation is a
+session of the hidden topic `projects/jarvis/topics/main` (server `jarvis.py`). Bus topic `jarvis`.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/api/jarvis` | | `JarvisStatus` |
+| POST | `/api/jarvis/open` | | its conversation, made the first time (409 `off`; 409 `taken`: an owner's project named `jarvis`) -> `JarvisStatus` |
+| POST | `/api/jarvis/new` | | a new conversation (the old one is kept in `conversations`) -> `JarvisStatus` |
+| PUT | `/api/jarvis/settings` | any of `model`, `root`, `ask_first`, `internals`, `daily` (bool), `brief`, `dream` (`HH:MM` or ""), `compact_tokens` (0 = as every session, 100000, 150000, 200000, 300000), `telegram` (`off`, `important`: brief, questions and failures, `all`) | `JarvisStatus` (400 `bad_time`, `bad_compact`, `bad_telegram`) |
+| POST | `/api/jarvis/work/{ref}/close` | | `ref` = the entry's number or its session id -> `JarvisStatus` |
+| POST | `/api/jarvis/brief` | | the morning brief now (a new conversation with `daily`; its backstage agent prepares it, then it comes in as a `[Morning brief]` message) -> `JarvisStatus` |
+| POST | `/api/jarvis/dream` | | the night pass now: `{session}` (a run of its backstage agent `<path>/agents/backstage`; 409 `agent` when it cannot start) |
+
+`JarvisStatus` = `{on, path, session: Session | null, settings, last_brief, last_dream, work: JarvisWork[] (newest
+first, 100), open, asks, conversations: [{id, title, updated, state, current}]}`. `JarvisWork` = `{id, session, path,
+title, brief, state: running | replied | failed | closed, created, updated, result, cost, question, turns}`.
+While `internals` is off, `GET /api/workspace/tree`, `GET /api/sessions` (without `path`) and `GET /api/search` leave
+Jarvis's project out; `POST /api/workspace/projects` refuses the name `jarvis` (409 `reserved`).
 
 ## Search
 

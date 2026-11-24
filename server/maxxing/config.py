@@ -97,8 +97,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "git_page": False,                 # Settings -> Features: the Git & GitHub page and its sidebar entry
     "code_mode": False,                # Settings -> Features -> Sessions -> Code mode: the terminal drawer (POST /api/term/enable: password)
     "infra_page": False,               # Settings -> Features: the Infra page (sites, databases, buckets, domains, servers)
-    "infra_refresh_min": 15,
-    "result_line_hidden": [],          # Sessions: parts of the line under each answer that are hidden (cost, tokens...)           # Infra: background refresh period (minutes) while the page is on
+    "infra_refresh_min": 15,           # Infra: background refresh period (minutes) while the page is on
+    "result_line_hidden": [],          # Sessions: parts of the line under each answer that are hidden (cost, tokens...)
     "donation_hidden": False,          # Settings -> About: hide the donation links shown elsewhere in the app
     "mail_page": False,                # Settings -> Features: the E-mail page (IMAP/SMTP mailboxes)
     "sidebar_order": [],               # sidebar: the pages in the order the user dragged them (routes; empty = default)
@@ -106,6 +106,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "browser_feature": False,          # Settings -> Features: the Harness Browser (one Chromium for the user, sessions, agents)
     "browser": {},                     # its settings (maxxing/browser DEFAULTS: sites, sign-ins, asks, sleep)
     "devices_feature": False,          # Settings -> Features: Devices (Claude uses the user's computers and phones)
+    "jarvis_feature": False,           # Settings -> Features: Jarvis (one assistant who runs Harness: jarvis.py)
+    "jarvis": {},                      # its settings (jarvis.DEFAULTS: model, root, ask_first, internals, daily, brief, dream)
     "dashboard": {"order": [], "hidden": []},
     "extensions": {"disabled": [], "pinned": []},
     "telegram": {
@@ -332,6 +334,14 @@ def _keep_damaged(path: Path) -> None:
     log.error("%s was damaged: kept as %s before saving", path, dest)
 
 
+def keep_damaged(path: Path) -> None:
+    """`_keep_damaged` for the other stores (peers.json, devices.json): call it before writing over their file."""
+    try:
+        _keep_damaged(Path(path))
+    except OSError:
+        log.exception("could not keep a copy of the damaged %s", path)
+
+
 def _merge(base: dict, over: dict) -> dict:
     out = copy.deepcopy(base)
     for k, v in (over if isinstance(over, dict) else {}).items():
@@ -422,11 +432,36 @@ def int_setting(cfg: dict, name: str) -> int:
     return 0
 
 
+JARVIS_PATH = "projects/jarvis/topics/main"   # Jarvis's own topic (jarvis.PATH)
+JARVIS_COMPACT = 150000                     # its conversation's compaction threshold by default (jarvis.DEFAULTS)
+JARVIS_IDLE_COMPACT = 60000              # Jarvis back after the cache expired: summarized past this
+
+
+def session_config(cfg: dict, path: str | None) -> dict:
+    """The settings a session's turn runs with: Jarvis's conversation has its own compaction threshold (its
+    settings, `compact_tokens`: 0 = the same as every session). Its turns stay small: what it must keep lives in
+    its brain files, not in a long thread. The idle and smart-resume thresholds never go above it."""
+    if (path or "").strip("/") != JARVIS_PATH:
+        return cfg
+    raw = cfg.get("jarvis") if isinstance(cfg.get("jarvis"), dict) else {}
+    try:
+        n = int(raw.get("compact_tokens", JARVIS_COMPACT) or 0)
+    except (TypeError, ValueError, OverflowError):
+        n = JARVIS_COMPACT
+    if n <= 0:
+        return cfg
+    out = {**cfg, "auto_compact_tokens": n}
+    for k in ("idle_compact_tokens", "smart_resume_tokens"):
+        v = int_setting(cfg, k)
+        if v > 0:
+            out[k] = min(v, n, JARVIS_IDLE_COMPACT)   # reports come back hours later: a cold cache is paid on less
+    return out
+
+
 def update_config(**changes: Any) -> dict:
     """Shallow-merge top-level keys (dict values are deep-merged) and save."""
     with _lock:
-        cfg = load_config()
-        cfg = _merge(cfg, changes)
+        cfg = _merge(load_config(), changes)
         save_config(cfg)
         return cfg
 

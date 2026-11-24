@@ -25,6 +25,8 @@ import logging
 import os
 import re
 import shutil
+import stat
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -148,10 +150,29 @@ def read_description(folder: Path) -> str:
     return _cached(folder / "CLAUDE.md", _parse_description)
 
 
-def _parse_description(f: Path) -> str:
+SMALL_FILE_MAX = 64 * 1024      # CLAUDE.md / .maxxing.json / .order.json: read at most this much of a regular file
+
+
+def _read_small(f: Path) -> str:
+    """The start of a regular file; "" for a pipe, a device (/dev/zero), a missing or unreadable file."""
     try:
-        lines = f.read_text(errors="replace").splitlines()
+        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read(SMALL_FILE_MAX).decode("utf-8", "replace")
+    except (OSError, MemoryError):
+        return ""
+    finally:
+        os.close(fd)
+
+
+def _parse_description(f: Path) -> str:
+    lines = _read_small(f).splitlines()
+    if not lines:
         return ""
     out, started = [], False
     for ln in lines:
@@ -189,9 +210,13 @@ def _write_claude_md(folder: Path, kind: str, name: str, description: str | None
 
 def _put_text(f: Path, text: str) -> None:
     """Write through a temporary file: a crash never leaves CLAUDE.md empty. Surrogate escapes become their bytes."""
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_bytes(text.encode("utf-8", errors="surrogateescape"))
-    os.replace(tmp, f)
+    tmp = f.with_name(f"{f.name}.{os.getpid()}-{threading.get_ident()}.tmp")   # its own name: two writers never share one
+    try:
+        tmp.write_bytes(text.encode("utf-8", errors="surrogateescape"))
+        os.replace(tmp, f)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _init_level(folder: Path, kind: str, name: str, description: str) -> None:
@@ -199,8 +224,7 @@ def _init_level(folder: Path, kind: str, name: str, description: str) -> None:
     if not (folder / "CLAUDE.md").exists():
         (folder / "CLAUDE.md").write_text(_render_claude_md(kind, name, description))
     if not (folder / "memory.md").exists():
-        title = "Workspace" if kind == "workspace" else f"{kind.capitalize()} {name}"
-        (folder / "memory.md").write_text(f"# {title} - memory\n\n")
+        (folder / "memory.md").write_text(f"{_heading(kind, name)} - memory\n\n")
 
 
 def ensure_root() -> Path:
@@ -277,8 +301,8 @@ def _ordered(names: list[str], order: object) -> list[str]:
 
 def _parse_order(f: Path) -> object:
     try:
-        return json.loads(f.read_text()).get("projects")
-    except (OSError, ValueError, AttributeError, RecursionError):
+        return json.loads(_read_small(f)).get("projects")
+    except (ValueError, AttributeError, RecursionError):
         return None
 
 
@@ -323,9 +347,9 @@ PERMISSION_MODES = ("bypass", "acceptEdits", "default", "ask")
 
 def _parse_meta(f: Path) -> dict:
     try:
-        data = json.loads(f.read_text())
+        data = json.loads(_read_small(f))
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError, RecursionError):      # RecursionError: JSON nested too deep
+    except (ValueError, RecursionError):      # RecursionError: JSON nested too deep
         return {}
 
 
@@ -463,6 +487,8 @@ def check_description(value: str | None) -> str | None:
         value.encode("utf-8")
     except UnicodeEncodeError:
         raise WorkspaceError(400, "bad_description", "The description contains an invalid character") from None
+    if any(c < " " and c not in "\n\t" for c in value):      # a NUL or other control character would land in CLAUDE.md
+        raise WorkspaceError(400, "bad_description", "The description cannot hold control characters")
     # CLAUDE.md ends the description at these lines: kept in it, the rest would come back outside of it after an update
     if any(ln.strip() == "@memory.md" or ln.startswith("## ") for ln in value.splitlines()):
         raise WorkspaceError(400, "bad_description", "The description cannot hold a line `@memory.md` or one starting with `## `")
@@ -478,12 +504,10 @@ def check_emoji(value: str) -> str:
         v.encode()
     except UnicodeEncodeError:                          # a lone surrogate: valid JSON, not storable
         raise WorkspaceError(400, "bad_emoji", "Use a single emoji") from None
-    if len(v) > 8 or any(c.isspace() or c.isascii() and c.isalnum() for c in v) or all(c.isascii() for c in v):
-        raise WorkspaceError(400, "bad_emoji", "Use a single emoji")
     # no control, format (bidi marks...) or separator characters, except the joiner and variation selector of emoji
-    if any(unicodedata.category(c) in ("Cc", "Cf", "Zs", "Zl", "Zp") and c not in "\u200d\ufe0f" for c in v):
-        raise WorkspaceError(400, "bad_emoji", "Use a single emoji")
-    if not any(unicodedata.category(c) in ("So", "Sk") or "\U0001f1e6" <= c <= "\U0001f1ff" for c in v):
+    if (len(v) > 8 or any(c.isspace() or c.isascii() and c.isalnum() for c in v) or all(c.isascii() for c in v)
+            or any(unicodedata.category(c) in ("Cc", "Cf", "Zs", "Zl", "Zp") and c not in "\u200d\ufe0f" for c in v)
+            or not any(unicodedata.category(c) in ("So", "Sk") or "\U0001f1e6" <= c <= "\U0001f1ff" for c in v)):
         raise WorkspaceError(400, "bad_emoji", "Use a single emoji")
     return v
 
@@ -500,18 +524,26 @@ def _project_obj(name: str, stats: dict, threads: dict) -> dict:
             "emoji": project_emoji(name), "topics": topics, "session_count": count}
 
 
+def _threads() -> dict:
+    return config.load_config().get("telegram", {}).get("threads") or {}
+
+
 def tree() -> dict:
     stats = _session_stats()
-    threads = config.load_config().get("telegram", {}).get("threads") or {}
+    threads = _threads()
     with _one_root():
-        projects = [_project_obj(p, stats, threads) for p in project_names()]
+        from . import jarvis
+        projects = [_project_obj(p, stats, threads) for p in project_names() if not jarvis.hides(topic_path(p))]
         return {"root": str(root()), "projects": projects}
 
 
 def list_topics() -> list[dict]:
+    from . import jarvis
     out = []
     with _one_root():
         for p in project_names():
+            if jarvis.hides(topic_path(p)):
+                continue
             for t in topic_names(p):
                 out.append({"path": topic_path(p, t), "project": p, "name": t,
                             "description": read_description(project_dir(p) / "topics" / t)})
@@ -521,18 +553,21 @@ def list_topics() -> list[dict]:
 def get_project(name: str) -> dict:
     if not project_dir(check_slug(name)).is_dir():
         raise WorkspaceError(404, "not_found", f"Project {name!r} not found")
-    return _project_obj(name, _session_stats(), config.load_config().get("telegram", {}).get("threads") or {})
+    return _project_obj(name, _session_stats(), _threads())
 
 
 def get_topic(project: str, name: str) -> dict:
     if not (project_dir(check_slug(project)) / "topics" / check_slug(name)).is_dir():
         raise WorkspaceError(404, "not_found", f"Topic {project}/{name} not found")
-    return _topic_obj(project, name, _session_stats(), config.load_config().get("telegram", {}).get("threads") or {})
+    return _topic_obj(project, name, _session_stats(), _threads())
 
 
 # ---- mutations -----------------------------------------------------------------------------
 def create_project(name: str, description: str = "") -> dict:
     check_slug(name)
+    from . import jarvis
+    if name == jarvis.PROJECT:
+        raise WorkspaceError(409, "reserved", f"{name!r} is kept for Jarvis (Settings -> Features): pick another name")
     check_description(description)
     ensure_root()
     d = project_dir(name)
@@ -565,13 +600,14 @@ def update_project(project: str, name: str | None = None, description: str | Non
     check_description(description)
     new = check_slug(name) if name and name != project else project
     if new != project:
-        _ensure_idle(topic_path(project))
-    if new != project and os.path.lexists(root() / topic_path(new)):
-        raise WorkspaceError(409, "exists", f"{topic_path(new)} already exists")
+        from . import jarvis
+        if new == jarvis.PROJECT:
+            raise WorkspaceError(409, "reserved", f"{new!r} is kept for Jarvis (Settings -> Features): pick another name")
+    sessions = _check_rename(topic_path(project), topic_path(new))
     if emoji is not None:
         set_project_emoji(project, check_emoji(emoji))
     if new != project:
-        _rename(topic_path(project), topic_path(new))
+        _rename(topic_path(project), topic_path(new), sessions)
         try:
             f = root() / "projects" / ORDER_FILE
             data = json.loads(f.read_text())
@@ -581,10 +617,7 @@ def update_project(project: str, name: str | None = None, description: str | Non
         except (OSError, ValueError, AttributeError, RecursionError):
             pass
     _write_claude_md(project_dir(new), "project", new, description)
-    if new != project:
-        _changed("renamed", "project", topic_path(new), topic_path(project))
-    else:
-        _changed("updated", "project", topic_path(new))
+    _changed_or_renamed("project", topic_path(project), topic_path(new))
     return get_project(new)
 
 
@@ -595,10 +628,7 @@ def update_topic(project: str, topic: str, name: str | None = None, description:
         raise WorkspaceError(404, "not_found", f"Topic {project}/{topic} not found")
     check_description(description)
     new = check_slug(name) if name and name != topic else topic
-    if new != topic:
-        _ensure_idle(topic_path(project, topic))
-    if new != topic and os.path.lexists(root() / topic_path(project, new)):
-        raise WorkspaceError(409, "exists", f"{topic_path(project, new)} already exists")
+    sessions = _check_rename(topic_path(project, topic), topic_path(project, new))
     mode = check_permission_mode(permission_mode) if permission_mode is not None else None
     tools = check_allowed_tools(allowed_tools) if allowed_tools is not None else None
     if mode is not None:
@@ -606,7 +636,7 @@ def update_topic(project: str, topic: str, name: str | None = None, description:
     if tools is not None:
         _set_folder_meta(d, "allowed_tools", tools)
     if new != topic:
-        _rename(topic_path(project, topic), topic_path(project, new))
+        _rename(topic_path(project, topic), topic_path(project, new), sessions)
         with _meta_lock:
             meta = _meta(project)
             if isinstance(meta.get("topics"), list):
@@ -614,11 +644,25 @@ def update_topic(project: str, topic: str, name: str | None = None, description:
                 _forget(project_dir(project) / META_FILE)
                 config.write_json(project_dir(project) / META_FILE, meta)
     _write_claude_md(project_dir(project) / "topics" / new, "topic", new, description)
-    if new != topic:
-        _changed("renamed", "topic", topic_path(project, new), topic_path(project, topic))
-    else:
-        _changed("updated", "topic", topic_path(project, new))
+    _changed_or_renamed("topic", topic_path(project, topic), topic_path(project, new))
     return get_topic(project, new)
+
+
+def _check_rename(old: str, new: str) -> list[dict] | None:
+    """Refuse a rename that cannot happen; the sessions under `old` (read once) go on to `_rename`."""
+    if new == old:
+        return None
+    sessions = _ensure_idle(old)
+    if os.path.lexists(root() / new):
+        raise WorkspaceError(409, "exists", f"{new} already exists")
+    return sessions
+
+
+def _changed_or_renamed(kind: str, old: str, new: str) -> None:
+    if new != old:
+        _changed("renamed", kind, new, old)
+    else:
+        _changed("updated", kind, new)
 
 
 def delete_project(project: str) -> None:
@@ -651,9 +695,10 @@ def _ensure_idle(prefix: str) -> list[dict]:
     return sessions
 
 
-def _rename(old: str, new: str) -> None:
+def _rename(old: str, new: str, sessions: list[dict] | None = None) -> None:
     """Move the folder, then remap session paths, Claude transcripts and Telegram mappings."""
-    sessions = _ensure_idle(old)
+    if sessions is None:
+        sessions = _ensure_idle(old)
     src, dst = root() / old, root() / new
     if os.path.lexists(dst):
         raise WorkspaceError(409, "exists", f"{new} already exists")
@@ -740,6 +785,10 @@ def move_to_trash(src: Path, label: str | None = None, kind: str | None = None) 
         config.write_json(sidecar, side)
         shutil.move(str(src), str(dest))
     except BaseException:
+        # A file that is still where it was is whole: the copy that stopped half way must not stay in the trash as a
+        # duplicate. A folder may be half removed by now (its copy is then the only complete one): left alone.
+        if os.path.lexists(src) and not src.is_dir() and os.path.lexists(dest):
+            dest.unlink(missing_ok=True)
         sidecar.unlink(missing_ok=True)
         raise
     bus.invalidate("trash")
@@ -767,11 +816,10 @@ def _changed(action: str, kind: str, path: str, old_path: str | None = None) -> 
 
 def _wants_arg(cb: Callable[..., Any]) -> bool:
     try:
-        params = [p for p in inspect.signature(cb).parameters.values()
-                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
+        return any(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+                   for p in inspect.signature(cb).parameters.values())
     except (TypeError, ValueError):
         return True
-    return bool(params)
 
 
 def _schedule(coro: Any) -> None:

@@ -149,7 +149,7 @@ def _sent_preview(m: dict) -> list[dict]:
         out.append({"text": str(x.get("text") or "")[:SENT_PREVIEW_CHARS],
                     "attachments": [str(a) for a in att] if isinstance(att, list) else [],
                     "source": str(x.get("source") or "web"),
-                    **({"voice": _voice_paths(x)} if _voice_paths(x) else {}),
+                    **({"voice": v} if (v := _voice_paths(x)) else {}),
                     **({"client_ids": [str(c) for c in x["client_ids"]]} if isinstance(x.get("client_ids"), list) else {})})
     return out
 
@@ -184,7 +184,16 @@ def public(meta: dict, exits_waiting: dict[str, dict] | None = None) -> dict:
             "worktree": _worktree_public(m),
             "browser_asks": _browser_waiting(m["id"]),
             "browser_exit": _exit_waiting(m["id"]) if exits_waiting is None else exits_waiting.get(m["id"]),
-            "device_asks": _devices_waiting(m["id"])}
+            "device_asks": _devices_waiting(m["id"]), "compact_tokens": _own_compact(m)}
+
+
+def _own_compact(m: dict) -> int | None:
+    """A session with its own compaction threshold (Jarvis's conversation: config.session_config), else None."""
+    if (m.get("path") or "").strip("/") != config.JARVIS_PATH:
+        return None
+    cfg = config.load_config()
+    own = config.session_config(cfg, m.get("path"))
+    return config.int_setting(own, "auto_compact_tokens") if own is not cfg else None
 
 
 def _worktree_public(m: dict) -> dict | None:
@@ -297,8 +306,10 @@ def _item(text: str, attachments: list[str] | None, source: str, kind: str = "us
             "at": time.time(), **extra}
 
 
-def _client_ids(client_id: str | None) -> dict:
-    return {"client_ids": [client_id]} if client_id else {}
+def _extras(client_id: str | None, silent_ok: bool, ref: str | None, call: str | None) -> dict:
+    """The optional fields of a queue item (only those that are set)."""
+    return {**({"client_ids": [client_id]} if client_id else {}), **({"silent_ok": True} if silent_ok else {}),
+            **({"refs": [str(ref)]} if ref else {}), **({"call": call} if call else {})}
 
 
 def _check_attachments(paths: list[str] | None) -> list[str]:
@@ -353,10 +364,7 @@ def _spawn(sid: str) -> None:
 
 
 def _default_title(path: str, message: str | None) -> str:
-    first = titles.provisional(message or "")
-    if first:
-        return first
-    return f"Session {len(list_sessions(path)) + 1}"
+    return titles.provisional(message or "") or f"Session {len(list_sessions(path)) + 1}"
 
 
 def create_session(path: str, message: str | None = None, title: str | None = None,
@@ -412,9 +420,7 @@ def create_session(path: str, message: str | None = None, title: str | None = No
             from .. import worktrees
             worktrees.undo(meta["id"], meta["worktree"])
         raise
-    first = _item((message or "").strip(), files, source, **_client_ids(client_id),
-                  **({"silent_ok": True} if silent_ok else {}), **({"refs": [str(ref)]} if ref else {}),
-                  **({"call": call} if call else {}))
+    first = _item((message or "").strip(), files, source, **_extras(client_id, silent_ok, ref, call))
     if audio:
         _enqueue_voice(meta["id"], first, audio)
     elif (message or "").strip() or files:
@@ -486,14 +492,7 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
     audio = _check_voice(voice_path)
     if not (text or "").strip() and not files and not audio:
         raise SessionError(400, "empty", "Empty message")
-    extra: dict[str, Any] = {}
-    if call:
-        extra["call"] = call
-    if ref:
-        extra["refs"] = [str(ref)]
-    extra.update(_client_ids(client_id))
-    if silent_ok:
-        extra["silent_ok"] = True
+    extra = _extras(client_id, silent_ok, ref, call)
     if mentions:
         from .. import mentions as mentions_mod
         if found := mentions_mod.resolve(mentions, sender=sid):
@@ -503,10 +502,8 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
     if text.strip():
         titles.first_message(sid, text.strip())
     item = _item(text.strip(), files, source, **extra)
-    if audio:
-        queued = _enqueue_voice(sid, item, audio, reset_cron=source != "cron")
-    else:
-        queued = _enqueue(sid, item, reset_cron=source != "cron")
+    reset = source != "cron"
+    queued = _enqueue_voice(sid, item, audio, reset_cron=reset) if audio else _enqueue(sid, item, reset_cron=reset)
     return {"queued": queued, "session": get_session(sid)}
 
 
@@ -514,12 +511,13 @@ MAX_HOPS = 3                                           # session -> session -> .
 
 
 def relay_message(to: str, text: str, attachments: list[str] | None = None, sender: dict | None = None,
-                  hops: int = 0) -> dict:
+                  hops: int = 0, short: bool = False) -> dict:
     """`maxxing sessions send`: a turn (or the owner's shell) writes to another session, as a message typed in it.
     `to`: a session id (or its first 6+ characters) or its title (case and accents ignored, a unique beginning is
     enough). `sender`: the session of the turn ({id, title, path}) or None. `hops`: how many sends led to this one
     (the sender turn's, + 1): refused above MAX_HOPS, so two sessions never answer each other forever.
-    -> {queued, session}"""
+    `short`: its answer is a report read by another turn (Jarvis's board): Claude is asked for a short final answer
+    (runner.SHORT_ANSWER_NOTE, not displayed). -> {queued, session}"""
     target = find_session(to)
     if sender and target["id"] == sender.get("id"):
         raise SessionError(400, "self", "A session cannot send a message to itself")
@@ -528,6 +526,8 @@ def relay_message(to: str, text: str, attachments: list[str] | None = None, send
     if sender:
         relay.update({"from": sender.get("id") or "", "title": sender.get("title") or "",
                       "path": sender.get("path") or ""})
+    if short:
+        relay["short"] = True
     return send_message(target["id"], text, attachments, "session" if sender else "cli", relay=relay)
 
 

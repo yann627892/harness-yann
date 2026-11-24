@@ -47,4 +47,6 @@ ROUTERS = [
     "mail",
     "browser",
     "devices",
+    "jarvis",
+    "push",
 ]

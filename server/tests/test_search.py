@@ -415,7 +415,8 @@ def test_a_group_line_with_a_non_text_value_does_not_stop_the_index(client, topi
                                                    {"path": f"{topic}/agents/editor", "role": "edits"}]})
     assert r.status_code == 200, r.text
     room = config.state_dir("agents", "rooms") / "acme__team.jsonl"
-    room.write_text(json.dumps({"kind": "message", "text": 5, "at": "x"}) + "\n"
+    room.write_text("[" * 100000 + "\n"                                   # nested deeper than Python parses
+                    + json.dumps({"kind": "message", "text": 5, "at": "x"}) + "\n"
                     + json.dumps({"kind": "message", "text": "cut \ud800 zqxsurrogate", "at": 1.0}) + "\n"   # a lone surrogate
                     + json.dumps({"kind": "message", "text": "zqxgroupline", "at": 1.0}) + "\n")
     (config.workspace() / "fresh.md").write_text("zqxfreshfile321\n")
@@ -443,6 +444,17 @@ def test_a_link_into_a_hidden_or_skipped_folder_is_not_indexed(client, mx):
     (ws / "real.md").write_text("zqxhiddenlink789 dans une vraie note\n")
     search.refresh()
     assert [r["title"] for r in _q(client, "zqxhiddenlink789")] == ["real.md"]
+
+
+def test_a_link_named_like_a_note_to_a_secret_file_is_not_indexed(client, mx):
+    ws = config.workspace()
+    (ws / ".env").write_text("zqxlinkedenv456=1\n")
+    (ws / "tasks.json").write_text('{"zqxlinkedenv456": 1}\n')
+    os.symlink(ws / ".env", ws / "a.md")
+    os.symlink(ws / "tasks.json", ws / "b.md")
+    (ws / "real.md").write_text("zqxlinkedenv456 dans une vraie note\n")
+    search.refresh()
+    assert [r["title"] for r in _q(client, "zqxlinkedenv456")] == ["real.md"]
 
 
 def test_snippets_come_from_the_best_row_of_each_shown_result(mx):
@@ -508,3 +520,60 @@ def test_a_container_folder_linked_outside_the_workspace_is_not_indexed(client, 
     os.symlink(outside, ws / "projects" / "p" / "topics")
     search.refresh(True, True)
     assert _q(client, "zqxcontainer654") == []
+
+
+def test_a_session_with_a_bad_date_does_not_stop_the_index(client, mx):
+    ids = [_session("projects/acme/topics/blog", f"Zebra {i}", [("user", "zebra")]) for i in range(3)]
+    f = store.meta_path(ids[1])
+    m = json.loads(f.read_text())
+    m["updated"] = [1]
+    f.write_text(json.dumps(m))
+    search.refresh()
+    found = {x["id"] for x in client.get("/api/search", params={"q": "zebra"}).json()["results"]}
+    assert set(ids) == found
+
+
+def test_a_corrupt_search_db_is_rebuilt(client, mx):
+    sid = _session("projects/acme/topics/blog", "Refonte", [("user", "zebra")])
+    search.refresh()
+    search._db().close()
+    search._con = None
+    search.db_path().write_bytes(os.urandom(5000))
+    search.refresh()
+    assert sid in {x["id"] for x in client.get("/api/search", params={"q": "zebra"}).json()["results"]}
+
+
+def test_hidden_jarvis_sessions_do_not_take_the_places_of_visible_results(client, mx):
+    from maxxing import jarvis, workspace
+    pdir = config.workspace() / jarvis.PREFIX
+    pdir.mkdir(parents=True)
+    workspace._set_folder_meta(pdir, "system", jarvis.MARK)
+    for i in range(5):
+        _session(jarvis.PATH, f"Hidden {i}", [("user", "zebra zebra zebra")])
+    sid = _session("projects/acme/topics/blog", "Visible", [("user", "a zebra passed by")])
+    search.refresh()
+    assert jarvis.hides(jarvis.PREFIX)
+    ids = [x["id"] for x in client.get("/api/search", params={"q": "zebra", "limit": 3}).json()["results"]]
+    assert ids == [sid]
+
+
+def test_a_session_event_with_a_non_text_value_does_not_stop_the_index(client, mx):
+    bad = _session("", "Abîmée", [])
+    with open(store.log_path(bad), "a") as fh:
+        fh.write('{"type":"mx_user","text":{"a":1},"attachments":[],"source":"web","at":1.0}\n')
+    good = _session("", "Saine", [("assistant", "fine zqxkoalaword")])
+    search.refresh()
+    assert [x["id"] for x in search.search("zqxkoalaword")["results"]] == [good]
+
+
+def test_a_session_without_a_log_is_not_read_again_while_nothing_changes(client, mx, monkeypatch):
+    m = store.new_meta("", "Sans journal")
+    store.create(m)
+    store.log_path(m["id"]).unlink(missing_ok=True)
+    search.refresh()
+    reads = []
+    real = store.read
+    monkeypatch.setattr(store, "read", lambda sid: (reads.append(sid), real(sid))[1])
+    search.refresh()
+    search.refresh()
+    assert reads == []

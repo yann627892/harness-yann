@@ -6,7 +6,7 @@ import { loadGroups, useT } from '@/i18n'
 import { Button, Sensitive, Spinner, Tooltip, toast } from '@/components/ui'
 import { useMentionTargets } from '@/lib/queries'
 import { errorMessage } from '@/lib/api'
-import { DRAFT_EVENT, leftOutbox, loadAtts, loadDraft, loadQuotes, onSeed, outboxAdd, outboxDone, outboxMove, registerComposer, saveAtts, saveDraft, saveQuotes, takeSeed, type DraftAtt, type OutboxEntry, type Pending, type Seed } from './store'
+import { DRAFT_EVENT, leftOutbox, loadAtts, loadDraft, loadQuotes, onSeed, outboxAdd, outboxDone, outboxMove, registerComposer, saveAtts, saveDraft, saveQuotes, takeSeed, useSessionsUI, type DraftAtt, type OutboxEntry, type Pending, type Seed } from './store'
 import { busyEnd, busyStart } from '@/lib/busy'
 import { cancelUpload, moveUploads, onUploads, startUpload, uploadsOf } from './uploads'
 import type { MentionTarget, QueueItem, SentMention } from '@/lib/types'
@@ -17,12 +17,12 @@ import { VoiceButton } from '@/features/voice/VoiceButton'
 import { SlashMenu, slashAction, slashItems, type MenuRow, type SlashCommand } from './SlashMenu'
 import { mentionAt, mentionRows, targetChip, usedMentions } from './mentions'
 import { ChipBackdrop, findCommand, findNames } from '@/features/chips/Chip'
-import { AttachmentChip, type Att } from '@/features/composer/AttachmentChip'
+import type { Att } from '@/features/composer/AttachmentChip'
 import { CloseButton, MessageBox, StopButton, TuckedCard } from '@/features/composer/MessageBox'
 
 const NO_ITEMS: QueueItem[] = []
 
-export { AttachmentChip, type Att }
+export type { Att }
 export const fromDraftAtt = (a: DraftAtt): Att => ({ lid: Math.random().toString(36).slice(2), name: a.name, size: a.size, path: a.path, progress: 1, error: null, preview: isImage(a.path) ? thumbUrl(a.path, 160, 160) : null })
 export const toDraftAtts = (atts: Att[]): DraftAtt[] => atts.filter((a) => a.path && !a.error).map((a) => ({ path: a.path!, name: a.name, size: a.size }))
 
@@ -604,7 +604,9 @@ export const Composer = React.forwardRef<ComposerHandle, {
     [colKey],
   )
   React.useEffect(() => {
-    if (autoFocus && window.matchMedia('(pointer: fine)').matches) focusAtEnd(ta.current) // after a pre-filled draft
+    // after a pre-filled draft; only the column in front when the composer comes (it may come after the session's data,
+    // when a link has already brought another column in front: the caret would bring this one back in front)
+    if (autoFocus && window.matchMedia('(pointer: fine)').matches && useSessionsUI.getState().focused === colKey) focusAtEnd(ta.current)
   }, [autoFocus])
 
   // The queue card rises from behind the box and sinks back when it empties (TuckedCard keeps its last content

@@ -8,8 +8,9 @@ the person has it (the live view), or a protected / locked screen (the device sa
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from . import OS_NAMES, store, visible
 from .asks import ask as ask_person
@@ -163,8 +164,11 @@ async def _shot(did: str, max_w: int = SHOT_MAX_W, crop: dict | None = None) -> 
         msg.update(crop)
     r = await hub().request(did, msg)
     data = str(r.get("jpeg") or "")
-    w, h = int(r.get("w") or 0), int(r.get("h") or 0)
-    if not data or w <= 0 or h <= 0:
+    w, h = r.get("w") or 0, r.get("h") or 0
+    if not data or not finite(w) or not finite(h) or w <= 0 or h <= 0:
+        raise DeviceError("bad_answer", "the device sent no picture")
+    w, h = int(w), int(h)
+    if w <= 0 or h <= 0:
         raise DeviceError("bad_answer", "the device sent no picture")
     return data, w, h
 
@@ -176,6 +180,10 @@ async def _picture(did: str, dev: dict, caption: str) -> list[dict]:
             _text(f"{caption}{dev['name']}: {w}x{h} picture (coordinates are pixels of this picture).")]
 
 
+def _list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
 def _tree_text(nodes: list) -> str:
     lines = []
     for n in nodes[:MAX_TREE_NODES]:
@@ -185,7 +193,7 @@ def _tree_text(nodes: list) -> str:
         flags = " ".join(f for f, k in (("click", "click"), ("edit", "edit"), ("focus", "focus")) if n.get(k))
         text = store._text(n.get("text"), 120)
         desc = store._text(n.get("desc"), 120)
-        frame = ",".join(str(int(v)) for v in b[:4] if isinstance(v, (int, float)))
+        frame = ",".join(str(int(v)) for v in b[:4] if finite(v))
         lines.append(f"[{store._text(n.get('id'), 40)}] {store._text(n.get('role'), 40)}"
                      + (f" \"{text}\"" if text else "") + (f" ({desc})" if desc else "")
                      + (f" @{frame}" if frame else "") + (f" {flags}" if flags else ""))
@@ -266,10 +274,8 @@ async def _answer(did: str, dev: dict, d: dict) -> dict:
     if st == "done":
         out = [_text(f"The person did it and handed {dev['name']} back.{note} Look at the screen again before acting.")]
         if hub().online(did) and not hub().paused(did):
-            try:
+            with contextlib.suppress(Offline, DeviceError, asyncio.TimeoutError):
                 out += await _picture(did, dev, "Now: ")
-            except (Offline, DeviceError, asyncio.TimeoutError):
-                pass
         return {"content": out}
     if st == "skip":
         return {"content": [_text("The person skipped this step: do not try it again in this run; go on without it "
@@ -306,7 +312,7 @@ async def _run(did: str, dev: dict, name: str, args: dict) -> dict:
         return await _switch(did, dev, int(_num(args, "screen")))
     if name == "apps":
         r = await h.request(did, {"t": "apps"})
-        apps = [a for a in r.get("apps") or [] if isinstance(a, dict)][:400]
+        apps = [a for a in _list(r.get("apps")) if isinstance(a, dict)][:400]
         lines = [f"- {store._text(a.get('name'), 80)} ({store._text(a.get('id'), 120)})" for a in apps]
         return {"content": [_text(f"{len(apps)} apps on {dev['name']}:\n" + "\n".join(lines))]}
     if name == "open_app":
@@ -314,7 +320,7 @@ async def _run(did: str, dev: dict, name: str, args: dict) -> dict:
         if not want:
             raise Refused("name: the app to open")
         r = await h.request(did, {"t": "apps"})
-        apps = [a for a in r.get("apps") or [] if isinstance(a, dict)]
+        apps = [a for a in _list(r.get("apps")) if isinstance(a, dict)]
         cf = want.casefold()
         app = next((a for a in apps if str(a.get("id")) == want), None) or \
             next((a for a in apps if str(a.get("name") or "").casefold() == cf), None) or \

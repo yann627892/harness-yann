@@ -23,7 +23,6 @@ import datetime as dt
 import lzma
 import re
 import secrets as _secrets
-import shutil
 import stat
 import threading
 import time
@@ -203,6 +202,11 @@ def _entries(zf: zipfile.ZipFile) -> tuple[list[tuple[zipfile.ZipInfo, PurePosix
         k += 1
     if k:
         ok = [(i, PurePosixPath(*p.parts[k:])) for i, p in ok]
+    from . import backup
+    for s in skipped:
+        # a skipped file is listed in the report and the API answer: its name must not carry a secret
+        if any(rx.search(s["file"].encode("utf-8", "replace")) for _, rx in backup.LEAKS):
+            s["file"] = "(name hidden: it holds a secret)"
     return ok, skipped
 
 
@@ -263,7 +267,6 @@ def _plan(zf: zipfile.ZipFile, scans: dict[str, list[str] | None]) -> dict[str, 
 
     for info, p in entries:
         parts = p.parts
-        data_kind = "file"
         name_b = info.filename.encode("utf-8", "replace")
         if name_kinds := sorted({kind for kind, rx in backup.LEAKS if rx.search(name_b)}):
             # a secret in the NAME of a file would be written to the disk, the report and the API answer
@@ -369,15 +372,20 @@ def _unreadable() -> ImportFailed:
     return ImportFailed(400, "bad_zip", "A file of the zip cannot be read (encrypted or damaged)")
 
 
-def inspect(path: Path) -> dict[str, Any]:
+def _checked_plan(zf: zipfile.ZipFile, path: Path) -> dict[str, Any]:
     try:
-        with _open(path) as zf:
-            plan = _plan(zf, _scans(path))
+        plan = _plan(zf, _scans(path))
     except _UNREADABLE:
         raise _unreadable() from None
-    plan.pop("_items")
     if not plan["files"]:
         raise ImportFailed(400, "empty", EMPTY)
+    return plan
+
+
+def inspect(path: Path) -> dict[str, Any]:
+    with _open(path) as zf:
+        plan = _checked_plan(zf, path)
+    plan.pop("_items")
     return plan
 
 
@@ -431,7 +439,7 @@ def _defang_imports(text: str) -> str:
 
 def _strip_skill_hooks(text: str) -> str:
     """Remove the `hooks:` field of the front matter of a SKILL.md: a hook runs a command by itself."""
-    lines = text.split("\n")
+    lines = text.removeprefix("\ufeff").split("\n")
     if not lines or lines[0].strip() != "---":
         return text
     try:
@@ -440,7 +448,7 @@ def _strip_skill_hooks(text: str) -> str:
         return text
     out, skipping = [lines[0]], False
     for ln in lines[1:end]:
-        if re.match(r"hooks\s*:", ln):
+        if re.match(r"""\s*["']?hooks["']?\s*:""", ln):
             skipping = True
             continue
         if skipping and (not ln.strip() or ln[:1] in (" ", "\t", "-")):
@@ -476,12 +484,7 @@ def _apply(path: Path) -> dict[str, Any]:
     renamed_files: list[dict] = []
     skill_dirs: dict[str, str] = {}
     with _open(path) as zf:
-        try:
-            plan = _plan(zf, _scans(path))
-        except _UNREADABLE:
-            raise _unreadable() from None
-        if not plan["files"]:
-            raise ImportFailed(400, "empty", EMPTY)
+        plan = _checked_plan(zf, path)
         try:
             for item in plan["_items"]:                      # big files are not read by the plan: check them before any write
                 if item["size"] > SCAN_MAX:

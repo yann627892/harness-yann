@@ -3,10 +3,73 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
-## Unreleased
+## 2.0.0-alpha.167 - 2026-11-24
+
+Fixed:
+- **Security: five holes closed.** An agent turn could run a command as root outside its sandbox by adding `-h` to
+  `maxxing heavy`, or write any file as root with `maxxing agents export --output` (an agent turn now gets the text
+  only). A git submodule with its own filter settings could run a command when the Git page or the Changes view was
+  opened: status and diffs no longer look inside submodules. A backup restored on a server in use keeps this server's
+  security settings of agents and topics (sandbox, permission mode, budget; a new agent comes back switched off), and
+  never turns back on a scheduled job or an extension that is off here.
+
+## 2.0.0-alpha.166 - 2026-11-23
+
+Fixed:
+- **The open sessions follow from the computer to the phone in Zones mode too.** Since the phone takes the mode of the
+  computer, a computer in Zones stopped sharing its sessions with the phone: they now follow in both modes, in both
+  directions.
+- **A session opened from a link stays in front.** On the phone, the computer no longer brings back its own session
+  in front; on the computer, reloading the page or opening a link no longer jumps back to the session that was in
+  front before (or to the last column to load).
+
+## 2.0.0-alpha.165 - 2026-11-23
+
+New:
+- **Harness Link 0.1.1: a new look for the Android app.** A terminal-style header with the LINK logo, one centered
+  card per section, the Harness blue, a coloured status dot and full-width buttons. Phones get it from Settings ->
+  Devices -> Add a device (it installs over 0.1.0); the computer apps are unchanged.
+- **Download the Android app without the QR code**: Settings -> Devices -> Add a device -> Android now has a
+  **Download the app (APK)** button under the code.
+- **Your computer and your phone show the same sessions view.** The Tabs / Zones mode and the session in front follow
+  the last device you chose them on: switch from the computer to the phone (or back) and you find the same view.
+- **Jarvis: one assistant who runs Harness for you.** Turn it on in Settings -> Features -> Jarvis: it sits at the
+  top of the sidebar. Say what you want; it picks or creates the right project and topic, hands the work to a session
+  there, gets the answer back by itself when the session is done and tells you, in the same conversation. Its Work
+  list shows what waits for you, what is in progress and what was answered; a morning brief opens each day, and a
+  night pass tidies its memory so it always knows where everything is. It hands the work over rather than doing it
+  itself, so it answers fast while sessions work side by side; it follows a piece of work through several rounds on
+  its own, reads reports that arrive together in one turn, and a brief that fails is tried again, then reported.
+  Full rights, "Ask me first" and its own compaction threshold are in its settings. [Show me](#show:jarvis)
+
+- **Notifications on your phone, even with the app closed.** Settings -> Notifications -> *Mobile notifications*:
+  turn on *Notify on this device* and every finished turn of yours rings there ("Harness has finished", the session and
+  the start of the answer); a tap opens the session. No Telegram needed, nothing of the conversation goes through
+  Google or Apple, and it adds no dependency.
+- **Preview e-mail attachments and the files of a message being written.** A click on an attachment of a mail opens
+  it in the file viewer, as in a conversation (documents, sheets, slides, PDF, pictures, videos, code...), ← / →
+  between the attachments; Ctrl+click still downloads it. A file you just attached in a session, Team or an agent
+  opens in the viewer with a click, before you send it.
 
 Changed:
+- **Scrolling up a long session no longer freezes the page.** Show earlier (and the automatic loading when you reach
+  the top) now adds the older messages a few at a time instead of all at once: the page stays responsive, mostly
+  felt on a phone.
 - **Dependencies updated** (minor and patch versions only): web (@tanstack/react-query 5.108.0 -> 5.108.3, lucide-react 1.74.0 -> 1.77.0, react-router 8.5.1 -> 8.5.2, tailwind-merge 3.7.0 -> 3.7.1) and server (fastapi 0.163.2 -> 0.165.0, pydantic 2.14.3 -> 2.14.4, pyyaml 6.0.3 -> 6.0.4, certifi, filelock, ctranslate2, av).
+
+Fixed:
+- **On a phone, the Tabs / Zones switch is in every session.** It sits next to the ⋯ menu: Tabs shows the open sessions
+  above the conversation (even when only one is open), Zones hides them.
+- **On a phone, Settings -> Notifications shows the name of each source.** The rule menu took the room and the
+  names were cut to two letters ("Cr…", "Sig…"): it now goes under the name when the screen is narrow.
+- **On a phone, Settings -> Memory lists whole file paths.** Cut to one line, every row read
+  "projects/…/topi…" and you could not tell which memory file was too long: the path now wraps on a narrow screen.
+- **The "Harness has finished" notification now works on Android Chrome** when the app is open in the background (it
+  was silently dropped: only the banner inside the app showed).
+
+- **Usage reset times are on your clock.** The Claude usage card of the dashboard showed when the 5-hour and
+  7-day windows reset (and the next reading) in the server's time, often UTC, instead of the time zone set in
+  Settings.
 
 ## 2.0.0-alpha.164 - 2026-11-23
 

@@ -13,7 +13,7 @@ const DEMO_DIAGRAM = `flowchart LR
   C --> E[Answer]
   D --> E`
 
-export const SHOWCASES: Record<string, TourStep[]> = {
+const SHOWCASES: Record<string, TourStep[]> = {
   look: [{ id: 'look', targets: ['accent'], title: 'show.look.title', body: 'show.look.body', route: (c) => (c.pathname === '/settings/appearance' ? null : '/settings/appearance') }],
   diagram: [{ id: 'diagram', targets: [], title: 'show.diagram.title', body: 'show.diagram.body', cta: 'show.try', after: () => showDiagram(DEMO_DIAGRAM) }],
   'text-zoom': [{ id: 'text-zoom', targets: [], title: 'show.textZoom.title', body: 'show.textZoom.body' }],
@@ -39,12 +39,13 @@ export const SHOWCASES: Record<string, TourStep[]> = {
   tasks: [{ id: 'tasks', targets: ['tasks-projects'], title: 'show.tasks.title', body: 'show.tasks.body', route: (c) => (c.pathname === '/tasks' ? null : '/tasks?project=overview') }],
   'telegram-setup': [{ id: 'telegram-setup', targets: [], title: 'show.telegramSetup.title', body: 'show.telegramSetup.body', route: (c) => (c.pathname === '/settings/telegram' ? null : '/settings/telegram') }],
   'topic-permissions': [{ id: 'topic-permissions', targets: ['tree'], title: 'show.permissions.title', body: 'show.permissions.body', route: sessionsList, before: (c) => c.mobile && useTouchNav.getState().setPanel('sessions') }],
+  jarvis: [{ id: 'jarvis', targets: [], title: 'show.jarvis.title', body: 'show.jarvis.body', route: (c) => (c.pathname === '/settings/features' ? null : '/settings/features') }],
   devices: [{ id: 'devices', targets: ['devices-feature'], title: 'show.devices.title', body: 'show.devices.body', route: (c) => (c.pathname === '/settings/features' ? null : '/settings/features') }],
   'mobile-header': [{ id: 'mobile-header', targets: [], title: 'show.mobileHeader.title', body: 'show.mobileHeader.body' }],
   'touch-nav': [{ id: 'touch-nav', targets: ['touch-sessions', 'nav'], title: 'show.touchNav.title', body: 'show.touchNav.body', before: (c) => c.mobile && useTouchNav.getState().setPanel(null) }],
 }
 
-export const SHOW_HREF = '#show:'
+const SHOW_HREF = '#show:'
 /** `[label](#show:<id>)` links of a changelog body: labelled in the UI language, removed when the showcase does
  *  not exist here. */
 export const showLinks = (md: string, label: string) =>

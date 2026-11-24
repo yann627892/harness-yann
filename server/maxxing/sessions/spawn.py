@@ -105,13 +105,10 @@ def _reserved(name: str) -> bool:
 
 def _named_vault(names: list[str]) -> dict[str, str]:
     """The vault entries `names` (an agent's keys), exposed or not."""
-    try:
-        from .. import vault
-    except ImportError:
-        return {}
+    from .. import vault
     out = {}
     for n in names:
-        v = vault.get(n) if ENV_NAME_RE.match(n) and not _reserved(n) else None
+        v = vault.get(n) if ENV_NAME_RE.match(n) and not vault.is_reserved(n) else None
         if v is not None and "\0" not in v:
             out[n] = v
     return out
