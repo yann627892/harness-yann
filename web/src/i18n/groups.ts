@@ -21,6 +21,8 @@ export const GROUPS = {
   devices: ['devices'],
   // Jarvis's page (Settings -> Features -> Jarvis)
   jarvis: ['jarvis'],
+  // Settings -> Webhooks and Events (features/webhooks), the link of Settings -> Notifications
+  webhooks: ['webhooks'],
   tasks: ['tasks', 'crons'],
   files: ['files', 'viewer'],
   // the media player: on the first player shown (a conversation shows one only for an audio file or in the viewer)
@@ -39,8 +41,9 @@ export const GROUPS = {
   paste: ['paste'],
   // extra words of the Settings sections for the command palette: loaded on its first search
   skw: ['skw'],
-  // the guided tour: loaded with its chunk (tour/Tour.tsx); its entry points (menu, palette) use help.*
-  tour: ['tour'],
+  // the showcases and the getting-started guide: loaded with their chunks (tour/Tour.tsx, guide/Guide.tsx); their
+  // entry points (menu, palette) use help.*
+  tour: ['tour', 'guide'],
   // the composer's / and @ menus, the intelligence (effort) level, the compaction gauge's tooltip and the rows of the
   // session shortcuts window (pages/sessions/index.tsx): loaded on their first text asked
   composer: ['slash', 'mention', 'effort', 'kbd', 'cgauge'],

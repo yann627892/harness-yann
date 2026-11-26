@@ -801,6 +801,25 @@ def test_restore_on_a_server_in_use_keeps_the_agents_security_settings(ws, mx_st
     assert len(r["held"]["rules"]) == 3 and any("security settings" in x for x in backup.held_lines(r["held"]))
 
 
+def test_restore_on_a_server_in_use_never_turns_an_agent_or_a_trigger_back_on(ws, mx_state):
+    """Switched off here, on in the backup: the agent, or one of its triggers, stays off; the rest comes back."""
+    _in_use()
+    off, on = (f"projects/acme/topics/blog/agents/{n}/agent.json" for n in ("writer", "editor"))
+    for rel, d in ((off, {"name": "writer", "enabled": False}),
+                   (on, {"name": "editor", "triggers": [{"id": "t_aaaaaa", "enabled": False}, {"id": "t_bbbbbb"}]})):
+        (ws / rel).parent.mkdir(parents=True)
+        (ws / rel).write_text(json.dumps(d))
+    r = backup._apply({off: json.dumps({"name": "writer 2", "enabled": True}).encode(),
+                       on: json.dumps({"name": "editor 2", "enabled": True, "triggers": [
+                           {"id": "t_aaaaaa", "enabled": True}, {"id": "t_bbbbbb", "enabled": True},
+                           {"id": "t_cccccc", "enabled": True}]}).encode()})
+    w, e = (json.loads((ws / rel).read_text()) for rel in (off, on))
+    assert w["name"] == "writer 2" and w["enabled"] is False
+    assert e["name"] == "editor 2" and e["enabled"] is True
+    assert [t["enabled"] for t in e["triggers"]] == [False, True, True]
+    assert {off, on} <= set(r["held"]["rules"])
+
+
 def test_restore_on_a_server_in_use_never_turns_a_job_or_an_extension_back_on(ws, mx_state):
     """A job switched off here, the same in the backup but on, stays off; an extension disabled here stays disabled."""
     crons = pytest.importorskip("maxxing.crons")
@@ -814,3 +833,11 @@ def test_restore_on_a_server_in_use_never_turns_a_job_or_an_extension_back_on(ws
                        f"{backup.META_DIR}/config.json": json.dumps({"extensions": {"disabled": []}}).encode()})
     assert not crons.list_jobs()[0]["enabled"] and r["held"]["crons"] == ["Blog"]
     assert "evil" in config.load_config()["extensions"]["disabled"]
+
+
+def test_keep_switched_off_ignores_trigger_ids_that_are_not_text():
+    """A hand-edited agent.json may hold a list or a dict as a trigger id: the restore goes on instead of stopping."""
+    out = {"triggers": [{"id": {"x": 1}, "enabled": True}, {"id": "t1", "enabled": True}]}
+    local = {"triggers": [{"id": [1], "enabled": False}, {"id": "t1", "enabled": False}]}
+    backup._keep_switched_off(out, local)
+    assert out["triggers"] == [{"id": {"x": 1}, "enabled": True}, {"id": "t1", "enabled": False}]

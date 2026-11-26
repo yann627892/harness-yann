@@ -181,8 +181,9 @@ CSS variables are there for the rest: `--background`, `--foreground`, `--card`, 
 ## Overview views of the Agents page
 
 An extension can also bring a **view of the Overview** (the page of the Agents page with every agent at its desk): it is listed in the Overview's
-view menu after Classic and Space. **Create my custom view**, at the end of that menu, opens a session
-that builds one with you.
+view menu after Classic and Space. **Create my custom view**, at the end of that menu (or **New view** in Settings ->
+Agents views), opens a session that builds one with you. Settings -> **Agents views** lists them (switch on/off,
+**Rescan**).
 
 ```
 /root/maxxing/extensions/mission-control/
@@ -214,8 +215,8 @@ that builds one with you.
 
 ## 5. Community extensions
 
-The [community library](https://harness-maxxing.com/community) lists extensions, widgets and skills written by other
-people, kept in their own GitHub repositories and maintained by their authors. Each listing gives a request to copy
+The [community library](https://harness-maxxing.com/community) lists widgets, pages, Agents views, skills and themes
+([39-themes.md](39-themes.md)) written by other people, kept in their own GitHub repositories and maintained by their authors. Each listing gives a request to copy
 into a session ("Install the community extension from …"): Claude reads the code at the commit we reviewed, tells you
 what it does, then installs it.
 

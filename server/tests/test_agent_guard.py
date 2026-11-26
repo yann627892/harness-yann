@@ -214,6 +214,23 @@ def test_claude_code_agent_file_export_and_import(client, topic, mx):
                                                    "markdown": "no front matter"}).status_code == 400
 
 
+def test_an_imported_agent_file_does_not_bring_memory_imports(client, topic, mx):
+    """In a subagent file "@path" is text; in the agent's CLAUDE.md it would load that file into every run."""
+    _on(client)
+    from maxxing import config
+    cc = ("---\nname: Helper\ndescription: Helps\n---\n@~/.ssh/id_rsa\nRead @docs/notes.md first, "
+          "mail bob@example.com, keep `@kept.md` as is.\n")
+    r = client.post("/api/agents/import", json={"topic_path": "projects/acme/topics/blog", "markdown": cc})
+    assert r.status_code == 200, r.text
+    a = r.json()
+    assert a["ignored"] == ["@ imports kept as text: @~/.ssh/id_rsa, @docs/notes.md"]
+    md = (config.workspace() / a["path"] / "CLAUDE.md").read_text()
+    assert "`@~/.ssh/id_rsa`" in md and "Read `@docs/notes.md` first" in md
+    assert "bob@example.com" in md and "`@kept.md`" in md and "``" not in md
+    import re
+    assert re.findall(r"(?m)(?:^|\s)(@[^`\s]+)", md.replace("`@", "")) == ["@memory.md"]  # only the agent's own
+
+
 def test_a_wrapped_first_paragraph_and_a_yaml_block_description_import_once():
     from maxxing import agent_format
     md = ("---\nname: writer\ndescription: You write the weekly post for the blog.\n---\n\n"
@@ -226,6 +243,11 @@ def test_a_wrapped_first_paragraph_and_a_yaml_block_description_import_once():
         assert p["description"] == f"{want}\n\nYou are a senior reviewer." and p["fields"]["allowed_tools"] == ["Read"]
     md = "---\nname: last\ndescription: >\n  At the end\n  of the block.\n---\nBody.\n"
     assert agent_format.parse_md(md)["description"] == "At the end of the block.\n\nBody."
+    md = ("---\nname: x\ndescription: Use this agent to write\n  the weekly post every Monday\ntools: Read\n---\n"
+          "Body\n")
+    p = agent_format.parse_md(md)
+    assert p["description"] == "Use this agent to write the weekly post every Monday\n\nBody"
+    assert p["fields"]["allowed_tools"] == ["Read"] and p["ignored"] == []
 
 
 def test_agents_as_subagents_of_their_topic(client, topic, mx):
@@ -611,3 +633,12 @@ def test_agent_export_never_writes_a_file_in_an_agent_turn(client, topic, mx, mo
     assert cli.main(["agents", "export", A]) == 0
     monkeypatch.setattr(cmd_agents, "_turn", lambda: {"path": "", "depth": 0})
     assert cli.main(["agents", "export", A, "--output", str(out)]) == 0 and out.is_file()
+
+
+def test_a_tool_with_a_unicode_line_separator_survives_export_and_import(client, topic, mx):
+    _on(client)
+    tools = ["Read", "Bash(echo a\u2028b)", "Bash(echo c\x85d)", "Bash(x\x0cy)"]
+    assert _create(client, allowed_tools=tools)["allowed_tools"] == tools
+    from maxxing import agent_format
+    md = client.get("/api/agents/acme/blog/writer/export").text
+    assert agent_format.parse_md(md)["fields"]["allowed_tools"] == tools

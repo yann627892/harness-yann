@@ -367,7 +367,7 @@ export type PatchNameBody = { name?: string; description?: string; /** Projects 
 
 /* ---------------------------------------------------------------- Sessions */
 type SessionState = 'idle' | 'running' | 'error'
-type SessionSource = 'web' | 'telegram' | 'cron' | 'agent' | 'session' | 'cli'
+type SessionSource = 'web' | 'telegram' | 'cron' | 'agent' | 'session' | 'cli' | 'github' | 'system' | 'browser'
 export type QueueItem = { text: string; attachments: number; source: 'web' | 'telegram' | 'cron' | 'system' | string; kind: string; /** A voice message sent directly (transcribed before its turn). */ voice?: boolean; client_ids?: string[] }
 /** A message sent but not in the log yet (held at the head while a summary runs first, or its turn starting). */
 export type SentItem = { text: string; attachments: string[]; source: string; voice?: string[]; client_ids?: string[] }
@@ -398,6 +398,8 @@ export type Session = {
   /** Pinned in the Favorites block of the sessions list (stored on the server: same on every device). */
   favorite: boolean
   notify: boolean
+  /** Mobile notifications of this session (false = muted on the phones). */
+  push?: boolean
   source: SessionSource
   unread: boolean
   last_text: string
@@ -456,12 +458,12 @@ export type Approval = {
 }
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type Effort = (typeof EFFORTS)[number]
-export type CreateSessionBody = { path: string; message?: string; title?: string; model?: string; provider?: ClaudeProvider; effort?: Effort | ''; attachments?: string[]; plan_mode?: boolean; /** Absolute path of a voice message sent directly. */ voice?: string; /** This page's id for the first message (see SendMessageBody). */ client_id?: string; /** Work on a separate copy (Code mode). */ worktree?: { repo: string; base?: string; prepare?: string; copy_env?: boolean; remember?: boolean } }
-export type PatchSessionBody = { title?: string; model?: string; /** "" = back to the default provider. */ provider?: string; effort?: Effort | ''; archived?: boolean; notify?: boolean; plan_mode?: boolean; favorite?: boolean; /** Move to another topic (idle sessions only). */ path?: string }
+export type CreateSessionBody = { path: string; message?: string; title?: string; model?: string; provider?: ClaudeProvider; effort?: Effort | ''; attachments?: string[]; plan_mode?: boolean; /** false: never rings the phones. */ push?: boolean; /** Absolute path of a voice message sent directly. */ voice?: string; /** This page's id for the first message (see SendMessageBody). */ client_id?: string; /** Work on a separate copy (Code mode). */ worktree?: { repo: string; base?: string; prepare?: string; copy_env?: boolean; remember?: boolean } }
+export type PatchSessionBody = { title?: string; model?: string; /** "" = back to the default provider. */ provider?: string; effort?: Effort | ''; archived?: boolean; notify?: boolean; push?: boolean; plan_mode?: boolean; favorite?: boolean; /** Move to another topic (idle sessions only). */ path?: string }
 export type SendMessageBody = { text: string; attachments?: string[]; hud?: boolean; /** Sent during a voice call, in that language: Claude answers short and easy to say. */ call?: string; /** Absolute path of a voice message sent directly: the server transcribes it, then sends it. */ voice?: string; /** This page's id for the message, found again in `client_ids` of its queue item and its log event (a reload mid-send checks it). */ client_id?: string; /** The @ of the composer: the server tells Claude how to write to each. */ mentions?: Mention[] }
 export type SendMessageResult = { queued: boolean; session: Session }
 /** Who the composer's @ can name (GET /api/sessions/{id}/mentions). */
-type MentionKind = 'session' | 'agent' | 'team'
+type MentionKind = 'jarvis' | 'session' | 'agent' | 'team'
 type Mention = { kind: MentionKind; ref: string }
 /** A name of a sent message (log line `mentions`). */
 export type SentMention = Mention & { label: string; group?: boolean; avatar?: Partial<AgentAvatar> | null }
@@ -478,7 +480,7 @@ export type UploadResult = { files: Upload[] }
 
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
 export type SessionEvent =
-  | { type: 'user'; text: string; attachments: string[]; at: number; source: SessionSource; /** Audio of a voice message sent directly. */ voice?: string[]; /** The web pages' ids of the message(s) it carries (SendMessageBody.client_id). */ client_ids?: string[]; /** Added to a running turn (Add to task): read at Claude's next step. */ injected?: boolean; /** Sent by another session's turn (`maxxing sessions send`). */ from?: { session: string; title: string }; /** The @ it names (composer menu): drawn as chips. */ mentions?: SentMention[] }
+  | { type: 'user'; text: string; attachments: string[]; at: number; source: SessionSource; /** Audio of a voice message sent directly. */ voice?: string[]; /** The web pages' ids of the message(s) it carries (SendMessageBody.client_id). */ client_ids?: string[]; /** Added to a running turn (Add to task): read at Claude's next step. */ injected?: boolean; /** Not typed by the owner (another session, an agent, a job, Harness): shown as a folded card (MessageCard). */ from?: MessageFrom; /** The part of the text for the owner when the rest is instructions for Claude. */ shown?: string; /** The @ it names (composer menu): drawn as chips. */ mentions?: SentMention[] }
   /** Transcript of the voice message just above (or why it failed). */
   | { type: 'voice_text'; text: string; error: string | null; stopped?: boolean; at: number }
   | { type: 'assistant'; text: string; at: number; /** Written by Claude Code in place of an answer, the API refused the call: why (rate_limit, server_error…). */ error?: string }
@@ -534,7 +536,7 @@ export type SessionEventsBackPage = {
 export type SessionStreamEvents = { events: SessionEvent[]; next: number }
 
 /* ---------------------------------------------------------------- Global bus */
-export type BusTopic = 'agents' | 'agents_layout' | 'agent-groups' | 'sessions' | 'workspace' | 'tasks' | 'crons' | 'telegram' | 'backup' | 'health' | 'extensions' | 'trash' | 'feed' | 'profile' | 'register' | 'license' | 'infra' | 'mcp' | 'team' | 'team_live' | 'approvals' | 'open_sessions' | 'browser' | 'devices' | 'jarvis'
+export type BusTopic = 'agents' | 'agents_layout' | 'agent-groups' | 'sessions' | 'workspace' | 'tasks' | 'crons' | 'telegram' | 'backup' | 'health' | 'extensions' | 'trash' | 'feed' | 'profile' | 'register' | 'license' | 'infra' | 'mcp' | 'team' | 'team_live' | 'approvals' | 'open_sessions' | 'browser' | 'devices' | 'jarvis' | 'webhooks'
 
 /* ---------------------------------------------------------------- MCP servers (Settings -> MCP) */
 export type McpState = 'connected' | 'needs_auth' | 'failed' | 'pending' | 'unknown'
@@ -587,6 +589,65 @@ export type FeedHookKind = 'stripe' | 'shopify' | 'github' | 'generic'
 export type FeedHook = { id: string; name: string; kind: FeedHookKind; created: number; url: string; has_secret: boolean }
 export type FeedSource = { source: string; label: string; builtin: boolean; rule: FeedRule; own_thread: boolean }
 export type FeedSettings = { telegram: boolean; health: boolean; sources: FeedSource[]; hooks: FeedHook[]; kinds: FeedHookKind[]; rules: FeedRule[] }
+
+/* ---------------------------------------------------------------- Webhooks & events (Settings -> Automate) */
+export type WebhookSource = 'stripe' | 'shopify' | 'github' | 'generic' | 'phone'
+export type WebhookTrigger =
+  | { kind: 'in'; source: WebhookSource; methods: ('GET' | 'POST')[]; max_mb: number; reply: 'now' | 'wait'; filter?: { events?: string[]; branch?: string } }
+  | { kind: 'event'; on: 'feed'; source?: string; levels?: string[]; contains?: string }
+  | { kind: 'event'; on: 'agent' | 'cron'; agent?: string; cron?: string; when: 'any' | 'ok' | 'fail' }
+export type WebhookAction =
+  | { kind: 'shell'; command: string; cwd?: string; timeout_s: number }
+  | { kind: 'call'; url: string; method: string; headers: Record<string, string>; body: string; sign: boolean; retries: number; timeout_s: number }
+  | { kind: 'store'; fields: Record<string, string>; keep: number }
+  | { kind: 'notify'; level?: string; title?: string; body?: string; url?: string }
+export type WebhookCallStatus = 'queued' | 'running' | 'ok' | 'failed' | 'ignored'
+export type WebhookCall = {
+  id: string
+  at: number
+  trigger: 'in' | 'event' | 'test' | 'replay'
+  event: string
+  summary: string
+  status: WebhookCallStatus
+  http?: number
+  exit?: number
+  duration_s?: number
+  output?: string
+  error?: string
+  attempts?: number
+  of?: string
+}
+export type WebhookCallDetail = WebhookCall & {
+  request: { method?: string; content_type?: string; headers?: Record<string, string>; query?: Record<string, unknown>; event?: string; files?: { field: string; name: string; path: string; size: number }[]; size?: number }
+  body?: string
+  body_truncated?: boolean
+}
+export type WebhookDataStats = { rows: number; today: number; days: number[]; last_id: number }
+export type Webhook = {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  created: number
+  updated?: number
+  owner: string | null
+  trigger: WebhookTrigger
+  action: WebhookAction
+  queue: { parallel: number; max_waiting: number }
+  report: 'never' | 'fail' | 'always'
+  url: string
+  has_secret: boolean
+  has_sign: boolean
+  needs_secret: boolean
+  last_call: WebhookCall | null
+  calls_24h: number
+  waiting: number
+  data?: WebhookDataStats
+}
+export type FeedHookRef = { id: string; name: string; kind: FeedHookKind; url: string; has_secret: boolean; created: number; agent: string | null }
+export type WebhooksPayload = { hooks: Webhook[]; feed_hooks: FeedHookRef[]; https: boolean }
+export type WebhookRow = { id: number; at: number; call: string; data: unknown; fields?: Record<string, unknown> }
+export type WebhookData = { rows: WebhookRow[]; stats: WebhookDataStats }
 
 /* ---------------------------------------------------------------- Import */
 export type ImportAgent = 'hermes' | 'claude-code' | 'openclaw' | 'other'
@@ -1740,6 +1801,20 @@ export interface CleanupResult {
 /* ---------------------------------------------------------------- Jarvis (Settings -> Features -> jarvis_feature) */
 type JarvisWorkState = 'running' | 'replied' | 'failed' | 'closed'
 /** One piece of work Jarvis handed to a session (server jarvis.py work board). */
+/** Who sent a message from another session's turn (log line `from`). */
+/** Who sent a message the owner did not type (runner._sender): drawn as a folded card (MessageCard). */
+export type MessageFromKind = 'session' | 'agent' | 'cron' | 'feed' | 'mail' | 'group' | 'manual' | 'cli' | 'github' | 'system'
+export interface MessageFrom {
+  kind: MessageFromKind
+  /** the session that sent it (kind session / agent) */
+  session?: string
+  /** its name: session title, agent, job, group, or what asked for a run */
+  title?: string
+  /** the sender's path (topic, agent, group) */
+  path?: string
+  /** reports of Jarvis's work board read in this message */
+  reports?: { id: number; outcome: 'done' | 'asks' | 'failed' }[]
+}
 export interface JarvisWork {
   id: number
   session: string
@@ -1754,6 +1829,10 @@ export interface JarvisWork {
   /** its last answer ends on a question: it waits for the owner */
   question: boolean
   turns: number
+  /** closed and its session archived by Harness (one Jarvis started, where the owner never wrote) */
+  archived?: boolean
+  /** why Jarvis started a new session although the topic had ones that could take the work */
+  fresh?: string
 }
 export interface JarvisSettings {
   model: string
@@ -1768,6 +1847,10 @@ export interface JarvisSettings {
   compact_tokens: number
   /** its answers on Telegram: the brief, questions and failures (important), every answer (all), none (off) */
   telegram: 'off' | 'important' | 'all'
+  /** new work on the same subject continues a recent session of the topic */
+  reuse: boolean
+  /** closed work: its session is archived when Jarvis started it and the owner never wrote in it */
+  archive_done: boolean
 }
 export interface JarvisStatus {
   on: boolean

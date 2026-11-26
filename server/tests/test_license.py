@@ -206,6 +206,13 @@ def test_activate_without_token_leaves_no_key(mx, monkeypatch):
     assert not (config.load_config().get("license") or {}).get("email")
 
 
+def test_activate_refuses_a_huge_token(mx, monkeypatch):
+    monkeypatch.setattr(license, "_post", lambda *a, **k: {"ok": True, "token": "t" * (1 << 20), "license": {}})
+    with pytest.raises(license.LicenseError):
+        license.activate("HM-ABCD-EFGH-JKMN-PQRS")
+    assert not config.get_secret(license.KEY) and not config.get_secret(license.SEAT)
+
+
 def test_the_key_from_the_api(server, client):
     c = client
     assert c.get("/api/settings/license").json()["has_key"] is False
@@ -458,3 +465,59 @@ def test_activate_answers_without_license_or_with_odd_servers_end_cleanly(server
     assert run_cli("license", "activate", "HM-ABCD-EFGH-JKMN-PQRS") == 1
     out = capsys.readouterr().out
     assert "already on 1 server" in out and "old-vps" in out
+
+
+def test_a_license_key_that_is_not_text_does_not_break_the_page(mx, client):
+    config.set_secrets({license.KEY: 12345})
+    r = client.get("/api/settings/license")
+    assert r.status_code == 200 and r.json()["has_key"] is False and r.json()["key_hint"] == ""
+
+
+@pytest.mark.parametrize("section", ["x", [], 3])
+def test_a_damaged_license_section_keeps_the_page_the_removal_and_the_activation(mx, client, monkeypatch, capsys,
+                                                                                 section):
+    config.update_config(license=section)
+    assert config.load_config()["license"] == section
+    assert client.get("/api/settings/license").status_code == 200
+    assert run_cli("license", "status") == 0
+    assert client.delete("/api/settings/license").status_code == 200
+    config.update_config(license=section)
+    monkeypatch.setattr(license, "_post", lambda *a, **k: {"ok": True, "token": "tok", "license": {"kind": "paid"}})
+    license.activate("HM-ABCD-EFGH-JKMN-PQRS")
+    assert config.load_config()["license"]["kind"] == "paid"
+
+
+def test_an_activation_token_that_is_not_utf8_leaves_no_key(mx, monkeypatch):
+    monkeypatch.setattr(license, "_post", lambda *a, **k: {"ok": True, "token": "tok\ud800", "license": {}})
+    with pytest.raises(license.LicenseError):
+        license.activate("HM-ABCD-EFGH-JKMN-PQRS")
+    assert not config.get_secret(license.KEY) and not config.get_secret(license.SEAT)
+
+
+@pytest.mark.parametrize("bad", ["abc", [1], {"a": 1}, "nan", 1e999])
+def test_a_damaged_move_tried_at_does_not_break_the_move_check(mx, bad):
+    config.update_config(license={"move_tried_at": bad})
+    assert license.move_due() is True                                # as if never tried
+
+
+def test_the_ping_loop_survives_a_failing_move_check(mx, monkeypatch):
+    from maxxing import register
+    from maxxing.api import system
+    beats: list = []
+    sleeps: list = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > 3:
+            raise asyncio.CancelledError
+
+    def boom():
+        raise ValueError("bad move_tried_at")
+    monkeypatch.setattr(system.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(license, "enabled", lambda: True)
+    monkeypatch.setattr(license, "move_due", boom)
+    monkeypatch.setattr(register, "heartbeat_due", lambda: True)
+    monkeypatch.setattr(register, "heartbeat", lambda: beats.append(1))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(system._ping_loop())
+    assert len(beats) == 3                                           # one heartbeat per hour, the loop goes on

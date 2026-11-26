@@ -51,7 +51,7 @@ function meters() {
   return { cpu: 65.5 + 30.5 * wave(30), memAvail: 8e9 * (1 - (0.58 + 0.12 * wave(47, 1))), five: 69 + 29 * wave(40, 2), week: 47 + 4 * wave(90) }
 }
 const MOCK_ALL = process.env.MOCK_FEATURES === 'all'
-const PAGE_FLAGS = ['agents_page', 'mail_page', 'infra_page', 'team_page', 'tasks_page', 'git_page']
+const PAGE_FLAGS = ['agents_page', 'mail_page', 'infra_page', 'team_page', 'tasks_page', 'git_page', 'jarvis_feature']
 
 /* =================================================================== helpers */
 const now = () => Date.now() / 1000
@@ -728,7 +728,7 @@ function startTurn(s, text, attachments = [], cid = '') {
   if (s.plan_ready) s.plan_ready = false
   // Maxxing scenario: turns of 8 to 35 s, so several sessions finish while the user types
   const k = S.scenario === 'maxxing' ? (8000 + Math.random() * 27000) / 3400 : 1
-  addEvents(s, { type: 'user', text, attachments, at: now(), source: 'web', ...(cid ? { client_ids: [cid] } : {}) }, { type: 'init', model, cwd, at: now(), ...(s.mockAgent ? { same: true } : {}) })   // its background agent runs on
+  addEvents(s, { type: 'user', text, attachments, at: now(), source: 'web', ...(cid?.length ? { client_ids: Array.isArray(cid) ? cid : [cid] } : {}) }, { type: 'init', model, cwd, at: now(), ...(s.mockAgent ? { same: true } : {}) })   // its background agent runs on
   bus('sessions', 'workspace')
   const tu = `toolu_${crypto.randomBytes(6).toString('hex')}`
   later(s, 700 * k, () => addEvents(s, { type: 'thinking', text: `Let me look at the files in this topic before answering: "${text.slice(0, 80)}"`, at: now() }))
@@ -1186,6 +1186,51 @@ R('POST', '/api/auth/password', ({ body }) => {
 
 /* ---- onboarding */
 R('GET', '/api/onboarding', () => onboardingObj())
+// Installed themes (Settings -> Appearance): two examples, as the server sends them once checked (themes.py).
+const MOCK_THEMES = [
+  { id: 'nord', name: 'Nord', description: { en: 'Arctic blues, calm and cold.', fr: 'Bleus arctiques, calmes et froids.' }, author: 'acme', version: '1.0.0', homepage: '', base: 'solid', modes: ['light', 'dark'],
+    light: { sidebar: '#e5e9f0', list: '#eceff4', background: '#f4f6f9', card: '#ffffff', popover: '#ffffff', foreground: '#2e3440', 'muted-foreground': '#4c566a', primary: '#5e81ac', 'primary-foreground': '#ffffff', border: '#d8dee9', radius: '0.4rem' },
+    dark: { sidebar: '#242933', list: '#2b303b', background: '#2e3440', card: '#3b4252', popover: '#3b4252', foreground: '#eceff4', 'muted-foreground': '#a3acbd', primary: '#88c0d0', 'primary-foreground': '#2e3440', border: '#434c5e', radius: '0.4rem' },
+    options: { font: 'plex', mono: 'jetbrains' }, own_accent: true, own_surfaces: true, wallpaper: { light: null, dark: null }, logo: { light: '/api/themes/nord/file/logo.png', dark: '/api/themes/nord/file/logo.png' }, preview: null, css: '& aside { border-right: 3px solid var(--primary) }', css_state: 'on', warnings: [] },
+  { id: 'sunset', name: 'Sunset glass', description: 'Warm glass over an orange and violet sky.', author: 'acme', version: '1.0.0', homepage: '', base: 'glass', modes: ['dark'],
+    light: {}, dark: { 'wall-a': 'oklch(0.7 0.19 45 / 0.55)', 'wall-b': 'oklch(0.55 0.22 320 / 0.5)', primary: 'oklch(0.75 0.17 55)', 'primary-foreground': 'oklch(0.2 0.03 55)', radius: '1rem' },
+    options: { font: 'outfit' }, own_accent: true, own_surfaces: false, wallpaper: { light: null, dark: null }, logo: { light: null, dark: null }, preview: null,
+    css: '& .rounded-xl { box-shadow: 0 0 0 1px oklch(0.75 0.17 55 / 0.25) }', css_state: 'stale', warnings: [] },
+]
+R('GET', '/api/themes', () => ({ themes: MOCK_THEMES, errors: [] }))
+/* ---- getting-started guide (guide.py): cards "written" 1.5 s after they are asked */
+const GUIDE = { file: null }
+const GUIDE_WRITES = new Set(['welcome', 'first-prompt', 'memory', 'agents', 'agents-sessions', 'crons', 'tasks', 'code', 'sites', 'mail', 'content', 'final'])
+const guideState = () => {
+  const d = GUIDE.file || {}
+  return { offer: !GUIDE.file, status: d.status ?? null, level: d.level ?? null, mode: d.mode ?? null, uses: d.uses || [], steps: d.steps || [], index: d.index || 0, done: d.done || [], tried: d.tried || {}, cards: d.cards || {} }
+}
+R('GET', '/api/guide', ({ q }) => ({ ...guideState(), ...(q.get('context') ? { context: { case: 'new', imported: false, topics: 2, sessions: 3, agents: 0, crons: 1, telegram: false, backup: false, pages: {}, recommended: ['automate', 'phone', 'content'], default_topic: 'projects/general/topics/inbox' } } : {}) }))
+R('PUT', '/api/guide', ({ body }) => {
+  const d = (GUIDE.file ||= {})
+  for (const k of ['status', 'level', 'mode', 'uses', 'steps', 'index', 'done']) if (body[k] !== undefined) d[k] = body[k]
+  if (body.tried) (d.tried ||= {})[body.tried.step] = { label: body.tried.label, topic: body.tried.topic }
+  d.status ||= 'dismissed'
+  return guideState()
+})
+R('POST', '/api/guide/cards', ({ body }) => {
+  const d = (GUIDE.file ||= { status: 'dismissed' })
+  const cards = (d.cards ||= {})
+  for (const s of body.steps || []) {
+    if (!GUIDE_WRITES.has(s) || (!body.force && cards[s] && cards[s].status !== 'failed')) continue
+    cards[s] = { status: 'pending', at: Date.now() }
+    setTimeout(() => {
+      cards[s] = s === 'welcome'
+        ? { status: 'ready', intro: 'Bonjour ! Votre installation est toute neuve : on part de zéro, avec vos premiers projets.', prompts: [], at: Date.now() }
+        : { status: 'ready', intro: `Après l'étape précédente, voici ${s} appliqué à votre projet Blog.`, prompts: [
+            { label: 'Un premier fichier utile', text: `Écris dans ce sujet un fichier plan-${s}.md : 5 idées d'articles pour mon blog, une ligne chacune.`, topic: 'projects/general/topics/inbox' },
+            ...(d.level === 'intermediate' ? [{ label: 'Plus loin', text: 'Puis propose un calendrier de publication sur 4 semaines.', topic: 'projects/general/topics/inbox' }] : []),
+          ], at: Date.now() }
+    }, 1500)
+  }
+  return guideState()
+})
+R('POST', '/api/guide/reset', () => { GUIDE.file = { status: 'dismissed' }; return guideState() })
 R('POST', '/api/onboarding/complete', () => { S.onboarding_completed = true; return { ok: true } })
 
 /* ---- claude */
@@ -1345,6 +1390,9 @@ R('POST', '/api/sessions/open', ({ body }) => {
   bus('open_sessions')
   return openShared
 })
+// the phones that get the notifications (webpush.py): one, so the per-session switch shows
+const PUSH_DEVICES = [{ id: 'demo-phone', label: 'Chrome · Android', at: Date.now() / 1000 - 86400 }]
+R('GET', '/api/push/devices', () => PUSH_DEVICES)
 R('GET', '/api/sessions', ({ q }) => {
   const pth = q.get('path')
   const arch = q.get('archived') === '1'
@@ -1355,7 +1403,8 @@ R('POST', '/api/sessions', ({ body }) => {
   const t = now()
   const msg = (body.message || '').trim()
   const s = { id: uuid(), title: body.title || (msg ? msg.slice(0, 60) : 'New session'), path: body.path, state: 'idle', queue: 0, created: t, updated: t, turns: 0, cost_usd: 0,
-    model: body.model || '', real_model: null, context_tokens: null, context_window: null, archived: false, notify: false, source: 'web', unread: false, last_text: '', error: null }
+    model: body.model || '', real_model: null, context_tokens: null, context_window: null, archived: false, notify: false, source: 'web', unread: false, last_text: '', error: null,
+    push: body.push !== false, favorite: false }
   S.sessions.push(s); S.events[s.id] = []
   if (msg) startTurn(s, msg, body.attachments || [])
   bus('sessions', 'workspace')
@@ -1364,7 +1413,7 @@ R('POST', '/api/sessions', ({ body }) => {
 R('GET', '/api/sessions/:id', ({ params }) => findSession(params.id))
 R('PATCH', '/api/sessions/:id', ({ params, body }) => {
   const s = findSession(params.id)
-  for (const k of ['title', 'model', 'archived', 'notify', 'plan_mode']) if (body[k] !== undefined) s[k] = body[k]
+  for (const k of ['title', 'model', 'archived', 'notify', 'plan_mode', 'push', 'favorite', 'effort']) if (body[k] !== undefined && body[k] !== null) s[k] = body[k]
   if (body.plan_mode === false) s.plan_ready = false
   if (body.archived === true) addEvents(s, { type: 'note', text: 'Session archived.', level: 'info', at: now() })
   bus('sessions', 'workspace')
@@ -1389,6 +1438,16 @@ R('POST', '/api/sessions/:id/messages', ({ params, body }) => {
     bus('sessions')
     pushEvents(s.id, [])
     return { queued: true, session: s }
+  }
+  // MOCK_HOLD_MS: an idle session holds what is sent (as behind a summary), then starts ONE turn with all of it merged
+  if (process.env.MOCK_HOLD_MS) {
+    const h = (S.held ||= {})[s.id] ||= { items: [] }
+    h.items.push({ text, attachments: body.attachments || [], cid: body.client_id })
+    if (!h.timer) h.timer = setTimeout(() => {
+      delete S.held[s.id]
+      startTurn(s, h.items.map((x) => x.text).join('\n\n'), h.items.flatMap((x) => x.attachments), h.items.map((x) => x.cid).filter(Boolean))
+    }, Number(process.env.MOCK_HOLD_MS))
+    return { queued: false, session: s }
   }
   startTurn(s, text, body.attachments || [], body.client_id)
   return { queued: false, session: s }
@@ -1973,6 +2032,31 @@ function mockAgents() {
       { last_run: { id: 'm3', at: t - 20 * HOUR, kind: 'result', text: 'Two keywords moved into the top 3: "speed up checkout" and "cart abandonment".', ok: true } }),
   ]
 }
+/* ---- Jarvis (/jarvis, MOCK_FEATURES=all): its conversation (a session of jarvis/main) and its work board */
+const JARVIS_PATH = 'projects/jarvis/topics/main'
+let jarvisSid = ''
+function jarvisStatus() {
+  let s = jarvisSid && S.sessions.find((x) => x.id === jarvisSid)
+  if (!s && S.settings.jarvis_feature) {
+    const t = now()
+    s = { id: uuid(), title: 'Jarvis', path: JARVIS_PATH, state: 'idle', queue: 0, created: t, updated: t, turns: 0, cost_usd: 0, model: '', real_model: null,
+      context_tokens: null, context_window: null, archived: false, notify: false, source: 'web', unread: false, last_text: '', error: null }
+    S.sessions.push(s); S.events[s.id] = []; jarvisSid = s.id
+    if (process.env.MOCK_JARVIS_EVENTS) S.events[s.id] = JSON.parse(fs.readFileSync(process.env.MOCK_JARVIS_EVENTS, 'utf8')).events // a real conversation, for layout checks
+  }
+  const t = now()
+  const live = S.sessions.filter((x) => x.state === 'running' && x.id !== jarvisSid).slice(0, 3)
+  const work = live.map((x, i) => ({ id: 40 + i, session: x.id, path: x.path, title: x.title, brief: '', state: 'running', created: t - 600, updated: t - 60 * (i + 1), result: '', cost: 0.2, question: false, turns: 1 }))
+  work.push({ id: 31, session: S.sessions[0]?.id || '', path: 'projects/acme/topics/blog', title: 'Relire le brouillon', brief: '', state: 'replied', created: t - 7200, updated: t - 3600, result: 'Brouillon relu, 3 corrections.', cost: 0.4, question: true, turns: 2 })
+  return { on: !!S.settings.jarvis_feature, path: JARVIS_PATH, session: s || null,
+    settings: { model: '', dream_model: '', root: false, ask_first: true, internals: false, daily: false, reuse: true, archive_done: false, brief: '08:00', dream: '03:00', telegram: 'important', compact_tokens: 0 },
+    last_brief: '', last_dream: '', work, open: work.length, asks: 1, conversations: [] }
+}
+R('GET', '/api/jarvis', () => jarvisStatus())
+R('POST', '/api/jarvis/open', () => jarvisStatus())
+R('POST', '/api/jarvis/new', () => { jarvisSid = ''; return jarvisStatus() })
+R('PUT', '/api/jarvis/settings', () => jarvisStatus())
+R('POST', '/api/jarvis/work/:id/close', () => jarvisStatus())
 R('GET', '/api/agents', () => ({ agents: mockAgents(), avatar: {} }))
 R('GET', '/api/agents/layout', () => ({ projects: [], colors: {}, agents: {} }))
 // MOCK_FEATURES=all: three chats (a DM with unread messages, a quiet DM, a group) for the Team bubbles.

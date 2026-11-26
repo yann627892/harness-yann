@@ -95,6 +95,39 @@ def test_the_proxy_refuses_local_answers_and_raw_addresses(tmp_path, monkeypatch
     asyncio.run(go())
 
 
+def test_a_one_way_stream_is_not_closed_as_idle(tmp_path, monkeypatch):
+    """A download (or a server-sent stream) where only the site talks: the tunnel stays open while bytes flow
+    one way, and closes only once nothing moved either way for IDLE_TIMEOUT."""
+    import socket
+    from maxxing.browser import proxy
+
+    monkeypatch.setattr(proxy, "IDLE_TIMEOUT", 0.4)
+
+    async def go():
+        px = proxy.Proxy(tmp_path / "p.sock")
+        a1, a2 = socket.socketpair()                  # browser side: a1 = the browser, a2 = the proxy's end
+        b1, b2 = socket.socketpair()                  # site side: b1 = the site, b2 = the proxy's end
+        br, bw = await asyncio.open_connection(sock=a1)
+        pr, pw = await asyncio.open_connection(sock=a2)
+        ur, uw = await asyncio.open_connection(sock=b2)
+        sr, sw = await asyncio.open_connection(sock=b1)
+        last = [time.monotonic()]
+        tunnel = asyncio.gather(px._pipe(pr, uw, True, last), px._pipe(ur, pw, False, last))
+        for _ in range(6):                            # 1.2 s of the site talking, the browser silent
+            sw.write(b"x")
+            await sw.drain()
+            await asyncio.sleep(0.2)
+        got = b""
+        while len(got) < 6:
+            got += await asyncio.wait_for(br.read(10), 1)
+        assert got == b"xxxxxx"
+        await asyncio.wait_for(tunnel, 2)            # then quiet both ways: closed
+        assert await asyncio.wait_for(br.read(10), 1) == b""
+        for w in (bw, sw):
+            w.close()
+    asyncio.run(go())
+
+
 def test_the_proxy_tries_ipv4_first_then_the_next_address(tmp_path, monkeypatch):
     """A site with an IPv6 address first (Wikipedia) opened through a phone exit with no IPv6 way out: IPv4 is tried
     first, and an address that fails gives way to the next one instead of failing the page."""
@@ -1661,3 +1694,136 @@ def test_a_request_file_is_parsed_again_only_when_it_changes(mx, monkeypatch):
     assert len(reads) == 1
     f.write_text(json.dumps({"id": "a1b2c3d4e5f60718", "status": "done", "at": 1.0}))
     assert not asks.pending() and len(reads) == 2
+
+
+def test_a_sessions_tabs_sleep_when_its_turn_ends(mx):
+    """A page left running by a turn (a 3D render) does not keep the CPU busy: the session's tabs sleep once its turn
+    ended TURN_END_SLEEP ago, the person's and those of a navigator someone watches stay awake."""
+    p, b = _browser()
+    closed = []
+
+    class FakeWatcher:
+        def watched(self, nav=None):
+            return nav == "session:s2"
+
+        async def close_tab(self, target, sleep=False):
+            closed.append((target, sleep))
+            b.tabs.gone(target, keep=sleep)
+    b.watcher = FakeWatcher()
+    for target, by, nav in (("t1", {"kind": "session", "sid": "s1"}, "session:s1"), ("t2", {"kind": "you"}, "me"),
+                            ("t3", {"kind": "session", "sid": "s2"}, "session:s2")):
+        b.tabs.resolve({"targetId": target, "type": "page", "url": "https://a.example/"})
+        b.tabs.assign(target, by, nav)
+
+    async def run():
+        assert [await p._sleep_turn_tabs(b, nav) for nav in ("session:s1", "me", "session:s2")] == [True, True, False]
+    asyncio.run(run())
+    assert closed == [("t1", True)]
+    assert [t["nav"] for t in b.tabs.asleep()] == ["session:s1"]
+
+
+def test_a_sessions_tabs_stay_awake_while_its_next_turn_runs(mx, monkeypatch):
+    """Turn 2 started before TURN_END_SLEEP and has not called the browser yet: its pages may be in use."""
+    from maxxing.sessions import store
+    p, b = _browser()
+    closed = []
+
+    class FakeWatcher:
+        def watched(self, nav=None):
+            return False
+
+        async def close_tab(self, target, sleep=False):
+            closed.append(target)
+    b.watcher = FakeWatcher()
+    b.tabs.resolve({"targetId": "t1", "type": "page", "url": "https://a.example/"})
+    b.tabs.assign("t1", {"kind": "session", "sid": "s1"}, "session:s1")
+    monkeypatch.setattr(store, "read", lambda sid: {"id": sid, "state": "running"} if sid == "s1" else None)
+    assert asyncio.run(p._sleep_turn_tabs(b, "session:s1")) is False and closed == []
+    monkeypatch.setattr(store, "read", lambda sid: {"id": sid, "state": "idle"})
+    assert asyncio.run(p._sleep_turn_tabs(b, "session:s1")) is True and closed == ["t1"]
+
+
+def test_a_damaged_journal_line_never_breaks_the_profile_page(mx):
+    from maxxing import browser
+    from maxxing.browser import replays
+    d = browser.actions_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    ok = json.dumps({"at": 1, "tool": "click", "session": "sess01", "nav": "session:sess01", "args": [1]})
+    (d / "main.jsonl").write_bytes(ok.encode() + b'\n{"at": 2, "tool": "x\xc3\n[1, 2]\n"text"\n')   # a torn character, not objects
+    assert [e["at"] for e in replays.actions("main", 30)] == [1]
+    assert [r["session"] for r in replays.sessions("main")] == ["sess01"]
+    (d / "main.jsonl").write_bytes(b'{"at": 0, "tool": "x\xc3\n' + (ok + "\n").encode() * 3000)    # big: compacted
+    replays.log_action("main", {"at": 3, "tool": "click"})                                       # never raises
+    assert replays.actions("main", 1)[0]["at"] == 3
+
+
+def test_concurrent_journal_writes_lose_no_line_and_stay_small(mx):
+    import threading
+    from maxxing import browser
+    from maxxing.browser import replays
+    pad = "u" * 900                                     # long lines: 500 of them stay above the size limit
+    for i in range(700):
+        replays.log_action("main", {"at": i, "tool": "click", "page": pad})
+    marks: list[str] = []
+
+    def write(k):
+        for j in range(150):
+            marks.append(f"m{k}x{j}")
+            replays.log_action("main", {"at": j, "tool": "click", "session": marks[-1], "page": pad})
+    ts = [threading.Thread(target=write, args=(k,)) for k in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    f = browser.actions_dir() / "main.jsonl"
+    lines = f.read_text().splitlines()
+    got = {json.loads(ln).get("session") for ln in lines}          # every line whole
+    assert not [m for m in marks[-100:] if m not in got]
+    assert f.stat().st_size <= 400_000 and not list(f.parent.glob("*.tmp"))
+
+
+def test_a_reused_command_id_never_lets_the_list_of_tabs_out_unfiltered():
+    import asyncio
+    from maxxing.browser.view import View
+    navs = {"mine": "A", "other": "B"}
+    v = View("A", lambda info: navs.get(str(info.get("targetId"))))
+    assert v.outgoing({"id": 7, "method": "Target.getTargets"}) is None
+    assert v.outgoing({"id": 7, "method": "Target.attachToBrowserTarget"})        # refused: 7 still awaited
+    assert v.outgoing({"id": 7, "method": "Runtime.evaluate"})
+    assert v.outgoing({"id": "8", "method": "Target.getTargets"})                 # not a number: refused
+    answer = {"id": 7, "result": {"targetInfos": [{"targetId": "mine", "type": "page"}, {"targetId": "other", "type": "page"}]}}
+    out, _ = asyncio.run(v.incoming(answer))
+    assert [i["targetId"] for i in out["result"]["targetInfos"]] == ["mine"]
+    assert v.outgoing({"id": 7, "method": "Target.getTargets"}) is None           # answered: free again
+
+
+def test_network_events_never_carry_the_sites_cookies():
+    from maxxing.browser import relay
+    ev = {"method": "Network.requestWillBeSentExtraInfo", "sessionId": "s1", "params": {
+        "requestId": "1", "headers": {"Cookie": "SID=secret1", "Accept": "*/*"},
+        "associatedCookies": [{"blockedReasons": [], "cookie": {"name": "SID", "value": "secret1", "httpOnly": True}}]}}
+    out = json.loads(relay.no_cookies(json.dumps(ev)))
+    assert "secret1" not in json.dumps(out) and out["params"]["headers"] == {"Accept": "*/*"}
+    ev = {"method": "Network.responseReceivedExtraInfo", "params": {"requestId": "1", "headers": {"set-cookie": "SID=secret2"},
+                                                                     "headersText": "HTTP/1.1 200\r\nSet-Cookie: SID=secret2"}}
+    assert "secret2" not in relay.no_cookies(json.dumps(ev))
+    ev = {"method": "Fetch.requestPaused", "params": {"request": {"headers": {"cookie": "a=secret3"}},
+                                                       "responseHeaders": [{"name": "Set-Cookie", "value": "b=secret4"}]}}
+    assert "secret3" not in (t := relay.no_cookies(json.dumps(ev))) and "secret4" not in t
+    other = json.dumps({"method": "Page.frameNavigated", "params": {"frame": {"url": "https://a/?cookie=1"}}})
+    assert relay.no_cookies(other) == other
+
+
+def test_a_link_planted_in_place_of_the_uploads_folder_is_never_followed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from maxxing.browser import pool as pool_mod, unit
+    monkeypatch.delenv("MAXXING_BROWSER_LAUNCH", raising=False)
+    monkeypatch.setattr(unit, "user_ids", lambda: (os.geteuid(), os.getegid()))
+    run = tmp_path / "run" / "main"
+    run.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    os.chmod(victim, 0o755)
+    (run / "uploads").symlink_to(victim)                     # what the browser's user could do in its run folder
+    out = pool_mod.stage(SimpleNamespace(run=run), "a.txt", b"hello")
+    assert not list(victim.iterdir()) and (victim.stat().st_mode & 0o777) == 0o755
+    assert not (run / "uploads").is_symlink() and out.startswith("/mxrun/uploads/")
+    assert (run / "uploads" / out.split("/")[3] / "a.txt").read_bytes() == b"hello"

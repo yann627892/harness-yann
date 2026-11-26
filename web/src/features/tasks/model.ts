@@ -160,6 +160,7 @@ const WEEKDAYS: Record<string, number> = {
   sat: 6, saturday: 6, sam: 6, samedi: 6,
 }
 const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+const projectKey = (s: string) => norm(s).replace(/[-_\s]+/g, ' ').trim()
 
 function parseDue(word: string, today: string): string | undefined {
   const w = norm(word)
@@ -183,6 +184,9 @@ function parseDue(word: string, today: string): string | undefined {
 export function parseQuickAdd(input: string, projects: TaskProject[], today: string): QuickParse {
   const out: QuickParse = { title: '', labels: [] }
   const rest: string[] = []
+  // the project names normalized once per call, and each @word looked up once: a long pasted text stays fast
+  let keys: [TaskProject, string][] | null = null
+  const found = new Map<string, TaskProject | undefined>()
   for (const tok of input.split(/\s+/).filter(Boolean)) {
     if (/^!{1,3}$/.test(tok)) {
       out.priority = tok.length as TaskPriority
@@ -194,8 +198,13 @@ export function parseQuickAdd(input: string, projects: TaskProject[], today: str
       continue
     }
     if (/^@\S+$/.test(tok)) {
-      const want = norm(tok.slice(1)).replace(/[-_]+/g, ' ')
-      const p = projects.find((x) => norm(x.name) === want) || projects.find((x) => norm(x.name).startsWith(want))
+      // the same on both sides: "@harness-maxxing", "@harness_maxxing" and "@harness" find "harness-maxxing"
+      const want = projectKey(tok.slice(1))
+      if (!found.has(want)) {
+        keys ??= projects.map((x) => [x, projectKey(x.name)])
+        found.set(want, (keys.find(([, k]) => k === want) || keys.find(([, k]) => k.startsWith(want)))?.[0])
+      }
+      const p = found.get(want)
       if (p) {
         out.project_id = p.id
         out.projectName = p.name

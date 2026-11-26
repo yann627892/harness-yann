@@ -133,6 +133,40 @@ def test_resume_failure_falls_back_to_new_thread(client, topic, mx):
     assert argv[argv.index("--session-id") + 1] == meta["csid"]
 
 
+def test_a_thread_created_by_a_killed_turn_is_resumed(client, topic, mx):
+    """A turn killed (server restart) after Claude created its new thread but before Harness recorded it: the next
+    message resumes that thread instead of failing on "Session ID ... is already in use" forever."""
+    s = client.post("/api/sessions", json={"path": topic, "message": "start NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    store.update(s["id"], fresh=True)              # what the killed turn left: the thread exists, still "fresh"
+    client.post(f"/api/sessions/{s['id']}/messages", json={"text": "again NOTOOL"})
+    s2 = wait_idle(client, s["id"])
+    assert s2["state"] == "idle" and s2["error"] is None and s2["last_text"] == "Echo: again NOTOOL"
+    meta = store.read(s["id"])
+    assert meta["csid"] == s["id"] and meta["fresh"] is False
+    argv = calls(mx)[-1]["argv"]
+    assert argv[argv.index("--resume") + 1] == s["id"]
+
+
+def test_resuming_a_thread_of_a_killed_turn_frees_its_dead_process_claim(client, topic, mx, monkeypatch, tmp_path):
+    """The killed turn's process left its claim on the thread: it is freed before that resume, as on every resume."""
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    s = client.post("/api/sessions", json={"path": topic, "message": "start NOTOOL"}).json()
+    wait_idle(client, s["id"])
+    dead = _sp.Popen([_sys.executable, "-c", "pass"])
+    dead.wait()
+    claim = tmp_path / "cc" / "sessions" / f"{dead.pid}.json"
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    claim.write_text(_json.dumps({"pid": dead.pid, "sessionId": s["id"], "procStart": "1"}))
+    store.update(s["id"], fresh=True)
+    client.post(f"/api/sessions/{s['id']}/messages", json={"text": "again NOTOOL"})
+    assert wait_idle(client, s["id"])["error"] is None
+    assert not claim.exists()
+
+
 def test_attachments_and_uploads(client, topic, mx):
     r = client.post("/api/uploads", params={"path": topic},
                     files=[("file", ("a b.txt", b"hello", "text/plain")), ("file", ("a b.txt", b"x", "text/plain"))])
@@ -209,6 +243,13 @@ def test_suggestion_answers_are_parsed_tolerantly():
     assert suggest.parse("") == []
 
 
+def test_a_session_created_muted_never_rings_the_phones(client, topic):
+    s = client.post("/api/sessions", json={"path": topic, "message": "hi NOTOOL", "push": False}).json()
+    assert s["push"] is False
+    wait_idle(client, s["id"])
+    assert client.get(f"/api/sessions/{s['id']}").json()["push"] is False
+
+
 def test_search_patch_delete(client, topic):
     s = client.post("/api/sessions", json={"path": topic, "message": "find the zebra NOTOOL"}).json()
     wait_idle(client, s["id"])
@@ -224,6 +265,9 @@ def test_search_patch_delete(client, topic):
     assert fav["favorite"] is True and fav["title"] == "Renamed"          # other fields untouched
     assert client.get(f"/api/sessions/{s['id']}").json()["favorite"] is True
     assert client.patch(f"/api/sessions/{s['id']}", json={"favorite": False}).json()["favorite"] is False
+    assert p["push"] is True                                         # rings the phones unless muted
+    assert client.patch(f"/api/sessions/{s['id']}", json={"push": False}).json()["push"] is False
+    assert client.get(f"/api/sessions/{s['id']}").json()["push"] is False
     assert client.get("/api/sessions", params={"archived": 0}).json() == []
     assert len(client.get("/api/sessions", params={"archived": 1}).json()) == 1
     tp = next(t for p in client.get("/api/workspace/tree").json()["projects"] for t in p["topics"] if t["path"] == topic)
@@ -1029,3 +1073,15 @@ def test_the_mode_and_the_session_in_front_follow_the_last_device(client):
     assert client.post("/api/sessions/open", json={"open": ["c"]}).json()["tabs"] is False  # kept by other changes
     assert client.post("/api/sessions/open", json={"tabs": True, "front": "bad id!"}).json()["front"] == "b"
     assert client.get("/api/sessions/open").json() == {"ids": ["a", "b", "c"], "rev": 4, "tabs": True, "front": "b"}
+
+
+def test_a_damaged_or_removed_open_sessions_file_never_takes_the_rev_back(client):
+    from maxxing.sessions import opened
+    for x in "abcde":
+        r = client.post("/api/sessions/open", json={"open": [x]}).json()
+    assert r["rev"] == 5
+    opened._file().write_text('{"ids": ["a", ')                 # truncated
+    r = client.post("/api/sessions/open", json={"open": ["f"]}).json()
+    assert r["ids"] == ["f"] and r["rev"] > 5
+    opened._file().unlink()
+    assert client.post("/api/sessions/open", json={"open": ["g"]}).json()["rev"] > r["rev"]

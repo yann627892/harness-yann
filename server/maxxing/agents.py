@@ -38,6 +38,7 @@ import shutil
 import stat
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -56,19 +57,33 @@ MAX_PER_TOPIC = 20
 # `color` = its outfit, one of the UI accent colours; a new agent wears its project's (project_color).
 AVATAR = {
     "color": ("blue", "clay", "violet", "green", "amber", "rose"),
-    "skin": ("light", "tan", "brown", "dark"),
-    "hair": ("none", "short", "spiky", "long", "curly", "bun"),
+    "skin": ("light", "tan", "brown", "dark", "olive"),
+    "hair": ("none", "short", "spiky", "long", "curly", "bun", "afro", "ponytail", "mohawk", "buzz", "bobcut", "braids", "pigtails", "spacebuns", "swept", "frog", "bigbrain", "chad"),
     "hair_color": ("black", "brown", "blond", "red", "white"),
-    "face": ("smile", "happy", "focused", "sleepy", "wink", "surprised"),
+    "face": ("smile", "happy", "focused", "sleepy", "wink", "surprised", "grin", "cheeky", "calm"),
     "accessory": ("none", "glasses", "headphones", "cap", "crown", "antenna"),
 }
+# Special characters, chosen as a hair style (they replace the whole head): never picked at random.
+SPECIAL_HAIR = ("frog", "bigbrain", "chad")
+# Random characters (cmd_agents, the UI's randomAvatar): 4 in 5 have a matte or lightly matte skin.
+MATTE_SKINS = ("olive", "tan")
+MATTE_SHARE = 0.8
+
+
+def random_skin() -> str:
+    import random
+    if random.random() < MATTE_SHARE:
+        return random.choice(MATTE_SKINS)
+    return random.choice([s for s in AVATAR["skin"] if s not in MATTE_SKINS])
+
+
 DEFAULT_AVATAR = {"color": "blue", "skin": "light", "hair": "short", "hair_color": "brown", "face": "smile",
                   "accessory": "none"}
 # Characters saved by the first drawings (before 04/11, never released): what each old value becomes.
 _OLD_AVATAR = {
     "color": {"teal": "green", "orange": "clay", "slate": "blue"},
     "skin": {"fair": "light"},
-    "hair": {"bob": "long", "mohawk": "spiky", "side": "short"},
+    "hair": {"bob": "long", "side": "short"},
     "face": {"dots": "smile", "happy": "happy", "wide": "surprised", "sleepy": "sleepy", "wink": "wink"},
     "accessory": {"antenna": "antenna", "cap": "cap", "beanie": "cap", "crown": "crown", "headphones": "headphones"},
 }
@@ -313,6 +328,7 @@ def _clean_avatar(a: Any, seed: str = "") -> dict:
         v = a.get(k) if k in a else old.get(k)
         v = v if v in opts else (_OLD_AVATAR.get(k, {}).get(v) if isinstance(v, str) else None)
         if v is None and seed:
+            opts = tuple(o for o in opts if o not in SPECIAL_HAIR)
             v = opts[int(hashlib.sha1(f"{seed}:{k}".encode()).hexdigest(), 16) % len(opts)]
         out[k] = v or DEFAULT_AVATAR[k]
     return out
@@ -504,6 +520,14 @@ def checked_attachments(base: Path, files: list[str] | None) -> list[str]:
     return out
 
 
+def one_line(v: Any, n: int) -> str:
+    """A name shown on pages and written into prompts, from a file that may come from elsewhere (an import): one
+    line, without control or format characters (bidi overrides, NUL, zero-width) - ZWJ and VS16 stay for emoji."""
+    t = "".join(c for c in _utf8(str(v or "")) if c.isspace() or c in "\u200d\ufe0f"
+                or unicodedata.category(c) not in ("Cc", "Cf"))   # a line break still becomes a space
+    return " ".join(t.split())[:n]
+
+
 def _utf8(s: str) -> str:
     """A lone surrogate (\\ud800 is valid JSON) as "?": UTF-8 cannot store it."""
     return s.encode("utf-8", "replace").decode("utf-8")
@@ -532,7 +556,7 @@ def clean(data: Any, strict: bool = False, own: str = "") -> dict:
     triggers = [x for x in (_clean_trigger(t, strict, own) for t in given[:MAX_TRIGGERS]) if x]
     if strict and isinstance(d.get("triggers"), list) and len(d["triggers"]) > MAX_TRIGGERS:
         raise AgentError(400, "too_many_triggers", f"At most {MAX_TRIGGERS} triggers")
-    name = " ".join(_utf8(str(d.get("name") or "")).split())[:60]
+    name = one_line(d.get("name"), 60)
     model, chat_model = _model(d.get("model"), strict), _model(d.get("chat_model"), strict)
     return {"version": 1, "name": name, "avatar": _clean_avatar(d.get("avatar"), name or "agent"),
             "enabled": d.get("enabled") is not False, "model": model, "permission_mode": mode,
@@ -1042,10 +1066,18 @@ def pending_changes(path: str) -> int:
         return 0
 
 
+_continue_mu = threading.Lock()  # two "Continue in Sessions" at once (double click, two tabs) must not make two copies
+
+
 def continue_in_sessions(path: str, sid: str) -> dict:
     """"Continue in Sessions": a copy of one run of the agent as a normal session of its topic - same history and the
     same Claude thread (forked: the run itself is not changed), no agent rules (the user's own permissions). A run
     continued already gives back its copy."""
+    with _continue_mu:                              # the check for a copy and its creation are one step
+        return _continue_in_sessions(path, sid)
+
+
+def _continue_in_sessions(path: str, sid: str) -> dict:
     from . import bus
     from .sessions import service, store
     src = store.read(sid) if store.is_valid_id(sid) else None
@@ -1072,6 +1104,10 @@ def continue_in_sessions(path: str, sid: str) -> dict:
         meta["thread_cost"] = dict(src["thread_cost"])
     if src.get("seed"):                             # the compaction summary still waiting for the next message
         meta["seed"] = src["seed"]
+    if src.get("push") is False:                    # a run muted on the phones stays muted (as a handoff does)
+        meta["push"] = False
+    if src.get("favorite"):
+        meta["favorite"] = True
     with suppress(OSError):
         shutil.copyfile(store.log_path(sid), store.log_path(meta["id"]))
     root = config.workspace()
@@ -1328,7 +1364,7 @@ def drop_hooks(ids: list[str]) -> None:
     """Deleted agents: their webhook URLs stop answering (a restored agent gets a new one: `agents webhook`)."""
     from . import feedhooks
     for hid in ids:
-        with suppress(Exception):                       # already removed in Settings -> Notifications
+        with suppress(Exception):                       # already removed in Settings -> Webhooks
             feedhooks.remove(hid)
 
 
@@ -1814,7 +1850,8 @@ def status(path: str, metas: list[dict] | None = None) -> dict:
     metas: the agent's session metas when the caller has them (list_agents: one pass for every agent)."""
     metas = _metas(path) if metas is None else metas
     msgs = thread(path, 500)
-    last = next((m for m in reversed(msgs) if m.get("kind") in ("result", "skip")), None)
+    last = next((m for m in reversed(msgs) if m.get("kind") in ("result", "skip")          # a line without a
+                 and isinstance(m.get("at"), (int, float)) and math.isfinite(m["at"])), None)  # valid date: skipped
     running = [m for m in metas if m.get("state") == "running"]
     seen = float(_read_state(path).get("seen_at") or 0)
     waiting = 0
@@ -2093,6 +2130,23 @@ CHAT_SOURCES = ("manual", "telegram")   # the owner typing (agent page, Telegram
 RUN_NOW_SOURCE = "run now"              # the Run now button: a run of the routine (not in CHAT_SOURCES)
 
 
+def run_sender(trigger: str, source: str) -> dict:
+    """Who started a run that is not the owner's own words (sessions.service.send_message `sender`): the kind of its
+    trigger (cron, feed, mail, group, another agent), `cli` for a script's `agents run`, else `manual` with the
+    name of what asked for it (the Run now button: no name)."""
+    kind, _, rest = (trigger or "").partition(":")
+    if kind in ("agent", "after") and rest:
+        p = parse(rest)
+        return {"kind": "agent", "title": (p[2] if p else rest), "path": rest}
+    if kind in ("cron", "feed", "mail", "group"):
+        return {"kind": kind}
+    if source == "command line":
+        return {"kind": "cli"}
+    if source in (RUN_NOW_SOURCE, "manual", "conversation") or not source:
+        return {"kind": "manual"}
+    return {"kind": "manual", "title": source}
+
+
 def _owner_chat(trigger: str, source: str, text: str) -> bool:
     """The owner's own words (no outside text): a message of the conversation, not a run of an automation."""
     return trigger in CONVERSATIONAL and source in CHAT_SOURCES and not text
@@ -2214,6 +2268,7 @@ def _fire(path: str, *, trigger: str, text: str, prompt: str, source: str, attac
           voice: str | None = None, call: str | None = None) -> dict:
     """waited: the id of the owner's message that waited (_owner_wait): its run message is already in the thread."""
     owner = _owner_chat(trigger, source, text)
+    sender = None if owner else run_sender(trigger, source)   # the card that shows who started it (runner._sender)
     voice = voice if owner else None                     # only the owner's own words are sent as a recording
     call = call if owner else None
     if depth > MAX_DEPTH:
@@ -2286,7 +2341,7 @@ def _fire(path: str, *, trigger: str, text: str, prompt: str, source: str, attac
 
     if sid:
         r = service.send_message(sid, message, attachments=attachments, source="agent", ref=ref, voice_path=voice,
-                                 call=call)
+                                 call=call, sender=sender)
         started(sid, chat and not reply_to, {"reply_to": reply_to} if reply_to else {}, {})
         return {"started": True, "continued": True, "session": r["session"]}
     outside, inherited = bool(text), False
@@ -2307,7 +2362,7 @@ def _fire(path: str, *, trigger: str, text: str, prompt: str, source: str, attac
                                attachments=attachments, source="agent", notify=False, cron=True, env=env,
                                timeout_s=run_timeout(a, timeout_s),
                                permission_mode=a["permission_mode"], ref=ref, voice_path=voice,
-                               effort=(effort if chat else None) or None, call=call)
+                               effort=(effort if chat else None) or None, call=call, sender=sender)
     started(s["id"], chat, {}, {"chat": "new"} if chat else {})
     return {"started": True, "session": s}
 
@@ -2661,6 +2716,9 @@ def on_turn_end(session: dict, result: dict | None) -> None:
             chain_after(path, text, ok, depth=_int(env.get("MAXXING_AGENT_DEPTH")))
         except Exception:  # noqa: BLE001
             log.exception("agent %s: agents after it", path)
+        from . import webhooks                          # the "agent" event hooks (no AI: Settings -> Events)
+        webhooks.emit("agent", {"agent": path, "ok": bool(ok), "text": (text or "")[:4000],
+                                "session": session.get("id"), "depth": _int(env.get("MAXXING_AGENT_DEPTH"))})
     if not group:
         try:
             _plan_limit_retry(path, session["id"], ok, text, str(session.get("error") or ""), env)
@@ -2786,7 +2844,8 @@ def retry_limits(now: float | None = None) -> int:
                              reason=reason, source="usage limit", session=sid)
                     continue
                 mid = _secrets.token_hex(6)
-                service.send_message(sid, LIMIT_RETRY_TEXT, source="agent", ref=f"agent-run:{mid}")
+                service.send_message(sid, LIMIT_RETRY_TEXT, source="agent", ref=f"agent-run:{mid}",
+                                     sender={"kind": "system"})
                 with _edit_state(path) as st:           # marked first: a failure below never sends it twice (paid)
                     st["limit_retry"] = {**e, "fired": True}
                 _limit_waiting.discard(path)

@@ -100,12 +100,12 @@ export function FeedbackDialog() {
       if (r && r.verdict !== 'send' && r.answer) { sending.current = false; setReply(r) }
       else await deliver(false)
     }
-    go().catch(() => { sending.current = false })
+    go().catch(() => { sending.current = false; setShotErr(true) })    // only reading the shot can throw here
   }
   const force = () => {
     if (busy || sending.current) return
     sending.current = true
-    deliver(true).catch(() => { sending.current = false })
+    deliver(true).catch(() => { sending.current = false; setShotErr(true) })
   }
   const openSession = () => {
     if (!reply || create.isPending) return
@@ -144,14 +144,12 @@ export function FeedbackDialog() {
               </details>
             )}
             {errText && <p className="text-sm text-destructive" role="alert">{errText}</p>}
-            <DialogFooter>
+            {shotErr && <p className="text-sm text-destructive" role="alert">{t('feedback.zoneFailed')}</p>}
+            <DialogFooter className="sm:flex-wrap">
               <Button type="button" variant="ghost" className="sm:mr-auto" onClick={() => { setReply(null); send.reset() }}>{t('feedback.reply.edit')}</Button>
-              <Button type="button" variant={reply.verdict === 'self' ? 'outline' : 'default'} onClick={() => setOpen(false)}>{t('common.close')}</Button>
-              <Button type="button" variant={reply.verdict === 'self' ? 'default' : 'outline'} disabled={create.isPending} onClick={openSession}>{create.isPending ? <Spinner /> : <MessageSquarePlus />}{t('feedback.reply.open')}</Button>
+              <Button type="button" variant="outline" disabled={send.isPending} onClick={force}>{send.isPending && <Spinner />}{t('feedback.reply.force')}</Button>
+              <Button type="button" disabled={create.isPending} onClick={openSession}>{create.isPending ? <Spinner /> : <MessageSquarePlus />}{t('feedback.reply.open')}</Button>
             </DialogFooter>
-            <button type="button" className="justify-self-center text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50" disabled={send.isPending} onClick={force}>
-              {send.isPending && <Spinner />} {t('feedback.reply.force')}
-            </button>
           </div>
         ) : (
           <form onSubmit={submit} className="grid gap-4" noValidate>
@@ -206,7 +204,7 @@ export function FeedbackDialog() {
             {errText && <p className="text-sm text-destructive" role="alert">{errText}</p>}
             {check.isPending && <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Spinner />{t('feedback.checking')}</p>}
             <DialogFooter className="items-center">
-              <span className="mr-auto text-xs text-muted-foreground">{defaults.data?.version ? t('feedback.sentWith', { version: defaults.data.version }) : ''}</span>
+              <span className="mr-auto text-xs text-muted-foreground">{defaults.data?.version ? (defaults.data.name ? t('feedback.sentWithName', { version: defaults.data.version, name: defaults.data.name }) : t('feedback.sentWith', { version: defaults.data.version })) : ''}</span>
               <Button type="button" variant="ghost" onClick={() => setOpen(false)}>{t('common.cancel')}</Button>
               <Button type="submit" disabled={busy}>{busy && <Spinner />}{t('feedback.send')}</Button>
             </DialogFooter>

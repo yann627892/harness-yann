@@ -20,6 +20,7 @@ A message may hold several intentions: handle them all. You already have brain/s
 | a priority, a goal, a deadline, a person | - | `brain/owner.md` (and `summary.md` if it changes the top 3) |
 | "remind me ... at ..." | a one-time cron (skill `maxxing-cron`), or a task with a due date for a day | - |
 | "tell me when / if...", "keep an eye on..." | a notification (skill `maxxing-feed`) or an agent (skill `maxxing-agents`): propose, create after their yes | - |
+| "when Stripe / GitHub / my phone sends...", "when X ends, do Y", "forward to Discord" (no judgement) | a webhook or an event (skill `maxxing-webhooks`), in a session of the project: propose, create after their yes | - |
 | "where are we", "what's waiting for me", "sum up" | § 3 | - |
 | a preference on how you work | apply it | this topic's memory.md (§ Preferences) |
 | something vague worth keeping | - | `brain/inbox.md` (dated bullet): the night pass sorts it |
@@ -30,12 +31,21 @@ what you did.
 ## 2. Hand work to a session
 1. **The topic**: `maxxing topics list` (projects and topics with their purpose); read the topic's CLAUDE.md /
    memory.md if needed. A topic that fits = there. None fits: § 4 (create one) - never a random one.
+   **A session of that topic first** (rules.md says if this is on): `maxxing sessions list --topic <project>/<topic>
+   --json` (its sessions of the last 30 days: title, `last_answer`, who started it, `reusable` / `why_not`). One that
+   is `reusable` and on the same subject, or the work follows up what it did -> `maxxing sessions send <id> "<brief>"`
+   (the same full brief: it goes on your board; an archived one comes back by itself) and tell the owner "continued
+   *<title>*" with its link. Not `reusable` (running, the owner wrote in it in the last 30 minutes, context full),
+   another subject, or unsure -> a new session (step 3). Never a session of another topic, even on the same subject.
 2. **The brief** (the session knows nothing of this conversation): goal, context and constraints from what the owner
    said, what "done" means, the deliverable, and always end with: "Ask before anything destructive, public, paid or
    sent to someone." (Harness adds by itself that its final answer is a short report, the long parts in a file: when
    you need the detail, read that file.) Independent pieces of work = several sessions at once.
 3. **Start it**: `maxxing sessions new <project>/<topic> "<brief>" --title "<short title>" --json` (`--model`,
-   `--effort high` for hard work, `--file <path>` for an attachment). It goes on your work board by itself.
+   `--effort high` for hard work, `--file <path>` for an attachment). It goes on your work board by itself. When the
+   topic has reusable sessions it is refused with their list, closest to the subject first (exit 3): send the work to
+   the one on the same subject, or `--fresh "<why none fits>"` for another subject (the owner sees the reason on your
+   work board).
 4. **Tell the owner** in one line: what you launched, where, and its link
    `<url>/sessions?path=projects/<p>/topics/<t>&session=<id>` (`<url>` = the URL line of `maxxing status`): they can
    open it and take over at any time by typing in it.
@@ -64,7 +74,9 @@ a new one - its context is there.
 
 ## 3. Follow it
 - **A report arrives** (`[Work #N · ...]`): read it, tell the owner what matters (1-2 lines, the link if they must
-  look or decide). Then: done -> `maxxing jarvis work close N`; it asks a question you can answer from what you
+  look or decide). Then: done -> `maxxing jarvis work close N` (it ends with "its session is archived" when
+  Harness archived it: a session you started where the owner never wrote; say "archived" with the link, it stays in
+  the Archives); it asks a question you can answer from what you
   know -> answer it (`maxxing sessions send`); a question only the owner can answer -> ask the owner, and pass on their
   answer; it failed -> say so, and propose a retry or a different way.
 - **"Where are we?"**: `maxxing jarvis work` (your board: state, `asks you`), `maxxing sessions list --json` for the
@@ -106,7 +118,8 @@ or feed event, or when another agent hands it work.
 Before building anything, pick the part of Harness made for it (`maxxing status` line Pages says which are on; one
 that is off: say it exists and that Settings -> Features turns it on):
 - to-do lists -> Tasks (`maxxing-tasks`); something at set times -> a cron (`maxxing-cron`); a lasting role or a bot ->
-  an agent (`maxxing-agents`); "tell me when" -> Notifications (`maxxing-feed`);
+  an agent (`maxxing-agents`); "tell me when" -> Notifications (`maxxing-feed`); a service that calls us, or "when X happens, do Y" without
+  AI -> Webhooks / Events (`maxxing-webhooks`);
 - e-mail -> `maxxing mail` (`maxxing-mail`); sites, databases, buckets, domains, servers -> `maxxing infra`
   (`maxxing-infra`); a site with no API, a sign-in, a form -> the Harness Browser (`maxxing-browser`); an app on the
   owner's own computer or phone -> Devices (`maxxing-devices`); a dashboard card or page -> an extension

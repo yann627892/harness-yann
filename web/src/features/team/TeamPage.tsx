@@ -34,14 +34,17 @@ export default function TeamPage() {
     const step = compact && !!id && !params.get('chat')
     setParams(id ? { chat: id } : {}, { replace: !step })
   }
+  // A chat that is not in the loaded list (left, deleted, an old link): the page keeps its header, title and menu
+  const known = !chatId || !team || team.chats.some((c) => c.id === chatId)
   const unread = unreadOf(team)
   const [query, setQuery] = React.useState('')
   const [newOpen, setNewOpen] = React.useState(false)
   const [addOpen, setAddOpen] = React.useState(false)
   useDocumentTitle(t('team.title'))
-  const newChat = (
+  // in the chat's header the labels go below 1280 px: the name of the chat keeps its room (Summarize, bubble next to it)
+  const newChat = (label = 'max-[429px]:sr-only') => (
     <Button size="sm" onClick={() => setNewOpen(true)} data-testid="team-new">
-      <SquarePen /> <span className="max-[429px]:sr-only">{t('team.new')}</span>
+      <SquarePen /> <span className={label}>{t('team.new')}</span>
     </Button>
   )
   // Bubbles on (desktop): the chat open leaves the page for a bubble, and you go back where you were.
@@ -56,16 +59,16 @@ export default function TeamPage() {
       {bubbles && (
         <Tooltip content={t('team.toBubbleHint')}>
           <Button size="sm" variant="outline" onClick={() => toBubble(id)} data-testid="team-to-bubble">
-            <PictureInPicture2 /> <span className="max-lg:sr-only">{t('team.toBubble')}</span>
+            <PictureInPicture2 /> <span className="max-xl:sr-only">{t('team.toBubble')}</span>
           </Button>
         </Tooltip>
       )}
-      {newChat}
+      {newChat('max-xl:sr-only')}
     </>
   )
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {(!chatId || (isError && !team)) && <PageHeader title={t('team.title')} description={unread ? t('team.unread', { count: unread }) : t('team.desc')} actions={newChat} />}
+      {(!chatId || !known || (isError && !team)) && <PageHeader title={t('team.title')} description={unread ? t('team.unread', { count: unread }) : t('team.desc')} actions={newChat()} />}
       {isError && !team ? (
         <div className="flex min-h-0 flex-1 items-center justify-center p-6">
           <LoadError title={t('team.loadError')} busy={isFetching} onRetry={() => refetch()} />

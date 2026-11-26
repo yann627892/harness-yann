@@ -57,7 +57,8 @@ def cloud(mx, monkeypatch):
 
 def test_feedback_is_sent_with_the_version_and_the_email_is_remembered(client, cloud):
     config.update_config(language="fr", profile={"name": "Romi"})
-    assert client.get("/api/settings/feedback").json()["email"] == ""
+    shown = client.get("/api/settings/feedback").json()
+    assert shown["email"] == "" and shown["name"] == "Romi"      # the window says the pseudo goes along
     r = client.post("/api/settings/feedback", json={"email": " me@x.io ", "type": "bug", "message": "The sidebar flickers"})
     assert r.status_code == 200, r.text
     sent = cloud.got[0]
@@ -297,6 +298,15 @@ def test_the_message_cannot_close_its_own_tag(client, mx, monkeypatch):
     assert call["prompt"].count("</feedback>") == 1 and call["prompt"].rstrip().endswith("</feedback>")
 
 
+def test_a_folder_name_that_is_not_utf8_does_not_skip_the_check(client, mx, monkeypatch):
+    from maxxing import feedback
+    monkeypatch.setenv("FAKE_CLAUDE_FEEDBACK", '{"verdict": "answer", "answer": "Yes."}')
+    monkeypatch.setattr(feedback, "_local_changes", lambda: ["Extensions installed by the user: caf\udce9"])
+    assert _check(client)["verdict"] == "answer"                               # Claude read the message
+    [call] = _check_calls(mx)
+    assert "installed by the user: caf?" in call["prompt"]
+
+
 def test_a_message_sent_anyway_says_so(client, cloud):
     from maxxing import feedback
     r = client.post("/api/settings/feedback", json={"email": "me@x.io", "type": "idea", "message": "Dark mode", "forced": True})
@@ -307,3 +317,37 @@ def test_a_message_sent_anyway_says_so(client, cloud):
     long = cloud.got[1]["message"]
     assert len(long) == 4000 and long.endswith(feedback.FORCED_NOTE)          # still within the cloud's limit
     assert set(cloud.got[0]) == {"email", "type", "message", "version", "lang", "name", "_ua"}
+
+
+def test_the_check_knows_what_this_installation_changed(client, mx, monkeypatch):
+    """A bug in a customization, an uncommitted change or the user's own extension is answered here; the check is
+    told what they are, so any other bug goes to the team."""
+    from maxxing import customs, extensions
+    monkeypatch.setattr(customs, "list_customs", lambda *a, **k: [{"title": "Sidebar wider", "files": ["web/src/x.tsx"]}])
+    monkeypatch.setattr(customs, "dirty_files", lambda: ["server/maxxing/y.py"])
+    (extensions.root() / "my-widget").mkdir(parents=True, exist_ok=True)
+    assert client.post("/api/settings/feedback/check", json={"type": "bug", "message": "the sidebar breaks"}).status_code == 200
+    [call] = _check_calls(mx)
+    head = call["prompt"].split("<feedback>")[0]
+    assert "Customizations of the product code: 1 - Sidebar wider" in head and "web/src/x.tsx" in head
+    assert "Uncommitted changes in the product code: server/maxxing/y.py" in head
+    assert "my-widget" in head
+
+
+def test_a_broken_customization_list_never_stops_the_check(client, mx, monkeypatch):
+    from maxxing import customs
+
+    def boom(*a, **k):
+        raise RuntimeError("no git")
+    monkeypatch.setattr(customs, "list_customs", boom)
+    assert client.post("/api/settings/feedback/check", json={"type": "bug", "message": "it breaks"}).status_code == 200
+    [call] = _check_calls(mx)
+    assert "Customizations of the product code: unknown" in call["prompt"]
+
+
+def test_a_profile_name_that_is_not_text_does_not_stop_the_message(client, cloud):
+    config.update_config(profile={"name": 42})
+    assert client.get("/api/settings/feedback").status_code == 200
+    r = client.post("/api/settings/feedback", json={"email": "me@x.io", "type": "bug", "message": "hello there"})
+    assert r.status_code == 200, r.text
+    assert cloud.got[0]["name"] == ""

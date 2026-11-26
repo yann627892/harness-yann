@@ -1,4 +1,4 @@
-"""Web Push (Settings -> Notifications -> Mobile notifications): the ES256 signature, the devices, the empty push and
+"""Web Push (Settings -> Alerts -> Mobile notifications): the ES256 signature, the devices, the empty push and
 what the service worker fetches afterwards."""
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def test_a_push_is_empty_and_the_worker_fetches_what_to_show(client, sent):
     assert len(sent) == 1 and sent[0]["endpoint"] == FCM
     assert sent[0]["headers"]["Authorization"].startswith("vapid t=") and sent[0]["headers"]["Content-Length"] == "0"
     items = client.post("/api/push/pending", json={"device": did}).json()["items"]
-    assert len(items) == 1 and items[0]["title"] and items[0]["url"] == "/settings/notifications"
+    assert len(items) == 1 and items[0]["title"] and items[0]["url"] == "/settings/alerts"
     assert client.post("/api/push/pending", json={"device": did}).json()["items"] == []     # fetched once
     assert client.post("/api/push/pending", json={"device": "nope"}).json()["items"] == []
 
@@ -130,7 +130,7 @@ def test_a_session_of_a_person_rings_and_a_job_does_not(sent, client):
     item = client.post("/api/push/pending", json={"device": webpush.device_id(FCM)}).json()["items"][0]
     assert item["tag"] == "mx-session-s1" and "Blog" in item["body"] and "Done" in item["body"]
     assert item["url"] == "/sessions?path=projects/acme/topics/blog&session=s1"
-    for other in ({"source": "cron"}, {"source": "agent"}, {"last_turn": {"kind": "user", "source": "telegram"}}, {"last_turn": {"kind": "system"}}):
+    for other in ({"source": "cron"}, {"source": "agent"}, {"last_turn": {"kind": "user", "source": "telegram"}}, {"last_turn": {"kind": "system"}}, {"push": False}):
         asyncio.run(api_push._turn_end({**mine, **other}, None))
     assert len(sent) == 1
 
@@ -173,3 +173,16 @@ def test_an_unusable_key_or_device_list_is_replaced_and_kept(mx, bad):
     webpush.add_device(FCM)
     assert list(f.parent.glob("webpush.json.damaged-*"))
     assert len(webpush.devices()) == 1
+
+
+def test_a_hand_edited_registration_time_does_not_break_the_devices(client):
+    """A device whose `at` is text (webpush.json edited by hand) must not stop the list nor the phone notifications."""
+    a = webpush.add_device("https://fcm.googleapis.com/fcm/send/a", "Phone")
+    webpush.add_device("https://fcm.googleapis.com/fcm/send/b", "Tablet")
+    f = Path(webpush._path())
+    st = json.loads(f.read_text())
+    st["devices"][a["id"]]["at"] = "x"
+    f.write_text(json.dumps(st))
+    assert [d["label"] for d in webpush.devices()] == ["Phone", "Tablet"]
+    r = client.get("/api/push/devices")
+    assert r.status_code == 200 and len(r.json()) == 2

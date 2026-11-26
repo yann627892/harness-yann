@@ -49,6 +49,7 @@ def _never_the_real_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(cleanup, "_sh", lambda cmd, timeout=120, **_: "")    # never vacuum the real journal / apt cache
     monkeypatch.setattr(cleanup, "APT_CACHE", fake / "apt-archives")
     monkeypatch.setattr(cleanup, "JOURNAL_DIRS", (fake / "journal",))     # never read the real journal
+    monkeypatch.setattr(cleanup, "_last", {"at": 0.0, "parts": None})   # a scan of another test's disk
     monkeypatch.setattr(cpu, "SLICE_DIR", fake / "systemd-system")      # the CPU priority slices (uninstall removes them)
     monkeypatch.setattr(deps, "LINK_DIR", fake / "usr-local-bin")
     monkeypatch.setattr(deps, "root_home", lambda: fake / "root-home")
@@ -60,9 +61,10 @@ def _never_the_real_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.fixture(autouse=True)
 def _fresh_caches() -> Iterator[None]:
     """Short-lived in-process caches (services, trash size, version) never leak between tests."""
-    from maxxing import health, trash, widgets
+    from maxxing import health, stats, trash, widgets
     from maxxing.api import system as system_api
-    drops = (health.invalidate_services, trash.invalidate_sizes, system_api.invalidate_version, widgets.invalidate_cards)
+    drops = (health.invalidate_services, trash.invalidate_sizes, system_api.invalidate_version, widgets.invalidate_cards,
+             stats.invalidate)
     for drop in drops:
         drop()
     yield

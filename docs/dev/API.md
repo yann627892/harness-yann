@@ -9,14 +9,14 @@ Single source of truth between `server/` and `web/`. Change it here first, then 
 - CSRF: every non-GET request must carry header `X-Maxxing: 1`, else `403 {"error":"csrf"}`.
 - Multipart requests (uploads, import, voice): the cookie and the CSRF header are checked **before** the body is
   read (`401` / `403`). Then `413 too_large` if `Content-Length` (or the streamed body) exceeds config
-  `upload_max_mb` (default 2048; 0 = no cap; + 1 MB of multipart framing), and `507 disk_full` if the body does not fit
+  `upload_max_mb` x 10 files (default 2048; 0 = no cap; + 1 MB of multipart framing; each file is held to `upload_max_mb` itself), and `507 disk_full` if the body does not fit
   in the spool dir (`<state>/tmp/uploads`, where the server spools uploads) with min(`upload_min_free_mb`, 128 MB)
   to spare. The full `upload_min_free_mb` reserve (default 1024) is checked on the destination disk per file.
   Both keys are read from config.json on every request (no restart).
 - Other request bodies (JSON, forms...) are capped before they are read (`maxxing/bodylimit.py`), on the declared
   `Content-Length` and, for a chunked body, while it streams: without a valid cookie a mutating request to a route
   that needs one gets `401 auth_required` before a byte is read; the public `/api/auth/*` routes check the CSRF header
-  first (`403 csrf`) and take at most 64 kB, `/api/hooks/{token}` 1 MB. Signed in: 1 MB by default; 16 MB for
+  first (`403 csrf`) and take at most 64 kB, `/api/hooks/{token}` 1 MB (a hook of Settings -> Webhooks: its `max_mb`, 1-50). Signed in: 1 MB by default; 16 MB for
   `PUT /api/files/write` (the editor opens text up to 2 MB, JSON escaping can grow it), 8 MB for the session routes
   that carry a prompt (`POST /api/sessions`, `/messages`, `/steer`, `/ask`), 5 MB for `/api/ext/*`. Over it:
   `413 {"error":"too_large"}` (`Connection: close`).
@@ -46,6 +46,12 @@ Single source of truth between `server/` and `web/`. Change it here first, then 
 ## Onboarding
 | GET | `/api/onboarding` | – | `{completed, steps:{password:bool, claude:bool, workspace:bool, telegram:bool, backup:bool, profile:bool}}` (`profile` = the Profile step was answered, `register.asked`) |
 | POST | `/api/onboarding/complete` | – | `{ok, jobs_enabled:[cron_id]}` (Claude signed in: the default jobs created off until then - Memory compaction - are turned on, once) |
+
+## Getting-started guide (Help -> Getting started guide, `maxxing/guide.py`)
+| GET | `/api/guide?context=1` | – | `{offer, status:"running"\|"paused"\|"done"\|"dismissed"\|null, level:"beginner"\|"intermediate"\|null, mode:"full"\|"partial"\|null, uses:[...], steps:[id], index, done:[id], tried:{step:{label, topic}}, cards:{step:{status:"pending"\|"ready"\|"failed", intro?, prompts?:[{label, text, topic}], at}}, context:{case:"new"\|"import"\|"existing", imported, topics, sessions, agents, crons, telegram, backup, pages:{agents_page...}, recommended:[use], default_topic}}` (`offer` = never opened and onboarding done: the UI proposes the guide once; `context` only with `context=1`) |
+| PUT | `/api/guide` | `{status?, level?, mode?, uses?, steps?, index?, done?, tried?:{step, label, topic}}` | same as GET without `context` (unknown values dropped; a new level, or new `steps` (a new tour), drops the cards written) |
+| POST | `/api/guide/cards` | `{steps:[id] (max 6), force?}` | same as PUT; queues the cards not written yet (one Opus `claude -p` call at a time, no tools): `pending` until written, `failed` when Opus could not (the step keeps its fixed text) |
+| POST | `/api/guide/reset` | – | same as PUT (progress and cards dropped) |
 
 ## Claude
 | GET | `/api/claude/status` | – | `{installed, version, auth:{ok, method:"oauth_token"\|"credentials"\|"api_key"\|"gateway"\|null, detail, checked_at:float\|null, error:string\|null, ends_at:float\|null}, gateway:{provider:"zen"\|"zen_go"\|"openrouter"\|"custom", name, base_url, models:{opus,sonnet,haiku,test}}\|null, gateways:[{id,provider,name,base_url,models,default:bool}], anthropic:{connected:bool, method:"oauth_token"\|"credentials"\|"api_key"\|null, detail}, default_provider:"anthropic"\|"gateway:<id>", default_model, permission_mode, auto_compact_tokens, idle_compact_tokens, idle_compact_after_s, smart_resume_tokens, protect_secrets:bool, short_titles:bool, short_titles_model:bool, suggestions:bool, auto_update:{enabled:bool, checked_at:float\|null, latest:string\|null, last:{from, to, at:float, ok:bool, error:string\|null}\|null}, models:[{id,label,provider:"anthropic"\|"gateway:<id>",context_window:int\|null}]}` (`context_window`: as last reported by Claude Code on this server, null if never seen; `gateway` = the default LLM gateway (older clients), null = none; `gateways` = every connected gateway, `default` marks the one new sessions use; `anthropic` = the stored subscription token / API key or the CLI's own sign-in; all of them can be connected at once - each entry of `models` carries the credential its turns run on, and `default_provider` is the side of new sessions and background calls) |
@@ -96,7 +102,7 @@ Session = {
   real_model: string|null,            // model that actually answered last turn (from the log)
   context_tokens: int|null,           // last turn input+cache tokens
   context_window: int|null,           // context window of the model of the last turn (Claude Code `modelUsage[..].contextWindow`, e.g. 1000000); null = unknown
-  archived: bool, favorite: bool, notify: bool,
+  archived: bool, favorite: bool, notify: bool, push: bool,
   source: "web"|"telegram"|"cron",
   cron: bool,                         // started by a scheduled job (not mirrored on Telegram)
   unread: bool,                       // finished after the last /seen, or marked unread by hand (`{seen:false}`)
@@ -112,14 +118,14 @@ Session = {
 }
 ```
 | GET | `/api/sessions?path=&archived=0\|1` | – | `[Session]` sorted by `updated` desc (no path = all) |
-| POST | `/api/sessions` | `{path, message?, title?, model?, provider?, effort?, attachments?:[filepath], plan_mode?:bool, voice?:filepath, client_id?, worktree?:{repo, base?, prepare?, copy_env?, pr?, remember?}}` (`client_id`: as for `/messages`, for the first message; `provider`: `"anthropic"` \| `"gateway:<id>"` - the credential its turns run on, omitted = the default one; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`; `worktree`: work on a separate copy, `remember` saves the choices for that repo) | `Session` (starts the first turn if message or voice) |
+| POST | `/api/sessions` | `{path, message?, title?, model?, provider?, effort?, attachments?:[filepath], plan_mode?:bool, push?:bool, voice?:filepath, client_id?, worktree?:{repo, base?, prepare?, copy_env?, pr?, remember?}}` (`client_id`: as for `/messages`, for the first message; `push`: false = never rings the phones; `provider`: `"anthropic"` \| `"gateway:<id>"` - the credential its turns run on, omitted = the default one; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`; `worktree`: work on a separate copy, `remember` saves the choices for that repo) | `Session` (starts the first turn if message or voice) |
 | GET | `/api/sessions/{id}` | – | `Session` |
 | GET | `/api/sessions/{id}/suggestions` | – | `{suggestions:[string]}` — the one short follow-up message for the composer: a small model on the session's provider reads the end of the conversation, one call per turn at most (cached by turn count + log size, 30 min). `[]` while a turn runs, before the first turn, while messages wait, for an archived session, or when config `suggestions` is off (INTERNALS.md `maxxing.sessions.suggest`) |
-| PATCH | `/api/sessions/{id}` | `{title?, model?, provider?, effort?, archived?, notify?, plan_mode?, favorite?, path?}` | `Session` (`plan_mode:false` also clears `plan_ready`; `favorite` is carried over by a hand-off; `path` moves the session to another topic and its Claude transcript with it - `400 bad_path`, `409 busy` while a turn runs or messages wait; `model`: an id of letters, digits and `._:@/[]-`, 100 characters at most, not starting with `-`, else `400 bad_model`, also on create; `provider`: `"anthropic"` \| `"gateway:<id>"` (bare `"gateway"` = the default gateway) - the credential its turns run on, `""` back to the default one, else `400 bad_provider`; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`, else `400 bad_effort`, kept by a hand-off) |
+| PATCH | `/api/sessions/{id}` | `{title?, model?, provider?, effort?, archived?, notify?, push?, plan_mode?, favorite?, path?}` | `Session` (`plan_mode:false` also clears `plan_ready`; `favorite` is carried over by a hand-off; `path` moves the session to another topic and its Claude transcript with it - `400 bad_path`, `409 busy` while a turn runs or messages wait; `model`: an id of letters, digits and `._:@/[]-`, 100 characters at most, not starting with `-`, else `400 bad_model`, also on create; `provider`: `"anthropic"` \| `"gateway:<id>"` (bare `"gateway"` = the default gateway) - the credential its turns run on, `""` back to the default one, else `400 bad_provider`; `effort`: `low\|medium\|high\|xhigh\|max` or `""` (Claude Code's default) -> `claude --effort`, else `400 bad_effort`, kept by a hand-off) |
 | POST | `/api/sessions/{id}/plan/approve` | `{text?}` (shown in the thread as the user's message) | `{queued:bool, session:Session}` — plan mode off, then a turn that tells Claude to implement its latest plan (queue item flag `plan_approved`, kept by steer like `hud`) |
 | DELETE | `/api/sessions/{id}` | – | `{ok}` (stops a running turn, moves the session to the trash) |
-| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], voice?:filepath, client_id?, mentions?:[{kind: session|agent|team, ref}]}` (`mentions`: the @ of the composer, refs from `/mentions` below; the server resolves them (unknown ones and the session itself dropped, at most 8) and adds to the prompt, not to the displayed message, the command that writes to each (`maxxing sessions send` / `agents send` / `team send`); its `user` event keeps `mentions: [{kind, ref, label, group?, avatar?}]` (never the command), drawn as chips; `client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
-| GET | `/api/sessions/{id}/mentions` | - | `{items:[{kind: session|agent|team, ref, label, hint, state?, avatar?, group?}]}`: who the composer's @ can name - the other sessions (running first, then the most recent 60, not archived, no agent chats), the agents (Agents page on), the Team contacts and groups (Team page on) |
+| POST | `/api/sessions/{id}/messages` | `{text, attachments?:[filepath], voice?:filepath, client_id?, mentions?:[{kind: jarvis|session|agent|team, ref}]}` (`mentions`: the @ of the composer, refs from `/mentions` below; the server resolves them (unknown ones and the session itself dropped, at most 8) and adds to the prompt, not to the displayed message, the command that writes to each (`maxxing sessions send` / `agents send` / `team send`); its `user` event keeps `mentions: [{kind, ref, label, group?, avatar?}]` (never the command), drawn as chips; `client_id`: the sender's own id for the message, `[A-Za-z0-9_-]{1,64}`, kept in `client_ids` of its queue item (`queue_items`) and of its `user` event, so a page reloaded mid-send can tell whether it arrived; `voice`: a voice message sent directly - uploaded first with `/api/uploads`, queued at once, transcribed by the server, then its transcript is the prompt) | `{queued:bool, session:Session}` · `409 voice_off` (transcription not ready) |
+| GET | `/api/sessions/{id}/mentions` | - | `{items:[{kind: jarvis|session|agent|team, ref, label, hint, state?, avatar?, group?}]}`: who the composer's @ can name - Jarvis (its feature on, not from its own conversations: one row `ref: jarvis`, its conversation of the moment), the other sessions (running first, then the most recent 60, not archived, no agent chats, none of Jarvis's conversations), the agents (Agents page on), the Team contacts and groups (Team page on) |
 | DELETE | `/api/sessions/{id}/queue` | – | clears queued messages |
 | POST | `/api/sessions/{id}/ask` | `{question}` | `{answer, cost_usd, duration_ms}` — side question: Claude answers from a throwaway copy of the session's thread (read-only, nothing saved: the running turn, queue and log are untouched). 409 `no_thread` (never answered yet) / `busy` (one already running for this session), 429 (2 running), 504 (240 s) |
 | POST | `/api/sessions/{id}/queue/take` | – | `{messages:[{text, attachments}], session}` — removes the queued user messages and returns them (the composer's **Edit**: they come back in the composer and are sent again as a normal message) |
@@ -136,7 +142,7 @@ Session = {
 | GET | `/api/sessions/{id}/stream?from=0` | – | **SSE**. `event: events` `data: {events, next}` · `event: state` `data: Session` · `event: reset` `data: {}` then end of stream when the log was rewritten or shrank (or `from` is stale): reload with `?tail=` · heartbeat comment every 15 s. New lines and state changes are pushed ~0.05-0.15 s after they are written (inotify on the sessions folder; without it the stream polls every 0.1 s while the session runs) |
 | GET | `/api/sessions/search?q=` | – | `[{id, title, path, snippet, at}]` (served by the full-text index, see Search; max 50) |
 | GET / POST | `/api/sessions/open` | POST `{open?:[id], close?:[id], order?:[id], tabs?:bool, front?:id}` | `{ids:[id]\|null, rev, tabs?, front?}` — the sessions open on screen, shared by every browser of the user (a column on a computer, a tab on a phone), with the Tabs / Zones mode and the session in front last chosen on one of them: ids in the order they were opened, `null` while no browser has shared its own; `rev` grows with each change (a browser ignores an answer older than the one it applied). POST opens, closes, then sorts by `order` (ids it does not name stay after); bus topic `open_sessions`. A deleted session leaves the list |
-| POST | `/api/uploads?path=<topic path>` | multipart `file` (multi) | `{files:[{path, name, size, mime}]}` saved in `<topic>/attachments/YYYY-MM/` · each file `413 too_large` over `upload_max_mb`, `507 disk_full` when it would leave less than `upload_min_free_mb` free on the destination disk (all or nothing: the files saved before it in the same request are removed); the whole request, all its files together, is capped too (see Conventions) |
+| POST | `/api/uploads?path=<topic path>` | multipart `file` (multi) | `{files:[{path, name, size, mime}]}` saved in `<topic>/attachments/YYYY-MM/` · each file `413 too_large` over `upload_max_mb`, `507 disk_full` when it would leave less than `upload_min_free_mb` free on the destination disk (all or nothing: the files saved before it in the same request are removed); the whole request is capped at 10 files' worth (see Conventions) |
 
 `from`/`next`/`start`/`before` = byte offsets in the raw log (always line boundaries). Backward reads scan at
 most 64 MB per call (then `more_before` with the `start` reached; a single line longer than that is skipped). A `task` whose `task_started` line is before the
@@ -152,6 +158,9 @@ rewrite, running sessions skipped), and the server does it every night at 04:30 
 previous night — open streams then receive `reset`. **Event** (normalised):
 ```
 {type:"user", text, attachments:[path], at, source, voice?:[path]}   // voice: a voice message sent directly (its audio)
+  // from?: {kind: session|agent|cron|feed|mail|group|manual|cli|github|system, title?, path?, session?,
+  //         reports?:[{id, outcome: done|asks|failed}]} - not typed by the owner (shown as a card); shown?: the part
+  //         of the text meant for the owner (the rest is instructions for Claude)
 {type:"voice_text", text, error:str|null, stopped?:true, at}   // transcript of the voice message just above (error: not transcribed, nothing sent to Claude)
 {type:"assistant", text, at}                       // markdown
 {type:"thinking", text, at}
@@ -258,6 +267,72 @@ Run  = {id, cron_id, name, at, ok, code, duration_s, output_tail, session_id|nul
 | GET | `/api/crons/{id}` | – | `Cron` |
 | GET | `/api/crons/preview?schedule=` | – | `{valid, human, next:[at×5], error?}` (next runs in the configured time zone) |
 | GET | `/api/crons/preview?once_at=` | – | `{valid, human, next:[at], once:true, error?}` (a one-time date, read in the configured time zone) · POST/PATCH with a past `once_at` -> `400 invalid_once` |
+
+## Themes (Settings -> Appearance, `maxxing/themes.py`)
+Installed themes, read-only: `<workspace>/themes/<id>/theme.json` (format: docs/user/39-themes.md), installed by Claude
+with `maxxing themes install` (never from the UI). Each theme is returned checked and cleaned: only variables of
+`themes.TOKENS`, values re-validated by kind (colors, sizes, shadows, numbers; no `url()`, `var()`, `;`, braces), text
+pairs below their contrast dropped. The web app writes them as CSS rules on `html[data-theme-id]` (`lib/themes.ts`).
+`Theme = {id, name, description, author, version, homepage, base: solid|glass, modes: [light|dark], light: {token: css},
+dark: {...}, options: {mode?, accent?, tint?, font?, mono?, density?}, own_accent, own_surfaces,
+wallpaper: {light: url|null, dark: url|null}, logo: {light: url|null, dark: url|null}, preview: url|null, css: str|null, css_state: none|on|stale, warnings: [str]}`.
+`css` = the theme's one field of advanced CSS, checked by `themes._css` (refused as a whole on `url()`/images, any
+at-rule but `@media|@supports|@container`, `position: fixed`, `if()`, `attr()`, `z-index` over 9, `<`, `\`, unbalanced braces or quotes; 16 KB); the web
+app nests it in `html[data-theme-id="<id>"]{…}` and applies it only when `css_state` is `on`: `<theme>/.css-check.json`
+`{"ui": fingerprint, "css": sha256 of the css}` matches `themes.ui_fingerprint()` (hash of the names of the served build's `assets/*.css`, i.e.
+of the interface's CSS) and the css itself. Written by `install` and `maxxing themes verify <id>`; an update that changes
+the interface's CSS, or an edit of the rules, makes it `stale` (off).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/themes` | - | `{themes: Theme[], errors: [{id, error}]}` (folders that are not usable, with the reason) |
+| GET | `/api/themes/{id}/file/{name}` | - | an image the theme names (`wallpaper`, `wallpaper_dark`, `logo`, `logo_dark`, `preview`), else 404 |
+
+## Webhooks & events (Settings -> Automate, `maxxing/webhooks.py`)
+Automations without AI: one trigger + one action. Made from the pages' short form (`POST /api/webhooks`, `PATCH`
+with the whole `trigger` / `action`, the form merging what it does not show) or by Harness from a session
+(`maxxing webhooks add`); the pages Webhooks (trigger `in`) and Events (trigger `event`) also show, switch, test,
+replay and copy the URL.
+```
+Hook = {id:"w_xxxxxxxx", name, description, enabled, created, updated, owner:null,
+        trigger: {kind:"in", source:"stripe"|"shopify"|"github"|"generic"|"phone", methods:["GET"?,"POST"?],
+                  max_mb:1-50, reply:"now"|"wait", filter:{events?:[glob], branch?:glob}}
+               | {kind:"event", on:"feed", source?, levels?:[level], contains?}
+               | {kind:"event", on:"agent"|"cron", agent?|cron?, when:"any"|"ok"|"fail"},
+        action:  {kind:"shell", command (one line), cwd?, timeout_s:1-3600 (300)}
+               | {kind:"call", url (fixed, or {{key:NAME}} from the vault), method, headers:{k: v with {{path}} / {{key:NAME}}}, body:"raw"|"json"|template,
+                  sign:bool (X-Harness-Signature: sha256=<hmac of the body>), retries:0-5 (2), timeout_s:1-60 (15)}
+               | {kind:"store", fields:{column: "path.from.the.payload"}, keep:rows (100000)}
+               | {kind:"notify", level?, title?, body?, url?}   // templates; empty title: the feed's parser of the source
+        queue: {parallel:1-4 (1), max_waiting:0-500 (50)}, report:"never"|"fail"|"always",
+        // templates {{path}}: the payload's keys, then payload / event / query / hook / call; {{key:NAME}} in headers and url
+        // read-only:
+        url:string ("" for events), has_secret, has_sign, needs_secret, last_call:Call|null, calls_24h, waiting,
+        data?:{rows, today, days:[7 counts], last_id}}      // store hooks
+Call = {id, at, trigger:"in"|"event"|"test"|"replay", event, summary, status:"queued"|"running"|"ok"|"failed"|"ignored",
+        http?, exit?, duration_s?, output? (last 4 kB), error?, attempts?, of? (replay: the call replayed)}
+```
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/webhooks` | – | `{hooks:[Hook], feed_hooks:[{id, name, kind, url, has_secret, created, agent:path\|null}], https:bool}` (feed_hooks: the notification webhooks (feedhooks.py) and those of agents, in the same list of Settings -> Webhooks; managed with `/api/feed/hooks`) |
+| POST | `/api/webhooks` | Hook fields + `secret?` | `Hook` · `400 invalid\|bad_secret`, `409 exists` (same name) |
+| GET | `/api/webhooks/{id}` | – | `Hook` · `404` |
+| PATCH | `/api/webhooks/{id}` | `{enabled?, description?}` or Hook fields (top-level keys replaced) | `Hook` · `409 owned` |
+| DELETE | `/api/webhooks/{id}` | – | `{ok}` (its calls and rows too) |
+| POST | `/api/webhooks/{id}/rotate` | – | `Hook` with a new `url` (the old one stops at once) |
+| POST | `/api/webhooks/{id}/secret` | `{secret}` (`""` removes it) | `Hook` |
+| POST | `/api/webhooks/{id}/test` | – | `{id, status:"queued"}`: a realistic sample of its source / event, filters skipped |
+| GET | `/api/webhooks/{id}/calls?limit=50` | – | `{calls:[Call]}` newest first (the last 50 kept) |
+| GET | `/api/webhooks/{id}/calls/{call}` | – | `Call` + `{request:{method, content_type, headers (secrets as ***), query, event, files, size}, body (64 kB), body_truncated}` |
+| POST | `/api/webhooks/{id}/calls/{call}/replay` | – | `{id, status:"queued"}` (a new call with the same request) · `404` (no longer kept) |
+| GET | `/api/webhooks/{id}/data?after=&limit=100&format=json\|csv` | – | `{rows:[{id, at, call, data, fields?}], stats}` · csv: a download |
+| GET / POST | `/api/hooks/{token}` | anything (JSON, form, multipart files, text; GET: the query) | **public**. A hook of Settings -> Webhooks: `202 {ok, call}`; reply "wait": the action's result within 30 s (shell: `$MAXXING_RESPONSE_FILE` or stdout, type sniffed; call: the remote answer as is; else `{ok, call}`), `502 {error:"failed", exit}`, `504 {error:"timeout", call}` · `200 {ok, ignored}` (filter), `{ok, duplicate}` · `401 secret_required\|bad_signature\|bad_key`, `405` (method), `413` (over `max_mb`), `429` (120/min), `503 disabled\|busy` (+ `Retry-After`). Any other token: a feed webhook (below, POST only) |
+
+The shell action gets the call as data, never in its command line: stdin = the body; `MAXXING_WEBHOOK_BODY` (file),
+`_PAYLOAD` (parsed JSON / form / query, file), `_HEADERS` (request.json: method, headers, query, files), `_QUERY`
+(JSON), `_FILES` (folder, or empty), `_EVENT`, `_METHOD`, `_TRIGGER`, `_ID`, `_NAME`, `_CALL`, `MAXXING_RESPONSE_FILE`
+(what a "wait" caller gets; `<file>.type` = its content type), plus the vault keys exposed to jobs. It runs in a transient
+unit `maxxing-hook-<id>-<call>` (jobs slice, timeout), like a cron job.
 
 ## Telegram
 | GET | `/api/telegram` | – | `{configured, running, bot:{id, username, name}\|null, chat:{id, title, type}\|null, topics_enabled, mode:"simple"\|"threads"\|"mirror", threads:[{path, thread_id, name, session_id?}], agent_threads:[{path, thread_id, name}], settings:{mode, notify_crons, notify_system:bool(true), login_alerts, two_factor:bool, reply_mode:"progress"(default)\|"final", thread_days:int(30), mirror_web:bool (= mode "mirror")}, linking:bool, link:{code, deep_link, expires_at, expires_in, expired}\|null, poll_error, poll_error_code:"token_rejected"\|"conflict"\|"unreachable"\|null, sync_error, topics_notice, last_poll_ok, last_poll_age, last_error}` (special threads: path `"#crons"` / `"#alerts"` / `"#feed"`; session threads: `session_id`, path `""`). `mode`: `simple` (default of a new link: one chat - sessions without threads, their messages sent as replies, a reply continues the session; alerts in the main chat), `threads` (one thread per open session + Crons, Alerts, Notifications), `mirror` (threads + web turns copied). Not chosen yet in config.json: `threads` (or `mirror` if the old `mirror_web` was chosen) when the chat already has threads, else `simple`; the gateway writes it at start. A chat without threads (`topics_enabled:false`) works as `simple` whatever the mode. `running`: in the server, the poller itself; in another process (CLI, doctor), the `poller_pid` of the server's heartbeat is alive. `poll_error` is set and cleared only by the poller (getUpdates: 401 → `token_rejected`, the poller stops; 409 → `conflict`, another program reads the bot); `sync_error` only by the thread sync; `topics_notice` = threads are off for the bot (BotFather "Threaded Mode") - information, not an error. `last_poll_ok` = last successful getUpdates (Unix s, written at most every 30 s). `link` = the last link code, pending or expired (kept until a chat links). `last_error` (older readers) = `poll_error` or `sync_error`. Setup is done once a chat is linked (same rule as `/api/onboarding`) |
@@ -444,7 +519,7 @@ CallStatus = {settings:{mode:"local"|"cloud", provider:"openai"|"gemini"|null, o
 
 ## System
 | GET | `/api/system/health` | – | `{ok, issues:[{level, code, text}], cpu_pct, cpu_pressure:{avg10,avg60,avg300}|null, cpu_waiting, load, mem:{total,avail}, disk:{total,free,pct}, uptime_s, claude_auth, claude_auth_error, claude_checked_at, backup_age_h, failed_logins_1h, at}` (each issue also has `id` and `seen`; issue `claude_auth`: "Claude is not connected" or "Claude sign-in expired…"; issue `cpu_pressure`: CPU pressure `avg60 >= 40` for 10 min, naming the top unit) (cached 30 s, `?force=1`) |
-| GET | `/api/system/cpu` | – | `{enabled, pressure:{avg10, avg60, avg300}\|null, waiting, top:[{unit, kind, name, label, level, pct}], at}` - CPU priorities (`cpu_priorities`) and the units using the processor most (`maxxing/cpu.py`): `pressure` = `some` line of `/proc/pressure/cpu` (null without PSI), `waiting` = `avg10 >= 20`, `top` = 6 units from their cgroup `cpu.stat` (`pct` of the whole machine; Docker containers in one row), `kind` harness / session / agent / heavy / job / browser / docker / other, `level` live / normal / background / other (cached 3 s, `?force=1`; the first call samples 0.5 s) |
+| GET | `/api/system/cpu` | – | `{enabled, pressure:{avg10, avg60, avg300}\|null, waiting, top:[{unit, kind, name, label, level, pct}], at}` - CPU priorities (`cpu_priorities`) and the units using the processor most (`maxxing/cpu.py`): `pressure` = `some` line of `/proc/pressure/cpu` (null without PSI), `waiting` = `avg10 >= 20`, `top` = 6 units from their cgroup `cpu.stat` (`pct` of the whole machine; Docker containers in one row), `kind` harness / session / agent / heavy / job / browser / docker / other, `level` live / normal / background / other (cached 3 s, `?force=1` = a sample under 0.5 s old; the first call samples 0.5 s) |
 | POST | `/api/system/health/seen` | `{id, seen=true}` | the health above, fresh - marks a current issue as seen (or not): it stops counting in the sidebar dot until its text changes (numbers left out of the `id`) or for 24 h; marks in `<state>/health-seen.json` · `404 not_found` |
 | GET | `/api/system/services` | – | `[{name, label, active:bool, enabled:bool, since:float\|null, state}]` (claude-maxxing, caddy, tailscaled, cron + config `services_extra`; units not installed are omitted; one `systemctl show` call, cached 10 s, dropped by a service action) |
 | POST | `/api/system/services/{name}/{start\|stop\|restart}` | – | `{ok}` (self restart deferred 2 s) |
@@ -1004,7 +1079,7 @@ Block =
 | ANY | `/api/ext/{id}[/{path}]` | – | forwarded to the extension's `api.py` `handle()`: return value → JSON, `(status, body)` tuple sets the status (an int from 200 to 599, else 500 `extension_error`; 204 / 304 are sent without a body), `ValueError` → 400, `LookupError` → 404, other → 500 `extension_error`, 30 s timeout (504 `extension_timeout`), 503 `extension_busy` at once while an earlier timed-out `handle()` of the same extension has not returned, or when the 4 extension threads are all still running earlier calls. A `.` / `..` segment in `path` → `400 bad_path` |
 | GET | `/ext/{id}/page.js` | – | page module (ES module) |
 | GET | `/ext/ui-kit.css` | – | the UI kit of extensions (`server/maxxing/assets/ui-kit.css`): `ui-*` classes scoped to `.mx-ext` (page host) and `[data-mx-kit]` (widget frame), built on the theme variables; the app adds it once when a page extension opens; `ETag` (content hash), `If-None-Match` -> `304` |
-| GET | `/ext/{id}/widget-frame` | – | HTML widget document: the bridge (`maxxing.api / resize / theme`, theme, material and variables from the URL fragment, then by message; `<html data-theme data-material>`) + the UI kit inlined (`<html data-mx-kit>`) + `widget.html`, `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock` (the UI frames it with the same sandbox; an srcdoc frame would inherit the app's script policy). `/ext/{id}/widget.html` stays the raw file (text/plain) |
+| GET | `/ext/{id}/widget-frame` | – | HTML widget document: the bridge (`maxxing.api / resize / theme`, theme, material and variables from the URL fragment, then by message; `<html data-theme data-material>`) + the UI kit inlined (`<html data-mx-kit>`) + `widget.html`, `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock` (the UI frames it with the same sandbox; an srcdoc frame would inherit the app's script policy). The fragment also carries `key`, a secret of the mount: the bridge sends `{mx:'hello'}` at start and adds `key` to every message, the host ignores a message without it (a page a link loaded into the frame cannot use the API) and sends data and theme only while every document loaded there greeted it. `/ext/{id}/widget.html` stays the raw file (text/plain) |
 | GET | `/ext/{id}/agents-view-frame` | – | an Office view of the Agents page: the same document as `widget-frame` (bridge, UI kit, CSP sandbox) with `agents-view.html`; 404 when the extension declares no `agents_view`, is off or in error. `/ext/{id}/agents-view.html` (GET, HEAD) = the raw file. The bridge also has `maxxing.data / onData / app / navigate`, answered only by the page that frames a view (web `HtmlWidget` `host`): pushed Office data, GET of `/api/agents/layout` only, routes under `/agents` only (checked on the resolved pathname) |
 
 The app page (`index.html`) is served with `script-src 'self'` plus the hashes of its inline boot scripts
@@ -1032,7 +1107,7 @@ Built-in card links are SPA routes: `/sessions/<id>`, `/sessions`, `/tasks?task=
 | GET | `/api/memory` | – | `{max_lines, max_bytes (the weight that goes with the line limit: 1 KB for 10 lines, 0 = no limit), files:[{path (workspace-relative), level:"global"\|"project"\|"topic"\|"agent", lines, bytes, over:bool (above the limit, in lines or in weight), heavy:bool (in weight)}]}` |
 | POST | `/api/memory/compact` | – | `{session: Session}` — a session at the workspace root runs the memory-compaction skill now with the limit (lines and weight) |
 
-## Push (Web Push, Settings -> Notifications -> Mobile notifications)
+## Push (Web Push, Settings -> Alerts -> Mobile notifications)
 
 Web Push (VAPID) with no dependency: ES256 on P-256 in pure Python (`webpush.py`, checked against the RFC 6979 vector) and **empty** pushes - nothing of the conversation goes through the browser vendor's push service. The service worker is woken, then asks `POST /api/push/pending` (same origin, the app's cookie + `X-Maxxing: 1`) what to show. State: `webpush.json` in the state dir (mode 0600: VAPID key pair + devices); the queue of what a device has not fetched yet is in memory (20 items, 24 h). Endpoints are only accepted for the browsers' push services (https, `fcm.googleapis.com`, `*.push.services.mozilla.com`, `web.push.apple.com`, `*.notify.windows.com`), so the server never calls another address. A turn rings every device when a person's session ends (same rule as the Telegram bell: not a job, an agent, a Telegram or a system turn; failed turns too); `404` / `410` from the push service remove the device.
 
@@ -1073,7 +1148,7 @@ cause is handled; their `actions` are then `[]`. `open` is a link button (the UI
 | PATCH | `/api/feed/hooks/{id}` | `{secret?, regenerate?: bool}` | `FeedHook` (regenerate = new token, the old URL dies) |
 | DELETE | `/api/feed/hooks/{id}` | – | `{ok}` |
 | POST | `/api/feed/hooks/{id}/test` | – | `{event}` |
-| POST | `/api/hooks/{token}` | the service's payload (<= 1 MB) | **public** (no cookie, no CSRF header: the token is the permission). Signatures: Stripe `Stripe-Signature` (5 min tolerance), Shopify `X-Shopify-Hmac-Sha256`, GitHub `X-Hub-Signature-256`, generic `X-Signature: sha256=<hex>` - checked when the hook has a secret; a stripe/shopify/github hook WITHOUT a secret refuses every delivery with `401 secret_required` (+ one folded `security` warning in the feed); a generic hook without a secret accepts the token alone. `200 {ok, duplicate, id}` / `{ok, ignored}` (a delivery verified with a secret whose body was already received is a duplicate whatever its unsigned headers, even if it was ignored or its event deleted: 30 days, generic 24 h; Shopify keys a known topic too) · `401 bad_signature\|secret_required`, `404` (unknown token: checked before the body is read), `413` (Content-Length or streamed body over 1 MB), `429` (120/min/hook), `400 bad_json` (also for JSON nested too deep), `400 bad_payload` (valid JSON whose fields have an unexpected shape for that service) |
+| POST | `/api/hooks/{token}` | the service's payload (<= 1 MB) | (a token of Settings -> Webhooks: see Webhooks & events) **public** (no cookie, no CSRF header: the token is the permission). Signatures: Stripe `Stripe-Signature` (5 min tolerance), Shopify `X-Shopify-Hmac-Sha256`, GitHub `X-Hub-Signature-256`, generic `X-Signature: sha256=<hex>` - checked when the hook has a secret; a stripe/shopify/github hook WITHOUT a secret refuses every delivery with `401 secret_required` (+ one folded `security` warning in the feed); a generic hook without a secret accepts the token alone. `200 {ok, duplicate, id}` / `{ok, ignored}` (a delivery verified with a secret whose body was already received is a duplicate whatever its unsigned headers, even if it was ignored or its event deleted: 30 days, generic 24 h; Shopify keys a known topic too) · `401 bad_signature\|secret_required`, `404` (unknown token: checked before the body is read), `413` (Content-Length or streamed body over 1 MB), `429` (120/min/hook), `400 bad_json` (also for JSON nested too deep), `400 bad_payload` (valid JSON whose fields have an unexpected shape for that service) |
 
 Telegram: rule `auto` = error -> loud, warning -> silent, else off; built-in `crons`, `system`, `security` default to off
 (own threads). The bot posts in the thread "Notifications" (`telegram.threads["#feed"]`) with buttons *Ask Claude*
@@ -1112,7 +1187,7 @@ session of the hidden topic `projects/jarvis/topics/main` (server `jarvis.py`). 
 | GET | `/api/jarvis` | | `JarvisStatus` |
 | POST | `/api/jarvis/open` | | its conversation, made the first time (409 `off`; 409 `taken`: an owner's project named `jarvis`) -> `JarvisStatus` |
 | POST | `/api/jarvis/new` | | a new conversation (the old one is kept in `conversations`) -> `JarvisStatus` |
-| PUT | `/api/jarvis/settings` | any of `model`, `root`, `ask_first`, `internals`, `daily` (bool), `brief`, `dream` (`HH:MM` or ""), `compact_tokens` (0 = as every session, 100000, 150000, 200000, 300000), `telegram` (`off`, `important`: brief, questions and failures, `all`) | `JarvisStatus` (400 `bad_time`, `bad_compact`, `bad_telegram`) |
+| PUT | `/api/jarvis/settings` | any of `model`, `root`, `ask_first`, `internals`, `daily` (bool), `brief`, `dream` (`HH:MM` or ""), `compact_tokens` (0 = as every session, 100000, 150000, 200000, 300000), `telegram` (`off`, `important`: brief, questions and failures, `all`), `reuse`, `archive_done` (bool) | `JarvisStatus` (400 `bad_time`, `bad_compact`, `bad_telegram`) |
 | POST | `/api/jarvis/work/{ref}/close` | | `ref` = the entry's number or its session id -> `JarvisStatus` |
 | POST | `/api/jarvis/brief` | | the morning brief now (a new conversation with `daily`; its backstage agent prepares it, then it comes in as a `[Morning brief]` message) -> `JarvisStatus` |
 | POST | `/api/jarvis/dream` | | the night pass now: `{session}` (a run of its backstage agent `<path>/agents/backstage`; 409 `agent` when it cannot start) |

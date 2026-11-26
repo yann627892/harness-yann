@@ -44,8 +44,11 @@ def _one_line(text: str, limit: int = 300) -> str:
 
 def _yaml_str(v: str) -> str:
     """A YAML plain scalar when it is one ("Bash(git log:*)"), else a JSON (= YAML) quoted string."""
-    plain = not re.search(r": |\s#|:$|^[\s\-?:,\[\]{}#&*!|>'\"%@`]|\s$|\n", v)
-    return v if plain and v else json.dumps(v, ensure_ascii=False)
+    plain = not re.search(r": |\s#|:$|^[\s\-?:,\[\]{}#&*!|>'\"%@`]|\s$|\n", v) and v.splitlines() == [v]
+    if plain and v:
+        return v
+    # parse_md cuts the header with splitlines(): the line breaks json.dumps leaves as they are get escaped
+    return re.sub("[\x85\u2028\u2029]", lambda c: f"\\u{ord(c.group()):04x}", json.dumps(v, ensure_ascii=False))
 
 
 def export_md(path: str) -> str:
@@ -70,6 +73,9 @@ def _unquote(v: str) -> str:
     if len(v) >= 2 and v[0] == v[-1] == "'":
         return v[1:-1].replace("''", "'")
     return v
+
+
+IMPORT_RE = re.compile(r"(?<![^\s])@[^\s`]+")   # Claude Code's memory import: "@path" at a line start or after a space
 
 
 def parse_md(text: str) -> dict:
@@ -100,6 +106,9 @@ def parse_md(text: str) -> dict:
         if item and key:                                # a YAML list under the last key
             cur = head.get(key)
             head[key] = (cur if isinstance(cur, list) else []) + [_unquote(item.group(1))]
+            continue
+        if key and ln[:1] in (" ", "\t") and isinstance(head.get(key), str) and head[key]:
+            head[key] = f"{head[key]} {ln.strip()}"     # a plain YAML value wrapped on the indented lines below
             continue
         kv = re.match(r"^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$", ln)
         if not kv:
@@ -140,6 +149,12 @@ def parse_md(text: str) -> dict:
             fields["permission_mode"] = "acceptEdits"   # owner sets it on the agent page
             lowered = [f"permissionMode: {mode} (set to acceptEdits)"]
     role = body if not desc or " ".join(desc.split()) in " ".join(body.split()) else f"{desc}\n\n{body}".strip()
+    # The role becomes the agent's CLAUDE.md, where "@path" imports a file into every run: in a subagent file it is
+    # only text. Each one is put in backticks (a code span is never imported) and listed for the import preview.
+    imports = IMPORT_RE.findall(role)
+    role = IMPORT_RE.sub(lambda m: f"`{m.group(0)}`", role)
+    if imports:
+        lowered.append(f"@ imports kept as text: {', '.join(dict.fromkeys(imports))[:300]}")
     return {"name": slug, "description": role or desc, "fields": fields,
             "ignored": sorted(k for k in head if k not in KNOWN) + lowered}
 

@@ -7,7 +7,7 @@ The page layout is not kept: this is the content, readable on any screen. The ol
 
 These files are zip archives of XML written by anyone: nothing in them is executed or fetched, every part is
 read up to a size, the whole reading has a deadline and the answer a size (`truncated` says it was cut). A DTD
-is refused (these formats have none), and expat (>= 2.4.1) bounds entity expansion by itself.
+is refused wherever it is and however the part is encoded (these formats have none), and expat (>= 2.4.1) bounds entity expansion by itself.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
+from xml.parsers import expat
 
 KINDS = {".docx": "text", ".docm": "text", ".odt": "text",
          ".xlsx": "sheets", ".xlsm": "sheets", ".ods": "sheets",
@@ -29,13 +30,16 @@ IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".webp": "image/webp", ".bmp": "image/bmp"}
 
 PART_MAX = 16 << 20        # an XML part read whole (decompressed)
+ELEMENTS_MAX = 500_000     # elements of one part read whole (~110 MB in memory)
 STREAM_MAX = 256 << 20     # a sheet or the shared strings, read as a stream and left as soon as enough is known
 TEXT_MAX = 1_500_000       # characters of Markdown
 ROWS_MAX = 5000            # per sheet
 COLS_MAX = 200
 CELLS_MAX = 300_000        # filled cells, all sheets together
 CELL_MAX = 2000            # characters of one cell
+SHEET_CHARS_MAX = 6_000_000  # characters of all the cells together (one long shared text repeated: not 570 MB)
 STRINGS_MAX = 1_000_000    # shared strings of a workbook
+STRINGS_GRACE_S = 2.0      # time left to fill in the shared strings of the cells read, even past TIME_S
 SHEETS_MAX = 40
 SLIDES_MAX = 500
 MEDIA_MAX = 24 << 20       # one picture of a document
@@ -77,24 +81,65 @@ def _strip(root: ET.Element) -> ET.Element:
     return root
 
 
-def _no_dtd(data: bytes) -> None:
-    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+class _Prolog(Exception):
+    pass
+
+
+class _NoDtd:
+    """Refuses a DTD wherever it is and however the part is encoded (UTF-16, a long comment first...): the
+    prolog is read by expat itself, up to the root element (a DTD cannot come after it)."""
+
+    def __init__(self, broken: Exception | None = None):
+        self.done, self.broken = False, broken     # `broken`: raised when the prolog itself cannot be parsed
+        self.p = expat.ParserCreate()
+        self.p.StartDoctypeDeclHandler = self.p.EntityDeclHandler = self._refuse
+        self.p.StartElementHandler = self._root
+        if hasattr(self.p, "SetReparseDeferralEnabled"):   # expat >= 2.6 would wait for more data before a DTD
+            self.p.SetReparseDeferralEnabled(False)
+
+    @staticmethod
+    def _refuse(*_a) -> None:
         raise Unreadable("unsupported", "This document cannot be read")
+
+    @staticmethod
+    def _root(*_a) -> None:
+        raise _Prolog
+
+    def feed(self, data: bytes) -> None:
+        """`data` empty: the end of the part."""
+        if self.done:
+            return
+        try:
+            self.p.Parse(data, not data)
+        except _Prolog:
+            self.done = True
+        except (expat.ExpatError, LookupError):          # LookupError: an encoding Python does not know
+            raise self.broken or Unreadable("unsupported", "This document cannot be read") from None
+        if self.done:
+            self.p = None
+
+
+def _no_dtd(data: bytes) -> None:
+    guard = _NoDtd()
+    for i in range(0, len(data), 1 << 16):
+        guard.feed(data[i:i + (1 << 16)])
+        if guard.done:
+            return
+    guard.feed(b"")
 
 
 class _Capped:
     """A part read as a stream: stops (truncated) past STREAM_MAX bytes or the deadline."""
 
     def __init__(self, f, pack: "_Pack"):
-        self.f, self.pack, self.n = f, pack, 0
+        self.f, self.pack, self.n, self.guard = f, pack, 0, _NoDtd(_Full())
 
     def read(self, size: int = -1) -> bytes:
         self.pack.tick()
         if self.n > STREAM_MAX:
             raise _Full
         data = self.f.read(size if size and size > 0 else 1 << 16)
-        if not self.n:
-            _no_dtd(data)
+        self.guard.feed(data)
         self.n += len(data)
         return data
 
@@ -114,6 +159,7 @@ class _Pack:
         self.deadline = time.monotonic() + TIME_S
         self.left = TEXT_MAX
         self.cells = CELLS_MAX
+        self.chars = SHEET_CHARS_MAX
         self.truncated = False
 
     def close(self) -> None:
@@ -144,10 +190,25 @@ class _Pack:
         if data is None:
             return None
         _no_dtd(data)
+        # built piece by piece and counted: 16 MB of tiny tags (<a/>, 16 KB zipped) would be ~4 million elements,
+        # about 1 GB of memory; past ELEMENTS_MAX or the deadline, what was built so far is the answer (truncated)
+        parser, root, n = ET.XMLPullParser(events=("start",)), None, 0
         try:
-            return _strip(ET.fromstring(data))
-        except ET.ParseError:
+            for i in range(0, len(data), 1 << 16):
+                parser.feed(data[i:i + (1 << 16)])
+                for _, el in parser.read_events():
+                    root = el if root is None else root
+                    n += 1
+                if n > ELEMENTS_MAX or time.monotonic() > self.deadline:
+                    self.truncated = True
+                    break
+            else:
+                parser.close()
+        except (ET.ParseError, LookupError):             # LookupError: an encoding Python does not know
             raise Unreadable("unsupported", "This document cannot be read") from None
+        if root is None:
+            raise Unreadable("unsupported", "This document cannot be read")
+        return _strip(root)
 
     def stream(self, name: str):
         """(event, element) of a large part, `start` and `end`; nothing when the part is missing."""
@@ -157,7 +218,7 @@ class _Pack:
         try:
             with self.zf.open(info) as f:
                 yield from ET.iterparse(_Capped(f, self), events=("start", "end"))
-        except ET.ParseError:
+        except (ET.ParseError, LookupError):
             raise _Full from None
         except _ZIP_ERRORS:
             raise Unreadable("unsupported", "This document cannot be read") from None
@@ -791,7 +852,7 @@ class _Odf:
                     blank += rep
                     continue
                 room = ROWS_MAX - len(rows) - blank
-                if room <= 0 or self.pack.cells <= 0:
+                if room <= 0 or self.pack.cells <= 0 or self.pack.chars <= 0:
                     cut = True
                     break
                 rows.extend([[]] * blank)
@@ -799,6 +860,7 @@ class _Odf:
                 rep = min(rep, room)
                 rows.extend([vals] * rep)
                 self.pack.cells -= len(vals) * rep
+                self.pack.chars -= sum(map(len, vals)) * rep
             out.append({"name": tbl.get("name", ""), "rows": rows, "truncated": cut})
         return out
 
@@ -806,12 +868,19 @@ class _Odf:
 # ---- Excel ---------------------------------------------------------------------------------
 _BUILTIN = {1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 37: "#,##0", 38: "#,##0",
             39: "#,##0.00", 40: "#,##0.00", 41: "#,##0", 42: "#,##0", 43: "#,##0.00", 44: "#,##0.00"}
+_ELAPSED = (("h", False), ("h", True), ("m", False), ("m", True), ("s", False))   # total unit, seconds shown
 _DATE_IDS = {*range(14, 23), *range(27, 37), *range(45, 48), *range(50, 59)}
 _EPOCH, _EPOCH_1904 = datetime(1899, 12, 30), datetime(1904, 1, 1)
 
 
 def _number_kind(fid: int, code: str) -> tuple[str, int] | None:
-    """How a number format shows a number: ('date', 0), ('percent', decimals), ('fixed', decimals), None = as it is."""
+    """How a number format shows a number: ('date', 0), ('percent', decimals), ('fixed', decimals), ('elapsed',
+    _ELAPSED index), None = as it is."""
+    raw = re.sub(r'"[^"]*"|\\.', "", (code or ("[h]:mm:ss" if fid == 46 else "")).split(";")[0]).lower()
+    total = re.search(r"\[(h+|m+|s+)\]", raw)            # a duration ([h]:mm, [mm]:ss): not a time of day
+    if total:
+        unit = total[1][0]
+        return ("elapsed", _ELAPSED.index((unit, unit != "s" and "s" in raw[total.end():])))
     if fid in _DATE_IDS:
         return ("date", 0)
     code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.|_.|\*.', "", (code or _BUILTIN.get(fid, "")).split(";")[0])
@@ -836,8 +905,20 @@ def _number(v: str | None, kind: tuple[str, int] | None, date1904: bool) -> str:
         return v
     if not math.isfinite(f):
         return v
+    if kind and kind[0] == "elapsed" and abs(f) < 2958466:
+        unit, secs = _ELAPSED[kind[1]]
+        t = round(abs(f) * 86400)
+        sign = "-" if f < 0 and t else ""
+        if unit == "h":
+            return f"{sign}{t // 3600}:{t % 3600 // 60:02d}" + (f":{t % 60:02d}" if secs else "")
+        if unit == "m":
+            return f"{sign}{t // 60}" + (f":{t % 60:02d}" if secs else "")
+        return f"{sign}{t}"
     if kind and kind[0] == "date" and 0 <= f < 2958466:
-        at = (_EPOCH_1904 if date1904 else _EPOCH) + timedelta(seconds=round(f * 86400))
+        try:
+            at = (_EPOCH_1904 if date1904 else _EPOCH) + timedelta(seconds=round(f * 86400))
+        except OverflowError:                            # a 1904 workbook: 4 years later, past the year 9999
+            return v
         if f < 1:
             return at.strftime("%H:%M:%S" if at.second else "%H:%M")
         return at.strftime("%Y-%m-%d" if f == int(f) else "%Y-%m-%d %H:%M")
@@ -859,17 +940,34 @@ def _col(ref: str) -> int:
     return n - 1
 
 
+class _Shared:
+    """A cell that shows a shared string, filled in once the sheets are read (_Xlsx.resolve). Counts as one
+    character for the budgets while the sheet is read."""
+    __slots__ = ("i",)
+
+    def __init__(self, i: int):
+        self.i = i
+
+    def __len__(self) -> int:
+        return 1
+
+
 class _Xlsx:
     def __init__(self, pack: _Pack):
         self.pack = pack
         self.part = pack.main("xl/workbook.xml")
         self.rels = pack.rels(self.part)
-        self.shared: list[str] = []
         self.kinds: list[tuple[str, int] | None] = []
         self.date1904 = False
 
-    def strings(self) -> None:
-        root = None
+    def strings(self, needed: set[int]) -> dict[int, str]:
+        """The shared strings the sheets use, by index: the part is read as a stream, only the needed ones are
+        kept, and it is left after the last one (a workbook of a million strings showing 50 cells reads 50)."""
+        found: dict[int, str] = {}
+        if not needed:
+            return found
+        last = min(max(needed), STRINGS_MAX - 1)
+        root, i = None, -1
         try:
             for ev, el in self.pack.stream(self.pack.typed(self.rels, "sharedStrings", "xl/sharedStrings.xml")):
                 if ev == "start":
@@ -877,20 +975,26 @@ class _Xlsx:
                     continue
                 if _local(el.tag) != "si":
                     continue
-                parts = []
-                for c in el:
+                i += 1
+                if i in needed:
+                    parts = []
+                    for c in el:
+                        self.pack.tick()
+                        tag = _local(c.tag)
+                        if tag == "t":
+                            parts.append(c.text or "")
+                        elif tag == "r":
+                            parts.extend(t.text or "" for t in c if _local(t.tag) == "t")
+                    found[i] = "".join(parts)[:CELL_MAX]
+                else:
                     self.pack.tick()
-                    tag = _local(c.tag)
-                    if tag == "t":
-                        parts.append(c.text or "")
-                    elif tag == "r":
-                        parts.extend(t.text or "" for t in c if _local(t.tag) == "t")
-                self.shared.append("".join(parts)[:CELL_MAX])
                 root.clear()
-                if len(self.shared) >= STRINGS_MAX:
-                    raise _Full
-        except _Full:
-            self.pack.truncated = True
+                if i >= last:
+                    break
+        except _Full:                      # out of time or the part is too big: the strings not reached stay empty
+            if needed - found.keys():
+                self.pack.truncated = True
+        return found
 
     def styles(self) -> None:
         root = self.pack.xml(self.pack.typed(self.rels, "styles", "xl/styles.xml"))
@@ -909,7 +1013,6 @@ class _Xlsx:
             raise Unreadable("unsupported", "This document cannot be read")
         props = book.find("workbookPr")
         self.date1904 = props is not None and props.get("date1904") in ("1", "true")
-        self.strings()
         self.styles()
         out = []
         for sh in listed:
@@ -921,7 +1024,30 @@ class _Xlsx:
                 break
             rows, cut = self.sheet(target)
             out.append({"name": sh.get("name", ""), "rows": rows, "truncated": cut})
+        self.resolve(out)
         return out
+
+    def resolve(self, sheets: list[dict]) -> None:
+        """Put the shared strings in the cells that point to them (_Shared), within the characters budget."""
+        needed = {v.i for sh in sheets for row in sh["rows"] for v in row if isinstance(v, _Shared)}
+        self.pack.deadline = max(self.pack.deadline, time.monotonic() + STRINGS_GRACE_S)
+        found = self.strings(needed)
+        chars = SHEET_CHARS_MAX
+        for sh in sheets:
+            rows = sh["rows"]
+            for n, row in enumerate(rows):
+                for j, v in enumerate(row):
+                    if isinstance(v, _Shared):
+                        row[j] = found.get(v.i, "")
+                chars -= sum(map(len, row))
+                if chars < 0:
+                    del rows[n:]
+                    sh["truncated"] = True
+                    break
+            if chars < 0:
+                del sheets[sheets.index(sh) + 1:]
+                self.pack.truncated = True
+                break
 
     def value(self, c: ET.Element) -> str:
         kind, v, inline = c.get("t", "n"), None, ""
@@ -933,7 +1059,9 @@ class _Xlsx:
                 inline = "".join(t.text or "" for t in ch.iter() if _local(t.tag) == "t")
         if kind == "s":
             i = _int(v, -1)
-            return self.shared[i] if 0 <= i < len(self.shared) else ""
+            if i >= STRINGS_MAX:
+                self.pack.truncated = True
+            return _Shared(i) if 0 <= i < STRINGS_MAX else ""
         if kind == "inlineStr":
             return inline[:CELL_MAX]
         if kind == "b":
@@ -975,11 +1103,12 @@ class _Xlsx:
                 (data if data is not None else el).clear()   # the rows read do not pile up in memory
                 if not vals:
                     continue
-                if at >= ROWS_MAX or self.pack.cells <= 0:
+                if at >= ROWS_MAX or self.pack.cells <= 0 or self.pack.chars <= 0:
                     raise _Full
                 rows.extend([[]] * (at - len(rows)))
                 rows.append(vals)
                 self.pack.cells -= len(vals)
+                self.pack.chars -= sum(map(len, vals))
         except _Full:
             cut = True
         return rows, cut

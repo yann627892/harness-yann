@@ -11,11 +11,12 @@ blocks):
 
 | Block | Section | What you find |
 |---|---|---|
-| **General** | **General** | language (English/French), time zone, **App** (install it on this computer or phone, below), the guided tour and the tutorial |
-| | **Appearance** | saved in this browser, in three cards. **Theme and colors**: dark/light, accent color (the logo takes it too), background (neutral or tinted with the accent), **material** (*Solid*: plain colors; *Glass*: the bars, menus and dialogs become see-through over a soft backdrop in your accent color; off when your system asks for less transparency, saved in this browser only) - the last theme, accent and background you pick also color the sign-in page and any browser that never chose one (new phone, private window). **Layout**: density, **layout** of this device (*Auto*: the touch layout on phones and tablets, the sidebar on computers; *Touch*; *Desktop* when the screen is wide enough), the first screen of the touch layout (*Last session* or *Dashboard*). **Fonts**: interface font (23, grouped by style: modern, with character, rounded, serif, easy to read, monospace) and code font (11; a font other than the default loads the first time you pick it) |
+| **General** | **General** | language (English/French), time zone, **App** (install it on this computer or phone, below), the getting started guide and the tutorial |
+| | **Appearance** | saved in this browser, in three cards. **Theme**: *Solid* (the default: plain colors) or *Glass* (the bars, menus and dialogs become see-through over a soft backdrop in your accent color; off when your system asks for less transparency), and the themes Harness installed for you next to them ([Themes](39-themes.md); **Ask Harness** for a new one), each shown as a small preview. **Options of the theme**: mode (dark, light or system), accent color (the logo takes it too), background (neutral or tinted with the accent), interface font (23, grouped by style: modern, with character, rounded, serif, easy to read, monospace) and code font (11; a font other than the default loads the first time you pick it) - the last mode, accent and background you pick also color the sign-in page and any browser that never chose one (new phone, private window). **Layout**: density, **layout** of this device (*Auto*: the touch layout on phones and tablets, the sidebar on computers; *Touch*; *Desktop* when the screen is wide enough), the first screen of the touch layout (*Last session* or *Dashboard*) |
 | | **Profile** | your pseudo, a **photo** (kept on this server, shown instead of the color and emoji, also to your Team contacts), color and emoji (picked from a searchable list) for messages, notifications and Team, with a preview; **Stay in touch**: the optional e-mail, news and anonymous counter (see [License](license)) |
 | | **Security** | change the password, two-step sign-in with Telegram (see [Telegram](telegram#two-step-sign-in)), **Privacy**: the presentation mode by default (new browsers start with your data masked), sign out everywhere |
 | | **Features** | every page of the sidebar: the ones always there, the optional ones with their switch, the options of the sessions under Sessions (below) |
+| | **Voice** | how voice messages and dictation are transcribed (on the server, Groq, OpenAI, or off), the microphone and call buttons, the voice mode |
 | **Claude** | **Claude** | authentication (status, token, API key or LLM gateway, live test), default model, automatic compaction threshold, compaction when you come back to an idle session, smart resume (a summary written for the message you come back with), short session titles (and whether Claude writes them), automatic Claude Code updates, permission mode |
 | | **Memory** | second brain cleaner: line limit per `memory.md`, **Clean now**, size of every memory file - see [Memory](memory) |
 | | **Skills** | the skills Claude sees on this server: **yours** (in `~/.claude/skills`, the workspace, a project or a topic, with where each one lives) and the ones **shipped with Harness** (refreshed by every update, read-only); **Open**, **Edit with Claude**, **Share with the community**, **New skill** - see [Skills](skills) |
@@ -23,11 +24,15 @@ blocks):
 | | **Keys** | your secrets vault (below) |
 | | **Usage** | **Daily budget**: a ceiling in dollars per day for the whole server (0 = none), counted at the price Claude Code reports for each turn (on a subscription: what the same turns would cost with an API key). A [notification](feed) at 80 %, an alert when it is reached; from then on the scheduled prompt jobs and the agents' triggers wait for the next day (skipped, with the reason), while your own messages, your messages to an agent and **Run now** still run. The card shows what today cost so far. **Start again after the usage limit** (on by default): a scheduled job or an agent run stopped by the usage limit of your Claude plan starts again by itself once the limit resets, plus a delay (60 seconds by default). Then Claude plan usage (5-hour window, week) and the plan name (Pro, Max, Ultra): the same figures as the bars at the bottom of the sidebar, read from the last Claude answer; a verified **Ultra** account has no 5-hour limit, so only the week is shown; **Show plan usage** (on for new installs) shows them here and adds the dashboard widget (experimental: it may also ask Anthropic directly when no answer came for 10 minutes); tokens per project, topic and session, tokens per day, how fast turns start (Claude Code ready / first answer, median of recent turns) |
 | **Automate** | **Crons** | the scheduled jobs: list, run now, history, editor (see [Crons](crons)); old `/crons` links open it |
-| | **Notifications** | a notification (and an optional sound) when a Claude session finishes, pulsing unread badges - saved per browser; then the [notifications feed](feed): its Telegram thread, **Server problems in the notifications**, sources and webhooks |
+| | **Webhooks** | every URL that a service calls on this server (Stripe, Shopify, GitHub, a form, a phone Shortcut, n8n...): what each one does, its last calls, test, replay, new URL, secret; also the webhooks that post to the notifications feed and the ones of agents. Made by asking Harness - see [Webhooks](webhooks) |
+| | **Events** | when something happens in Harness (a notification, an agent run that ends, a cron that fails), do one thing without AI - see [Events](events) |
+| **Notifications** | **Alerts** | what this browser and your phone do: a notification (and an optional sound) when a Claude session finishes, Team messages, pulsing unread badges (saved per browser), **Mobile notifications** (push, even with the app closed) |
+| | **Feed** | the [notifications feed](feed): its Telegram thread, **Server problems in the notifications**, the sources and what each one does in Telegram |
 | | **Telegram** | bot wizard, linking, mode (simple chat, threads, web mirror), notification options, two-step sign-in (also in Security) – see [Telegram](telegram) |
-| | **Voice** | how voice messages and dictation are transcribed (on the server, Groq, OpenAI, or off) |
 | **Extensions** | **Widgets** | the widget extensions of `<workspace>/extensions`: switch on/off, **Rescan**, **Customize the dashboard** (opens the dashboard in edit mode) – see [Dashboard widgets](dashboard-widgets) |
-| | **Pages** | the page extensions and the Overview views of the Agents page: every page pinned or not, switch on/off, **Open page**, **In the sidebar** (pin: the sidebar's Extensions folder), **Rescan** – see [Page extensions](page-extensions) |
+| | **Pages** | the page extensions: every page pinned or not, switch on/off, **Open page**, **In the sidebar** (pin: the sidebar's Extensions folder), **Rescan** – see [Page extensions](page-extensions) |
+| | **Agents views** | the extensions that bring a view of the Overview of the Agents page (a page or a widget that also brings one shows in both), switch on/off, **New view**, **Rescan** – see [Overview views](page-extensions#overview-views-of-the-agents-page) |
+| | **Themes** | the themes installed in `<workspace>/themes`: their state (in use, advanced CSS on or off, values ignored), folders that are not usable, **New theme** (asks Harness), **Choose in Appearance** – see [Themes](themes) |
 | **Workspace** | **Templates** | add a ready-made project (**starter pack**) for your kind of work; an existing project is never overwritten - see [Starter projects](starter-projects) |
 | | **Import** | the memory of another agent (Hermes, OpenClaw, Claude Code, a zip) - see [Import](import); and the way to the other imports: a memory backup (**Backup**), an agent file (Agents page) |
 | | **Backup** | repository, schedule, whitelist, history, restore – see [Backup](backup) |
@@ -37,8 +42,9 @@ blocks):
 | | **About** | the version and the useful links (docs, GitHub, community), the optional **Enterprise key** (only for companies that need one: record it, see it, remove it - see [License](license)), **Support**: Harness Maxxing is free, **Donate** opens the donation page of the website in a new tab (nothing is sent from the app); **Hide the Donate buttons** removes them from What's new and the Feedback window, in every browser - see [License](license#donations) |
 
 The docs are not in Settings: open them with the book icon at the bottom of the sidebar (in the ⊞ menu on a phone).
-The community catalogue (widgets, pages, skills shared by other users) is on the website,
-[harness-maxxing.com/community](https://harness-maxxing.com/community): Widgets, Pages and Skills link to it.
+The community catalogue (widgets, pages, Agents views, skills and themes shared by other users) is on the website,
+[harness-maxxing.com/community](https://harness-maxxing.com/community): Widgets, Pages, Agents views, Themes and Skills
+link to it.
 Old links keep working: `/settings/stats` opens **Usage**, `/settings/license` and `/settings/support` open **About**, `/settings/packs` and `/settings/projects` open **Templates**, `/settings/extensions` opens
 **Widgets**, `/settings/docs` opens the docs.
 
@@ -81,7 +87,7 @@ restarts it). Switch it off and every program gets the same share again.
 processor most (Harness, a session, an agent, heavy work, a job, the browser, Docker…) with their priority and how
 long programs wait for the processor. A high CPU figure alone is not a problem; when programs wait (more than 20 % of
 the time) the meter turns amber and says **waiting**. If the processor stays full for 10 minutes, a health problem
-(also in Notifications) names the program that takes the most; it clears itself.
+(also in Settings -> Feed) names the program that takes the most; it clears itself.
 
 ## Features
 
@@ -108,7 +114,7 @@ the pages: **Badges**, one switch per page with a counter in the sidebar (Home: 
 error; Sessions; Team; Agents), all on by default: turn one off and its page shows no number nor dot (the counts stay on
 the page itself); then **Harness Browser** (see [Harness Browser](browser)) and **Devices**, off by default (Claude uses your own
 computers and phones, see [Devices](devices)). Under **Team**, while Team is on: **Team bubbles** (the chat bubbles at the bottom right of every page,
-saved in this browser). The notification when a session finishes is in **Settings -> Notifications**, the Claude plan usage
+saved in this browser). The notification when a session finishes is in **Settings -> Alerts**, the Claude plan usage
 widget in **Settings -> Usage**, the presentation mode by default in **Settings -> Security**, the Telegram mode in
 **Settings -> Telegram**.
 
@@ -147,7 +153,7 @@ bar at the bottom, the conversation fills the screen. Two buttons sit at the top
 On a computer the bottom of the sidebar holds the same status block, with the keyboard shortcuts next to the docs.
 The pages with a list (Sessions, Agents, Team, Tasks, Infra, Files, E-mail, Notifications) show it in a second bar
 next to the sidebar (see [Sessions](04-sessions.md#layout)); the touch layout opens the same list from ☰.
-The guided tour and the interactive tutorial are in **Settings -> General**; **Sign out** is in **Settings ->
+The getting started guide (also in Help, **?** at the bottom left) and the interactive tutorial are in **Settings -> General**; **Sign out** is in **Settings ->
 Security**.
 
 Also:

@@ -16,7 +16,7 @@ import { Kbd, Spinner, usePresentation } from '@/components/ui'
 import { useNav } from './nav'
 import { useShortcutsDialog } from './dialog-stores'
 import { SETTINGS_SECTIONS } from '@/pages/settings/sections'
-import { startTour, TUTORIAL_PATHS, tutorialHref } from '@/tour/store'
+import { startGuide, TUTORIAL_PATHS, tutorialHref } from '@/tour/store'
 import { installApp, useInstallMode } from '@/pwa'
 
 function useDebounced<T>(v: T, ms: number) {
@@ -43,6 +43,7 @@ export function CommandPalette() {
   const chip: Chip = q.trim() ? picked : 'all'
   const logout = useLogout()
   const theme = useUI((s) => s.theme)
+  const forcedMode = useUI((s) => s.customTheme?.mode ?? null)
   const setTheme = useUI((s) => s.setTheme)
   const setPresentation = useUI((s) => s.setPresentation)
   const openShortcuts = useShortcutsDialog((s) => s.setOpen)
@@ -200,14 +201,17 @@ export function CommandPalette() {
         ? [{ id: 'act:browser', title: t('browser.mine.open') || t('nav.browser'), group: actions, icon: Globe, keywords: ['browser', 'chromium', 'navigateur', 'web'], perform: () => openMyBrowser() } satisfies Command]
         : []),
       { id: 'nav:x', title: t('ext.hubTitle'), group: nav, icon: Blocks, keywords: ['extensions', 'pages', 'plugins'], perform: ({ navigate }) => navigate('/settings/pages') },
-      {
-        id: 'act:theme',
-        title: resolveTheme(theme) === 'dark' ? t('palette.lightTheme') : t('palette.darkTheme'),
-        group: actions,
-        icon: resolveTheme(theme) === 'dark' ? Sun : Moon,
-        keywords: ['theme', 'dark', 'light'],
-        perform: () => setTheme(resolveTheme(theme) === 'dark' ? 'light' : 'dark'),
-      },
+      // a theme made for one mode imposes it: switching the Mode setting would change nothing on screen
+      ...(forcedMode
+        ? []
+        : [{
+            id: 'act:theme',
+            title: resolveTheme(theme) === 'dark' ? t('palette.lightTheme') : t('palette.darkTheme'),
+            group: actions,
+            icon: resolveTheme(theme) === 'dark' ? Sun : Moon,
+            keywords: ['theme', 'dark', 'light'],
+            perform: () => setTheme(resolveTheme(theme) === 'dark' ? 'light' : 'dark'),
+          } satisfies Command]),
       {
         id: 'act:presentation',
         title: presentation ? t('presentation.off') : t('presentation.on'),
@@ -219,7 +223,7 @@ export function CommandPalette() {
       },
       // keyboard shortcuts need a keyboard: not on a phone (same rule as the Help menu)
       ...(window.matchMedia('(any-pointer: fine)').matches ? [{ id: 'act:shortcuts', title: t('shortcuts.title'), group: actions, icon: Keyboard, shortcut: ['?'], perform: () => openShortcuts(true) }] : []),
-      { id: 'help:tour', title: t('help.tour'), group: t('help.title'), icon: Compass, keywords: ['tour', 'help', 'guide', 'onboarding', 'visite', 'aide'], perform: () => startTour() },
+      { id: 'help:tour', title: t('help.tour'), group: t('help.title'), icon: Compass, keywords: ['tour', 'help', 'guide', 'onboarding', 'visite', 'aide', 'démarrage', 'getting started'], perform: () => startGuide() },
       ...(tutorialPath
         ? [{ id: 'help:tutorial', title: t('help.tutorial'), group: t('help.title'), icon: GraduationCap, keywords: ['tutorial', 'learn', 'tutoriel'], perform: ({ navigate }) => navigate(tutorialHref(tutorialPath)) } satisfies Command]
         : []),
@@ -283,7 +287,7 @@ export function CommandPalette() {
     for (const d of docs || [])
       list.push({ id: `doc:${d.slug}`, title: d.title, hint: d.section, group: docsG, icon: BookOpen, perform: ({ navigate }) => navigate(`/docs/${d.slug}`) })
     return list
-  }, [t, theme, presentation, ws, docs, setTheme, setPresentation, openShortcuts, logout, install, tutorialPath, navItems, agentsOn, agentList, groupList, open, browserOn])
+  }, [t, theme, forcedMode, presentation, ws, docs, setTheme, setPresentation, openShortcuts, logout, install, tutorialPath, navItems, agentsOn, agentList, groupList, open, browserOn])
 
   const pageCmds = Object.values(sources).flat()
   const all = [...pageCmds, ...staticCmds]

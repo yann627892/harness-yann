@@ -77,7 +77,7 @@ def test_the_send_button_wraps_under_the_tools_instead_of_leaving_the_screen():
     # right group shrank to nothing and Send was cut by the right edge; the bar wraps so every button stays in sight
     src = (WEB / "features" / "composer" / "MessageBox.tsx").read_text()
     assert '<div className="@container flex min-w-0 flex-wrap items-center gap-1 px-1.5 pb-1.5">' in src
-    assert '<div className="ml-auto flex min-w-0 items-center gap-1.5">' in src
+    assert '<div className="ml-auto flex min-w-0 items-center gap-1.5 max-md:@max-md:gap-1">' in src
 
 
 def test_a_diff_keeps_its_line_numbers_and_hunk_heads_in_sight_when_scrolled_sideways():
@@ -404,7 +404,8 @@ def test_a_notification_source_keeps_its_name_readable_on_a_phone():
     # the row wraps the select under it instead of cutting the name
     src = (WEB / "features" / "feed" / "FeedSettings.tsx").read_text()
     start = src.index('data-testid="feed-source"')
-    row = src[start:src.index("\nfunction ", start)]  # SourceRow only
+    end = src.find("\nfunction ", start)
+    row = src[start:end if end >= 0 else None]  # SourceRow only (the last function of the file)
     col = re.search(r'<div className="([^"]*)">', row)
     assert col and {"flex-1", "basis-40"} <= set(col[1].split())
     assert 'className="w-44"' in row  # wider than what is left next to a 10 rem name column on a phone

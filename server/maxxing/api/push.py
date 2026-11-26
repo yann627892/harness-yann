@@ -1,4 +1,4 @@
-"""Web Push: "Harness has finished" on the phone, even with the installed app closed (Settings -> Notifications ->
+"""Web Push: "Harness has finished" on the phone, even with the installed app closed (Settings -> Alerts ->
 Mobile notifications). See docs/dev/API.md#push and maxxing/webpush.py."""
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ async def remove_device(did: str):
 
 @router.post("/test")
 async def test():
-    n = await asyncio.to_thread(webpush.notify, _text("done"), _text("test"), "/settings/notifications", "mx-push-test")
+    n = await asyncio.to_thread(webpush.notify, _text("done"), _text("test"), "/settings/alerts", "mx-push-test")
     return {"sent": n}
 
 
@@ -74,7 +74,9 @@ async def pending(body: Pending):
 
 def rings(session: dict) -> bool:
     """The same rule as the Telegram bell, for every session: a turn of a person that ended, not a job's or an
-    agent's, and not one answered on Telegram already."""
+    agent's, not one answered on Telegram already, and not a session muted on the phones (`push` False)."""
+    if session.get("push") is False:
+        return False
     last = session.get("last_turn") if isinstance(session.get("last_turn"), dict) else {}
     return session.get("source") not in ("cron", "agent") and not session.get("cron") \
         and (last.get("kind") or "user") == "user" and (last.get("source") or "web") not in ("telegram", "cron", "system", "agent")

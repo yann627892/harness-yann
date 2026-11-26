@@ -314,6 +314,31 @@ def test_continue_in_sessions_twice_opens_the_same_copy(client, topic):
             if (s.get("title") or "").startswith("Writer")] == [first["id"]]
 
 
+def test_continue_in_sessions_twice_at_once_opens_one_copy(client, topic, monkeypatch):
+    import threading as th
+    import time
+    from maxxing.sessions import store
+    _on(client)
+    _create(client)
+    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    sid = run["session"]["id"]
+    wait_idle(client, sid)
+    real = store.new_meta
+
+    def slow(*a, **k):                              # a big log to copy: both requests are past the check
+        time.sleep(0.3)
+        return real(*a, **k)
+    monkeypatch.setattr(store, "new_meta", slow)
+    out: list = []
+    ts = [th.Thread(target=lambda: out.append(agents.continue_in_sessions(A, sid)["id"])) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    copies = [i for i in store.list_ids() if ((store.read(i) or {}).get("from_agent") or {}).get("session") == sid]
+    assert len(set(out)) == 1 and copies == [out[0]]
+
+
 def test_the_agents_list_reads_the_sessions_once(client, topic, monkeypatch):
     from maxxing.sessions import store
     _on(client)
@@ -1108,6 +1133,19 @@ def test_continue_in_sessions_keeps_the_pending_compaction_summary(client, topic
     assert store.read(copy["id"])["seed"] == "SUMMARY OF THE EARLIER TURNS"
 
 
+def test_continue_in_sessions_keeps_the_run_muted_on_the_phones_and_favorite(client, topic):
+    from maxxing.sessions import store
+    _on(client)
+    _create(client)
+    run = client.post("/api/agents/acme/blog/writer/run", json={"text": "NOTOOL hi"}).json()
+    sid = run["session"]["id"]
+    wait_idle(client, sid)
+    assert client.patch(f"/api/sessions/{sid}", json={"push": False, "favorite": True}).status_code == 200
+    copy = client.post(f"/api/agents/acme/blog/writer/runs/{sid}/continue").json()["session"]
+    assert copy["push"] is False and copy["favorite"] is True
+    assert store.read(copy["id"])["push"] is False
+
+
 def test_fingerprint_ignores_a_link_to_a_device_or_a_pipe(mx, tmp_path, monkeypatch):
     import os, time
     from pathlib import Path
@@ -1144,3 +1182,35 @@ def test_fingerprint_sees_a_change_made_through_a_link_or_in_a_big_file(mx, tmp_
     before = agents._fingerprint("x")[".claude/settings.json"]
     big.write_bytes(b"x" * (agents.FINGERPRINT_MAX + 5))
     assert agents._fingerprint("x")[".claude/settings.json"] != before
+
+
+def test_a_role_with_a_section_heading_stays_whole_and_can_be_replaced(client, topic, mx):
+    _on(client)
+    _create(client)
+    hostile = "Write posts.\n## Rules\nSecret order\n@memory.md\n@/etc/hidden.md"
+    r = client.patch("/api/agents/acme/blog/writer", json={"description": hostile})
+    assert r.status_code == 200, r.text
+    shown = client.get("/api/agents/acme/blog/writer").json()["description"]
+    assert shown == "Write posts.\n### Rules\nSecret order\n@/etc/hidden.md"     # all of it, in the Role window
+    assert client.patch("/api/agents/acme/blog/writer", json={"description": "Clean role"}).status_code == 200
+    md = (mx["ws"] / "projects" / "acme" / "topics" / "blog" / "agents" / "writer" / "CLAUDE.md").read_text()
+    assert "Secret order" not in md and "hidden" not in md and md.count("@memory.md") == 1
+
+
+def test_a_thread_line_without_a_valid_date_is_not_the_last_run(client, topic, mx):
+    _on(client)
+    _create(client)
+    f = agents._state_file(A, "jsonl")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    good = {"kind": "result", "ok": True, "at": 1700000000.0, "text": "done"}
+    for bad in ({"kind": "result", "ok": False}, {"kind": "skip", "at": "2026-11-25T07:00:00"}):
+        f.write_text(json.dumps(good) + "\n" + json.dumps(bad) + "\n")
+        assert agents.status(A)["last_run"]["at"] == 1700000000.0
+
+
+def test_an_imported_name_loses_invisible_and_control_characters():
+    from maxxing import agent_rooms
+    evil = "Pay\u202egnp.exe\x00 bot\u200b"
+    assert agents.clean({"name": evil})["name"] == "Paygnp.exe bot"
+    assert agents.clean({"name": "Team \U0001f469\u200d\U0001f4bb"})["name"] == "Team \U0001f469\u200d\U0001f4bb"   # ZWJ emoji kept
+    assert agent_rooms._line("Room\u2066\x1b[31m", 60) == "Room[31m"

@@ -338,6 +338,7 @@ export const useSessionsUI = create<State>()(
         const cols = get().cols
         const i = cols.findIndex((c) => c.key === key)
         if (i > 0 && cols[i].below) get().moveBeside(key, cols[groupAt(cols, i)[0]].key, 'right')
+        else if (i >= 0 && cols[i + 1]?.below) get().moveBeside(key, cols[i + 1].key, 'left')   // the top one: on its left
       },
       toGrid: () => set((s) => ({ cols: normalizeCols(s.cols.map((c, i) => (i % 2 ? { ...c, below: true } : (({ below: _b, ...r }) => r as Col)(c)))) })),
       toColumns: () => set((s) => ({ cols: s.cols.map((c) => (({ below: _b, ...r }) => r as Col)(c)) })),
@@ -453,14 +454,18 @@ export const useSessionsUI = create<State>()(
 /* ---------------------------------------------------------------- Local "pending" messages
  * Messages sent from this tab that are not in the log yet: shown as an optimistic bubble (sent while
  * idle) or in the queue stack (sent while running), removed when the matching `user` event arrives. */
-export type Pending = { lid: string; text: string; attachments: string[]; queued: boolean; at: number; /** A voice message being sent. */ voice?: boolean; /** The @ it names (chips until the log has it). */ mentions?: SentMention[] }
+export type Pending = { lid: string; text: string; attachments: string[]; queued: boolean; at: number; /** Its outbox id, sent as `client_id`: found again in the event's `client_ids`. */ cid?: string; /** A voice message being sent. */ voice?: boolean; /** The @ it names (chips until the log has it). */ mentions?: SentMention[] }
 
 type PendingState = {
   bySession: Record<string, Pending[]>
   add: (sid: string, p: Omit<Pending, 'lid' | 'at'>) => string
+  /** The server queued it, or not (the answer of the send): changes it in place (gone if already settled). */
+  setQueued: (sid: string, lid: string, queued: boolean) => void
   remove: (sid: string, lid: string) => void
-  /** A `user` event arrived: drop the first pending with the same text. */
-  settle: (sid: string, text: string) => void
+  /** A `user` event arrived: drop every pending it carries (`ids`: the server merges the messages sent while a turn
+   *  runs, or held behind a summary, into ONE event with all their ids and the texts joined), else the first one with
+   *  the same text. */
+  settle: (sid: string, text: string, ids?: string[]) => void
   clearQueued: (sid: string) => void
   trimQueued: (sid: string, keep: number) => void
 }
@@ -472,13 +477,20 @@ export const usePending = create<PendingState>((set) => ({
     set((s) => ({ bySession: { ...s.bySession, [sid]: [...(s.bySession[sid] || []), { ...p, lid, at: Date.now() }] } }))
     return lid
   },
+  setQueued: (sid, lid, queued) =>
+    set((s) => ({ bySession: { ...s.bySession, [sid]: (s.bySession[sid] || []).map((p) => (p.lid === lid ? { ...p, queued } : p)) } })),
   remove: (sid, lid) => set((s) => ({ bySession: { ...s.bySession, [sid]: (s.bySession[sid] || []).filter((p) => p.lid !== lid) } })),
-  settle: (sid, text) =>
+  settle: (sid, text, ids) =>
     set((s) => {
       const list = s.bySession[sid]
       if (!list?.length) return s
+      if (ids?.length) {
+        const left = list.filter((p) => !p.cid || !ids.includes(p.cid))
+        if (left.length < list.length) return { bySession: { ...s.bySession, [sid]: left } }
+      }
+      // by text: only a message sent without an id when the event carries ids (one with its own id waits for it)
       const norm = text.trim()
-      const i = list.findIndex((p) => p.text.trim() === norm)
+      const i = list.findIndex((p) => p.text.trim() === norm && !(ids?.length && p.cid))
       if (i < 0) return s
       return { bySession: { ...s.bySession, [sid]: list.filter((_, j) => j !== i) } }
     }),

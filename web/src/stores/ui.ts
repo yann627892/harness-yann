@@ -5,6 +5,7 @@ import { persist } from 'zustand/middleware'
 import type { Language } from '@/lib/types'
 import { applyFavicon } from '@/lib/accent'
 import { applyFonts, MONO_FONTS, SANS_FONTS, type MonoFont, type SansFont } from '@/lib/fonts'
+import { applyThemeCss, isThemeFile, type InstalledTheme, type ThemeLook, themeLook } from '@/lib/themes'
 
 export type Theme = 'dark' | 'light' | 'system'
 export type Density = 'comfortable' | 'compact'
@@ -34,6 +35,12 @@ type UIState = {
   density: Density
   tint: Tint
   material: Material
+  /** An installed theme in use (<workspace>/themes, lib/themes.ts) on top of `material` (its base); null = the
+   *  built-in Solid or Glass. Its CSS is kept here so index.html paints it before the app loads. */
+  customTheme: ThemeLook | null
+  /** The owner switched the advanced CSS of the theme in use off (this browser; back on when a theme is picked). */
+  themeCssOff: boolean
+  setThemeCssOff: (off: boolean) => void
   /** Interface and code fonts (this browser). */
   font: SansFont
   monoFont: MonoFont
@@ -55,8 +62,6 @@ type UIState = {
   /** Presentation mode turned on only for a Feedback screenshot: a page reloaded or closed during the shot turns it
    *  back off on the next load. */
   presentationShot: boolean
-  /** The guided tour was completed or skipped (it starts automatically once, after onboarding). */
-  tourDone: boolean
   /** Desktop notification when a Claude session finishes its turn (this browser). */
   notifyDone: boolean
   /** Notifications panel next to the dashboard widgets (wide screens). */
@@ -78,6 +83,10 @@ type UIState = {
   setDensity: (d: Density) => void
   setTint: (t: Tint) => void
   setMaterial: (m: Material) => void
+  /** Picks an installed theme: its base, its CSS, and its preset options (fonts, accent...) once. */
+  pickTheme: (t: InstalledTheme) => void
+  /** The installed theme changed on the server (null: removed, back to its base). */
+  refreshTheme: (t: InstalledTheme | null) => void
   setFont: (f: SansFont) => void
   setMonoFont: (f: MonoFont) => void
   setLanguage: (l: Language) => void
@@ -89,7 +98,6 @@ type UIState = {
   setLayout: (l: Layout) => void
   setTouchHome: (h: TouchHome) => void
   setPresentation: (on: boolean) => void
-  setTourDone: (done: boolean) => void
   setNotify: (p: Partial<Pick<UIState, 'notifyDone' | 'notifyTeam' | 'teamBubbles' | 'agentPreview' | 'notifySound' | 'badgePulse'>>) => void
   setFeedPanel: (v: boolean) => void
   adoptLook: (look: Look) => void
@@ -108,6 +116,9 @@ export const useUI = create<UIState>()(
       density: 'comfortable',
       tint: 'neutral',
       material: 'solid',
+      customTheme: null,
+      themeCssOff: false,
+      setThemeCssOff: (themeCssOff) => set({ themeCssOff }),
       font: 'inter',
       monoFont: 'system',
       language: initialLang(),
@@ -121,7 +132,6 @@ export const useUI = create<UIState>()(
       touchHome: 'session',
       presentation: false,
       presentationShot: false,
-      tourDone: false,
       notifyDone: false,
       notifyTeam: true,
       teamBubbles: true,
@@ -134,7 +144,25 @@ export const useUI = create<UIState>()(
       setAccent: (accent) => set({ accent, lookChosen: true }),
       setDensity: (density) => set({ density }),
       setTint: (tint) => set({ tint, lookChosen: true }),
-      setMaterial: (material) => set({ material }),
+      setMaterial: (material) => set({ material, customTheme: null }),
+      pickTheme: (t) => {
+        const look = themeLook(t)
+        if (!look) return
+        const o = t.options
+        set((s) => ({
+          material: t.base,
+          customTheme: look,
+          themeCssOff: false,
+          theme: look.mode ? s.theme : (o.mode ?? s.theme),   // a one-mode theme forces its mode while in use (bindUIToDocument), the setting stays
+          accent: o.accent ?? s.accent,
+          tint: o.tint ?? s.tint,
+          font: o.font && o.font in SANS_FONTS ? o.font : s.font,
+          monoFont: o.mono && o.mono in MONO_FONTS ? o.mono : s.monoFont,
+          density: o.density ?? s.density,
+          lookChosen: true,
+        }))
+      },
+      refreshTheme: (t) => set((s) => (t ? { customTheme: themeLook(t), material: t.base } : { customTheme: null, material: s.material })),
       setFont: (font) => set({ font }),
       setMonoFont: (monoFont) => set({ monoFont }),
       setLanguage: (language) => set({ language }),
@@ -146,7 +174,6 @@ export const useUI = create<UIState>()(
       setLayout: (layout) => set({ layout }),
       setTouchHome: (touchHome) => set({ touchHome }),
       setPresentation: (presentation) => set({ presentation }),
-      setTourDone: (tourDone) => set({ tourDone }),
       setNotify: (p) => set(p),
       setFeedPanel: (feedPanel) => set({ feedPanel }),
       adoptLook: ({ theme, accent, tint }) => set({ theme, accent, tint }),
@@ -169,6 +196,9 @@ export const useUI = create<UIState>()(
         if (!(out.font in SANS_FONTS)) out.font = 'inter'
         if (out.tint !== 'tinted') out.tint = 'neutral'
         if (out.material !== 'glass') out.material = 'solid'
+        const ct = out.customTheme as ThemeLook | null | undefined
+        out.customTheme = ct && typeof ct === 'object' && typeof ct.css === 'string' && /^[a-z0-9][a-z0-9-]{1,39}$/.test(ct.id) ? { ...ct, extra: typeof ct.extra === 'string' ? ct.extra : '', cssState: ct.cssState ?? 'none', logo: ct.logo && isThemeFile(ct.logo.light) && isThemeFile(ct.logo.dark) ? ct.logo : null } : null
+        out.themeCssOff = out.themeCssOff === true
         if (!(out.monoFont in MONO_FONTS)) out.monoFont = 'system'
         if (out.layout !== 'touch' && out.layout !== 'desktop') out.layout = 'auto'
         out.sidebarWidth = typeof out.sidebarWidth === 'number' && Number.isFinite(out.sidebarWidth) ? clampSidebar(out.sidebarWidth) : null
@@ -192,19 +222,28 @@ export function resolveTheme(t: Theme): 'dark' | 'light' {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
+/** Light or dark as on screen: a theme made for one mode only imposes it over the Mode setting. */
+export function shownMode(theme: Theme, ct: { mode: 'light' | 'dark' | null } | null | undefined): 'dark' | 'light' {
+  return ct?.mode ?? resolveTheme(theme)
+}
+
 /** Applies theme/accent/density/lang to <html>. Called once from main.tsx (subscribes). */
 export function bindUIToDocument() {
   const apply = () => {
     const s = useUI.getState()
     const r = document.documentElement
-    const dark = resolveTheme(s.theme) === 'dark'
+    const ct = s.customTheme
+    const dark = shownMode(s.theme, ct) === 'dark'
     r.classList.toggle('dark', dark)
     r.dataset.accent = s.accent
     r.dataset.density = s.density
     r.dataset.tint = s.tint
     r.dataset.material = s.material
+    if (ct) r.dataset.themeId = ct.id
+    else delete r.dataset.themeId
+    applyThemeCss(ct, s.themeCssOff)
     r.lang = s.language
-    applyFavicon(s.accent)
+    applyFavicon(s.accent, ct?.logo ? ct.logo[dark ? 'dark' : 'light'] : null)
     applyFonts(s.font, s.monoFont)
     // The app theme may differ from the OS one: every theme-color meta (dark/light media variants) follows it.
     document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute('content', dark ? '#09090b' : '#ffffff'))

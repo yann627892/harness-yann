@@ -59,6 +59,22 @@ def test_an_agent_turn_start_and_end_name_the_agent(mx):
     service._known.clear()
 
 
+def test_a_write_in_the_same_clock_tick_is_seen(mx):
+    """Two writes within one tick of the kernel's coarse clock keep the same mtime_ns: the watcher still sees the
+    second one (an atomic write is a new inode), instead of taking the file as unchanged."""
+    service._known.clear()
+    service._agent_turns.clear()
+    sid = _session(AGENT)
+    service._scan(False)                                              # baseline (idle)
+    service._agent_turns.clear()
+    f = store.sessions_dir() / f"{sid}.json"
+    before = f.stat().st_mtime_ns
+    store.update(sid, state="running")
+    os.utime(f, ns=(f.stat().st_atime_ns, before))                    # same tick as the baseline's write
+    assert _pass() == {AGENT}
+    service._known.clear()
+
+
 def test_a_new_running_agent_session_names_the_agent(mx):
     service._known.clear()
     service._agent_turns.clear()

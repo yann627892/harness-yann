@@ -229,6 +229,45 @@ def test_remove_lists_and_refuses_essentials(st, capsys):
     assert cli.main(["deps", "remove", "uv"]) == 1 and "needed" in capsys.readouterr().err
 
 
+def test_drop_other_libc_keeps_only_this_hosts_native_builds(tmp_path):
+    nm = tmp_path / "node_modules"
+    pkgs = {"@rspack/binding-linux-x64-gnu": ["glibc"], "@rspack/binding-linux-x64-musl": ["musl"],
+            "@rspack/core": None, "compositor-musl": ["musl"], "any-libc": []}
+    for name, libc in pkgs.items():
+        (nm / name).mkdir(parents=True)
+        (nm / name / "package.json").write_text(json.dumps({"name": name, **({"libc": libc} if libc is not None else {})}))
+    (nm / "broken").mkdir()
+    (nm / "broken/package.json").write_text("{")
+    assert deps.drop_other_libc(nm, "musl") == [] and deps.drop_other_libc(nm, "") == []
+    assert deps.drop_other_libc(nm, "glibc") == ["@rspack/binding-linux-x64-musl", "compositor-musl"]
+    left = {p.parent.relative_to(nm).as_posix() for p in nm.glob("**/package.json")}
+    assert left == {"@rspack/binding-linux-x64-gnu", "@rspack/core", "any-libc", "broken"}
+
+
+def test_drop_other_libc_never_deletes_through_a_link(tmp_path):
+    mods = tmp_path / "node_modules"
+    mods.mkdir()
+    for name in ("scope/pkg", "linked"):
+        d = tmp_path / "outside" / name
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"libc": ["musl"]}))
+    (mods / "@evil").symlink_to(tmp_path / "outside" / "scope")
+    (mods / "linked").symlink_to(tmp_path / "outside" / "linked")
+    assert deps.drop_other_libc(mods, libc="glibc") == []
+    assert (tmp_path / "outside" / "scope" / "pkg" / "package.json").exists()
+    assert (tmp_path / "outside" / "linked" / "package.json").exists()
+
+
+def test_drop_other_libc_follows_npm_negations_and_skips_non_objects(tmp_path):
+    nm = tmp_path / "node_modules"
+    pkgs = {"not-musl": {"libc": ["!musl"]}, "not-glibc": {"libc": ["!glibc"]}, "a-list": ["x"]}
+    for name, data in pkgs.items():
+        (nm / name).mkdir(parents=True)
+        (nm / name / "package.json").write_text(json.dumps(data))
+    assert deps.drop_other_libc(nm, "glibc") == ["not-glibc"]
+    assert {p.parent.name for p in nm.glob("*/package.json")} == {"not-musl", "a-list"}
+
+
 def test_clean_drops_old_versions_orphans_caches_and_big_logs(st, monkeypatch):
     home = deps.root_home()
     (home / ".cache/uv/x").mkdir(parents=True)

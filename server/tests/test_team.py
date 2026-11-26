@@ -215,8 +215,9 @@ def test_remote_group_changes(client, sent):
     lea, tom = teampeer.pid(LEA), teampeer.pid(TOM)
     g = "g_" + "cd" * 8
     roster = [{"address": LEA}, {"address": ME}, {"address": TOM}]
-    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": roster, "keys": {}})
-    assert client.get(f"/api/team/chats/{g}").json()["chat"]["members"] == [lea, tom]   # Tom is a contact: kept without a key
+    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": roster,
+                                  "keys": {TOM: teampeer._b64(b"p" * 32)}})
+    assert client.get(f"/api/team/chats/{g}").json()["chat"]["members"] == [lea, tom]   # Tom is a contact, the pair key came
     with pytest.raises(team.TeamError):                                                    # not the creator
         team.apply_remote(TOM, True, {"type": "chat", "chat": g, "kind": "group", "name": "x", "members": roster, "keys": {}})
     team.apply_remote(TOM, True, {"type": "leave", "chat": g})
@@ -226,6 +227,20 @@ def test_remote_group_changes(client, sent):
     team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": [{"address": LEA}], "keys": {}})
     c = client.get(f"/api/team/chats/{g}").json()["chat"]
     assert c["left"] and client.post(f"/api/team/chats/{g}/messages", json={"text": "hi"}).status_code == 409
+
+
+def test_creator_adds_my_other_contact_without_consent(client, sent):
+    lea, tom = teampeer.pid(LEA), teampeer.pid(TOM)
+    g = "g_" + "ab" * 8
+    roster = [{"address": LEA}, {"address": ME}, {"address": TOM}]
+    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": roster, "keys": {}})
+    assert client.get(f"/api/team/chats/{g}").json()["chat"]["members"] == [lea]   # Tom: no key from the creator, not a member
+    assert TOM not in {a for addrs, _ in sent for a in addrs}
+    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": roster,
+                                  "keys": {TOM: teampeer._b64(b"p" * 32)}})
+    assert client.get(f"/api/team/chats/{g}").json()["chat"]["members"] == [lea, tom]
+    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "Lea's", "members": roster, "keys": {}})
+    assert client.get(f"/api/team/chats/{g}").json()["chat"]["members"] == [lea, tom]   # already in: kept on a later roster
 
 
 def test_read_receipts_mute_presence(client, sent, monkeypatch):
@@ -451,7 +466,8 @@ def test_a_member_cannot_hide_a_message_by_claiming_its_id_first(client, sent):
     lea, tom = teampeer.pid(LEA), teampeer.pid(TOM)
     g = "g_" + "ef" * 8
     roster = [{"address": LEA}, {"address": ME}, {"address": TOM}]
-    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "g", "members": roster, "keys": {}})
+    team.apply_remote(LEA, True, {"type": "chat", "chat": g, "kind": "group", "name": "g", "members": roster,
+                                  "keys": {TOM: teampeer._b64(b"p" * 32)}})
     msg = {"id": "m_aaaaaaaa", "at": 1, "kind": "text"}
     team.apply_remote(LEA, True, {"type": "message", "chat": g, "message": msg | {"text": "fake from lea"}})
     team.apply_remote(TOM, True, {"type": "message", "chat": g, "message": msg | {"text": "real from tom"}})
@@ -655,3 +671,16 @@ def test_one_summary_of_a_chat_at_a_time(client, sent, monkeypatch):
     gate.set()
     first.join(10)
     assert team.summarize(cid, since=0)["kind"] == "summary" and len(seen) == 2
+
+
+def test_summary_of_a_left_group_is_refused_before_claude_runs(monkeypatch):
+    now = time.time()
+    msgs = [{"id": f"m{i}", "author": "me", "at": now - 100 + i, "text": f"hello {i}", "kind": "text"} for i in range(3)]
+    config.write_json(team._path(), {"me": "me", "chats": [{"id": "g_1", "kind": "group", "name": "G", "emoji": "", "members": ["p1"],
+                                                            "created": now - 200, "read_at": now, "messages": msgs,
+                                                            "remote": False, "admin": "p1", "left": "removed"}]})
+    calls = []
+    monkeypatch.setattr(team.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    with pytest.raises(team.TeamError) as e:
+        team.summarize("g_1", ids=["m0", "m1", "m2"])
+    assert (e.value.status, e.value.code) == (409, "left") and calls == []   # Claude is not paid for a summary thrown away

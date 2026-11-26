@@ -18,14 +18,15 @@ import { BackupSection } from './sections/Backup'
 import { VoiceSection } from './sections/Voice'
 import { KeysSection } from './sections/Keys'
 import { McpSection } from './sections/Mcp'
-import { PagesSection, WidgetsSection } from './sections/Extensions'
+import { PagesSection, ViewsSection, WidgetsSection } from './sections/Extensions'
+import { ThemesSection } from './sections/Themes'
 import { SystemSection } from './sections/System'
 import { TrashSection } from './sections/Trash'
 import { TemplatesSection } from './sections/Templates'
 import { ImportSection } from './sections/Import'
 import { AppearanceSection } from './sections/Appearance'
 import { SkillsSection } from './sections/Skills'
-import { NotificationsSection } from './sections/Notifications'
+import { AlertsSection, FeedSection } from './sections/Notifications'
 import { UsageSection } from './sections/Usage'
 import { AboutSection } from './sections/About'
 import { MemorySection } from './sections/Memory'
@@ -40,13 +41,19 @@ const DevicesSection = React.lazy(withGroups(['devices'], () => import('@/featur
 // The crons section is a whole page (list, history, editor): its own chunk, loaded when it opens.
 const CronsSection = React.lazy(() => import('@/pages/crons'))
 
+// Webhooks and Events: one chunk (and texts) for both, loaded when one of them opens.
+const loadHooks = withGroups(['webhooks'], () => import('@/features/webhooks/WebhooksSettings'))
+const WebhooksSection = React.lazy(() => loadHooks().then((m) => ({ default: m.WebhooksSection })))
+const EventsSection = React.lazy(() => loadHooks().then((m) => ({ default: m.EventsSection })))
+
 const COMPONENTS: Record<SettingsSectionId, React.ComponentType> = {
   general: GeneralSection,
   appearance: AppearanceSection,
   skills: SkillsSection,
   profile: ProfileSection,
   features: FeaturesSection,
-  notifications: NotificationsSection,
+  alerts: AlertsSection,
+  feed: FeedSection,
   usage: UsageSection,
   about: AboutSection,
   memory: MemorySection,
@@ -59,12 +66,16 @@ const COMPONENTS: Record<SettingsSectionId, React.ComponentType> = {
   mcp: McpSection,
   widgets: WidgetsSection,
   pages: PagesSection,
+  views: ViewsSection,
+  themes: ThemesSection,
   templates: TemplatesSection,
   import: ImportSection,
   trash: TrashSection,
   system: SystemSection,
   updates: UpdatesSection,
   crons: CronsSection,
+  webhooks: WebhooksSection,
+  events: EventsSection,
   browser: BrowserSection,
   devices: DevicesSection,
 }

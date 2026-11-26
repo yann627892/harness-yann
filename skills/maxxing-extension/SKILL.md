@@ -53,7 +53,11 @@ authors to add something an extension can do.
 - Secrets: the user stores them in Settings -> Keys; read them with `ctx["secret"]("NAME")`
   (returns None when missing -> return a Card saying which key to add). Never hard-code a token.
 - Persistent data: `ctx["state_dir"]` (a folder reserved for this extension).
-- `ctx` = `{"id", "workspace", "state_dir", "secret": fn(name), "config": {"timezone", "language", "public_url"}}`.
+- `ctx` = `{"id", "workspace", "state_dir", "secret": fn(name), "config": {"timezone", "language", "public_url"},
+  "webhook_data": fn(id_or_name, after=0, limit=100)}`.
+- Live data from a service (Stripe sales, form answers): a webhook with action `store` (skill `maxxing-webhooks`), read
+  by `ctx["webhook_data"]("Stripe sales", after=0, limit=500)` -> rows `[{id, at, call, data, fields?}]` oldest first
+  (`fields` = the hook's columns; `after` = the last row id already seen; limit 1000; `[]` for an unknown hook).
 - Widget results are cached `ttl` seconds (manifest, default 300); the card's refresh button forces it.
 
 ## Card schema
@@ -241,7 +245,7 @@ Rules: render from `onData` every time (it is called again on each change, rebui
 `off`), make every agent clickable (also with the keyboard: a `<button>`), `maxxing.resize(document.body.scrollHeight)`
 after each render, light and dark (`maxxing.theme` + theme variables), a phone width (~360 px), and
 `@media (prefers-reduced-motion: reduce)` stops animations. Ask the user the style they want (a mission control, a
-farm, a train station, a plain table…) before building it. Then: **Settings -> Widgets** (or **Pages**) **-> Rescan**, Agents ->
+farm, a train station, a plain table…) before building it. Then: **Settings -> Agents views -> Rescan**, Agents ->
 Overview -> the view menu -> its name.
 
 ## Steps

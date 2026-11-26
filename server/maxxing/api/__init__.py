@@ -8,6 +8,7 @@ except the public auth endpoints.
 ROUTERS = [
     "auth",
     "onboarding",
+    "guide",
     "claude",
     "workspace",
     "sessions",
@@ -19,6 +20,8 @@ ROUTERS = [
     "filesite",
     "tasks",
     "crons",
+    "webhooks",
+    "themes",
     "telegram",
     "backup",
     "settings",

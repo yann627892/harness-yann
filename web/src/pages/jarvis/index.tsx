@@ -4,7 +4,7 @@
 // Its settings (rights, ask first, daily conversation, brief and night pass times, internals) sit in the gear menu.
 import * as React from 'react'
 import { Link } from 'react-router'
-import { CalendarDays, Check, ExternalLink, Eye, Hand, ListTodo, MessageSquarePlus, Minimize2, Moon, PanelRightClose, Send, Settings2, ShieldCheck, Sparkles, Sun, X, type LucideIcon } from 'lucide-react'
+import { Archive, CalendarDays, Check, ExternalLink, Eye, Hand, ListTodo, MessageSquarePlus, MessagesSquare, Minimize2, Moon, PanelRightClose, Send, Settings2, ShieldCheck, Sparkles, Sun, X, type LucideIcon } from 'lucide-react'
 import { useLang, useT, type TKey } from '@/i18n'
 import { useCloseJarvisWork, useJarvis, useJarvisBrief, useJarvisDream, useJarvisSettings, useNewJarvisConversation, useOpenJarvis } from '@/lib/queries'
 import type { JarvisSettings, JarvisWork } from '@/lib/types'
@@ -37,7 +37,7 @@ function JarvisView() {
   const fresh = useNewJarvisConversation()
   const [board, setBoard] = React.useState(false) // phone / tablet: the Work list in place of the conversation
   const [workOpen, setWorkOpen] = React.useState(() => localStorage.getItem(WORK_OPEN_KEY) !== '0') // desktop
-  const [workW, setWorkW] = React.useState(() => Number(localStorage.getItem(WORK_W_KEY)) || WORK_W.def)
+  const [workW, setWorkW] = React.useState(() => fitWorkW(Number(localStorage.getItem(WORK_W_KEY))))
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const aside = React.useRef<HTMLElement>(null)
   const toggleWork = () => {
@@ -48,7 +48,7 @@ function JarvisView() {
     } else setBoard((b) => !b)
   }
   const saveWorkW = (w: number | null) => {
-    const v = w == null ? WORK_W.def : Math.round(w)
+    const v = w == null ? WORK_W.def : fitWorkW(Math.round(w))
     setWorkW(v)
     if (w == null) localStorage.removeItem(WORK_W_KEY)
     else localStorage.setItem(WORK_W_KEY, String(v))
@@ -127,7 +127,7 @@ function JarvisView() {
           style={{ width: workW }}
           data-testid="jarvis-board"
         >
-          <ResizeEdge side={aside} edge="left" min={WORK_W.min} max={WORK_W.max} onWidth={saveWorkW} />
+          <ResizeEdge side={aside} edge="left" min={WORK_W.min} max={WORK_W.max} onWidth={saveWorkW} className="max-lg:hidden" />
           <Board work={st.work} onHide={toggleWork} />
         </aside>
       </div>
@@ -214,10 +214,16 @@ function WorkCard({ w }: { w: JarvisWork }) {
             <span className="text-muted-foreground">#{w.id}</span> {w.title || where}
           </p>
           <p className="truncate text-xs text-muted-foreground">
-            {where} · {asks ? t('jarvis.state.asks') : t(STATE_LABEL[w.state])} · {fmtRelative(w.updated, lang)}
+            {where} · {asks ? t('jarvis.state.asks') : t(STATE_LABEL[w.state])}
+            {w.archived && ` · ${t('jarvis.work.archived')}`} · {fmtRelative(w.updated, lang)}
           </p>
         </div>
       </div>
+      {w.fresh && (
+        <p className="mt-2 line-clamp-2 text-xs text-muted-foreground" data-testid="jarvis-work-fresh">
+          {t('jarvis.work.fresh')} {w.fresh}
+        </p>
+      )}
       {w.result && w.state !== 'running' && <p className="mt-2 line-clamp-3 whitespace-pre-line text-[13px] text-muted-foreground">{w.result}</p>}
       <div className="mt-2 flex items-center justify-end gap-1">
         <Button asChild variant="ghost" size="sm">
@@ -244,6 +250,8 @@ const COMPACT_AT = [100_000, 150_000, 200_000, 300_000, 0]
 const WORK_OPEN_KEY = 'mx.jarvis.workOpen'
 const WORK_W_KEY = 'mx.jarvis.workWidth'
 const WORK_W = { min: 260, def: 320, max: 640 }
+/** A saved width within the limits (an old or hand-edited value never squeezes the conversation). */
+const fitWorkW = (n: number) => (Number.isFinite(n) && n > 0 ? Math.max(WORK_W.min, Math.min(WORK_W.max, n)) : WORK_W.def)
 
 /** Its settings: a window like a session's options (a sheet from the bottom on a phone, centered on a computer). */
 function JarvisSettingsDialog({ open, onOpenChange, settings, onNew, renewing }: { open: boolean; onOpenChange: (v: boolean) => void; settings: JarvisSettings; onNew: () => void; renewing: boolean }) {
@@ -253,9 +261,11 @@ function JarvisSettingsDialog({ open, onOpenChange, settings, onNew, renewing }:
   const dream = useJarvisDream()
   const { data: tg } = useTelegram()
   const set = (k: keyof JarvisSettings, v: boolean | string | number) => save.mutate({ [k]: v })
-  const toggles: { k: 'root' | 'ask_first' | 'daily' | 'internals'; icon: LucideIcon; label: TKey; hint: TKey }[] = [
+  const toggles: { k: 'root' | 'ask_first' | 'reuse' | 'archive_done' | 'daily' | 'internals'; icon: LucideIcon; label: TKey; hint: TKey }[] = [
     { k: 'root', icon: ShieldCheck, label: 'jarvis.set.root', hint: 'jarvis.set.rootHint' },
     { k: 'ask_first', icon: Hand, label: 'jarvis.set.ask', hint: 'jarvis.set.askHint' },
+    { k: 'reuse', icon: MessagesSquare, label: 'jarvis.set.reuse', hint: 'jarvis.set.reuseHint' },
+    { k: 'archive_done', icon: Archive, label: 'jarvis.set.archive', hint: 'jarvis.set.archiveHint' },
     { k: 'daily', icon: CalendarDays, label: 'jarvis.set.daily', hint: 'jarvis.set.dailyHint' },
     { k: 'internals', icon: Eye, label: 'jarvis.set.internals', hint: 'jarvis.set.internalsHint' },
   ]

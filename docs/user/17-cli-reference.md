@@ -244,6 +244,44 @@ OAuth sign-ins (state "To connect") are done in Settings -> MCP -> **Connect**. 
 `AGENT` = `project/topic/agent` (or `projects/P/topics/T/agents/A`, or the agent's name when it is unique). See
 [Agents](30-agents.md) and [Agent groups](31-agent-groups.md).
 
+## Themes
+
+Settings -> Appearance -> [Theme](39-themes.md): a theme is a `theme.json` of values (no code; at most one field of advanced CSS), made or
+installed by Harness (skill `maxxing-theme`).
+
+| Command | Purpose |
+|---|---|
+| `maxxing themes list [--json]` | installed themes, and folders that are not usable with the reason |
+| `maxxing themes check FOLDER [--json]` | read a theme like the interface will: what it sets, what is dropped and why (nothing installed) |
+| `maxxing themes install FOLDER [--force]` | check it, then copy it into `<workspace>/themes/<id>/` (`--force` replaces it); refused in an agent's run |
+| `maxxing themes verify ID` | its advanced CSS was checked with this version of the interface: switch it back on (an update that changes the interface's CSS switches it off); refused in an agent's run |
+| `maxxing themes remove ID` | delete an installed theme (browsers using it go back to its base); refused in an agent's run |
+| `maxxing themes tokens [--json]` | the variables a theme may set and their kind |
+
+## Webhooks and events
+
+Settings -> Automate -> [Webhooks](37-webhooks.md) and [Events](38-events.md): automations without AI (one trigger,
+one action). Harness creates them from a session; the definition is JSON (see the skill `maxxing-webhooks`).
+
+| Command | Purpose |
+|---|---|
+| `maxxing webhooks list [--json]` | every webhook and event: id, on/off, sentence, last call (`[needs its signing secret]` when a Stripe / Shopify / GitHub one has none) |
+| `maxxing webhooks show ID [--json] [--sign-secret]` | one of them, with its URL; `--sign-secret` prints the key that signs its calls (`X-Harness-Signature`) |
+| `maxxing webhooks add [--spec JSON]` | create one from its JSON definition (`--spec`, or JSON on stdin); prints its id and URL |
+| `maxxing webhooks edit ID [--spec JSON]` | change it: the top-level keys given (`name`, `description`, `trigger`, `action`, `queue`, `report`, `enabled`) are replaced |
+| `maxxing webhooks describe ID "SENTENCE"` | the sentence shown on the page |
+| `maxxing webhooks on ID` / `off ID` / `remove ID` | switch on / off, delete (its calls and data too) |
+| `maxxing webhooks url ID` / `rotate ID` | print its URL / give it a new one (the old one stops at once) |
+| `maxxing webhooks secret ID` | set its signing secret or phone key, read on stdin (`printf %s "$S" \| maxxing webhooks secret ID`); empty input removes it |
+| `maxxing webhooks test ID` | run it now on a realistic sample of its service or event (filters skipped), here, and print the result |
+| `maxxing webhooks calls ID [--limit N] [--json]` | its last calls (50 kept): time, status, summary, duration, error |
+| `maxxing webhooks call ID CALL` | one call: what was received (headers without secrets, body up to 64 kB) and the result (JSON) |
+| `maxxing webhooks replay ID CALL` | run a call again with the same request, here |
+| `maxxing webhooks data ID [--last N] [--csv] [--json]` | the rows of a webhook that stores its data (`--csv`: every row, for a spreadsheet) |
+
+`ID` = the id shown by `list` (`w_…`). Exit 1 on an error or a failed test / replay. In an agent's run, only `list`,
+`show`, `url`, `calls`, `call` and `data` work.
+
 ## E-mail
 
 | Command | Purpose |
@@ -306,8 +344,9 @@ See [Harness Browser](33-browser.md).
 |---|---|
 | `maxxing memory [--json]` | every memory.md with its line count and the line limit (Settings -> Memory) |
 | `maxxing sessions send SESSION MESSAGE... [--file PATH] [--json]` | write to a session as if typed in it (SESSION: its id, its first 8 characters or its title - case and accents ignored, a unique beginning is enough; `--file` repeatable). Run by Claude from a session, the message says which session sent it; 3 sends in a row between sessions or agents at most. Refused in a sandboxed agent |
-| `maxxing sessions new TOPIC [MESSAGE...] [--title T] [--model M] [--effort E] [--file PATH] [--json]` | start a session in a topic (TOPIC: `<project>/<topic>` or `projects/<project>/topics/<topic>`) with a first message; no `--title`: made from the message. Run by Claude from a session or an agent, the message says which session started it, with the same limit of 3 sends in a row. An agent is started with `maxxing agents run` instead. Refused in a sandboxed agent |
+| `maxxing sessions new TOPIC [MESSAGE...] [--title T] [--model M] [--effort E] [--file PATH] [--fresh REASON] [--json]` | start a session in a topic (TOPIC: `<project>/<topic>` or `projects/<project>/topics/<topic>`) with a first message; no `--title`: made from the message. Run by Claude from a session or an agent, the message says which session started it, with the same limit of 3 sends in a row. From Jarvis's conversation it is refused (exit 3, with their list, closest to the subject first) while the topic has sessions that can take the work: `sessions send` to one of them, or `--fresh "<reason>"` for another subject (the reason shows on its work board card). An agent is started with `maxxing agents run` instead. Refused in a sandboxed agent |
 | `maxxing sessions list [--json]` | the sessions that are not archived: id, state, topic, title |
+| `maxxing sessions list --topic <project>/<topic> [--days N] [--json]` | a topic's sessions of the last 30 days (or N) with what Jarvis needs to continue one: start of the last answer, who started it, `reusable` or why not |
 | `maxxing sessions compact-logs [--dry-run]` | clip the tool outputs of existing session logs and drop the bulky Claude start-up lists and progress lines (frees disk space; `--dry-run` only reports what would be saved) |
 | `maxxing sessions token-report [--days N] [--json]` | where the tokens of your sessions go, read from Claude Code's transcripts: context size per call, cache rewritten after an idle hour or a model switch, the tools whose outputs fill the context, and what automatic compaction at 400k / 300k / 250k / 200k would have saved on the same calls |
 

@@ -1,7 +1,6 @@
 // Rendering of one thread item. Every row is memoised on the item object (items keep their identity
 // when the log grows, see log.ts), so appending events only renders the new rows.
 import * as React from 'react'
-import { Link } from 'react-router'
 import { AlertTriangle, Brain, FolderSearch, Check, ChevronRight, CircleAlert, Copy, FileText, GripVertical, History, Info, MessageSquarePlus, Mic, Paperclip, Pause, Pencil, Play, ScrollText, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useT, useLang } from '@/i18n'
@@ -10,7 +9,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Markdown } from '@/components/ui/markdown'
 import { filePreviewUrl, fileRawUrl, fileStamp, fileThumbUrl, prefetchImage, PREVIEW_W } from '@/lib/queries/files'
 import { Thumb } from '@/features/files/Thumb'
-import type { ChangesEvent, ClaudeModel, ResultField, SentMention } from '@/lib/types'
+import type { ChangesEvent, ClaudeModel, MessageFrom, ResultField, SentMention } from '@/lib/types'
+import { MessageCard, messageFrom } from './MessageCard'
 import { ChipText } from './mentions'
 import { costTip, ResultLineMenu, useCostIsBilled, useResultLine } from './resultLine'
 import { isShownTask, taskStatus, type Item } from './log'
@@ -87,6 +87,7 @@ export const ItemRow = React.memo(function ItemRow({
           at={at}
           source={item.ev.source}
           from={item.ev.from}
+          shown={item.ev.shown}
           mentions={item.ev.mentions}
           injected={item.ev.injected}
           onFork={onFork && (() => onFork(seed()))}
@@ -285,6 +286,7 @@ export function UserMessage({
   at,
   source,
   from,
+  shown,
   mentions,
   injected,
   pending,
@@ -300,8 +302,10 @@ export function UserMessage({
   attachments: string[]
   at?: number
   source?: string
-  /** Sent by another session's turn (maxxing sessions send): a link to it. */
-  from?: { session: string; title: string }
+  /** Not typed by the owner (another session, an agent, a job, Harness): a card with who sent it. */
+  from?: MessageFrom
+  /** The part of the text for the owner (the rest is instructions for Claude). */
+  shown?: string
   /** The @ it names: drawn as chips (with the "/" command it starts with). */
   mentions?: SentMention[]
   /** Added to a running turn (Add to task). */
@@ -315,6 +319,7 @@ export function UserMessage({
   const t = useT()
   const lang = useLang()
   const { tz, path } = React.useContext(ItemContext)
+  const card = messageFrom(from, source)
   // Quotes sent from the composer lead the message as Markdown blockquotes: shown as quote blocks (Copy keeps the raw text).
   const { quotes, rest } = React.useMemo(() => splitQuotes(text), [text])
   const { onContextMenu, touch, menu } = useMessageMenu({ text: [text, heard?.text].filter(Boolean).join('\n\n'), onFork, onEdit, onDelete, onRevert })
@@ -323,7 +328,8 @@ export function UserMessage({
       {menu}
       {voice && <VoiceNote paths={voice === true ? [] : voice} heard={heard} pending={pending} />}
       {attachments.length > 0 && <AttachmentStrip paths={attachments} />}
-      {text && (
+      {text && card && <MessageCard from={card} text={text} shown={shown} />}
+      {text && !card && (
         <div className="relative max-w-full rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]">
           <Sensitive block className="min-w-24 bg-transparent">
             {quotes.map((q, i) =>
@@ -349,15 +355,7 @@ export function UserMessage({
         ) : (
           <>
             {(text || heard?.text) && <MessageGrip text={[text, heard?.text].filter(Boolean).join('\n\n')} />}
-            {from ? (
-              <Tooltip content={t('sessions.msg.from', { title: from.title || from.session.slice(0, 8) })}>
-                <Link to={`/sessions?session=${encodeURIComponent(from.session)}`} className="max-w-48 truncate rounded bg-muted px-1 hover:text-foreground">
-                  ↩ {from.title || from.session.slice(0, 8)}
-                </Link>
-              </Tooltip>
-            ) : (
-              source && source !== 'web' && <span className="rounded bg-muted px-1">{sourceLabel(source, t)}</span>
-            )}
+            {!card && source && source !== 'web' && <span className="rounded bg-muted px-1">{sourceLabel(source, t)}</span>}
             {injected && (
               <Tooltip content={t('sessions.msg.injectedTip')}>
                 <span className="rounded bg-muted px-1">{t('sessions.msg.injected')}</span>
@@ -657,10 +655,27 @@ function Thinking({ text }: { text: string }) {
 const OUT_PREVIEW = 1600
 const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'NotebookRead'])
 
+/** Tool cards the user opened (by call id), outside the card: a 3rd read in a row turns the row into a ToolGroup and
+ *  mounts its cards again - the open one, and the group around it, open again. */
+const openCards = new Set<string>()
+const OPEN_CARDS_MAX = 200
+
+function useCardOpen(id: string): [boolean, React.Dispatch<React.SetStateAction<boolean>>] {
+  const [open, setOpenState] = React.useState(() => openCards.has(id))
+  const setOpen = React.useCallback((v: React.SetStateAction<boolean>) => setOpenState((o) => {
+    const next = typeof v === 'function' ? v(o) : v
+    openCards.delete(id)
+    if (next) openCards.add(id)
+    if (openCards.size > OPEN_CARDS_MAX) openCards.delete(openCards.values().next().value!)
+    return next
+  }), [id])
+  return [open, setOpen]
+}
+
 function ToolCard({ item, live }: { item: Extract<Item, { kind: 'tool' }>; live: boolean }) {
   const t = useT()
-  const [open, setOpen] = React.useState(false)
   const { use, result } = item
+  const [open, setOpen] = useCardOpen(use.id)
   const Icon = toolIcon(use.name)
   const { running } = React.useContext(ItemContext)
   // A sub-agent or a background command: its own state, not its tool result ("launched" comes back at once).
@@ -686,7 +701,6 @@ function ToolCard({ item, live }: { item: Extract<Item, { kind: 'tool' }>; live:
   // A plain-language title ("Runs the tests") and what it runs after it; '' = a tool it does not know (name + summary).
   const label = toolLabel(use.name, input, t, (p) => relPath(p, bases))
   const detail = label.title && label.detail ? (file && FILE_TOOLS.has(use.name) ? label.detail : relPaths(label.detail, bases)) : ''
-  const detailFull = use.name === 'Bash' ? (typeof input.command === 'string' ? input.command : '') : file && FILE_TOOLS.has(use.name) ? file : label.detail
   return (
     <div ref={root} className={cn('min-w-0 overflow-hidden rounded-lg border bg-card text-[13px]', err && 'border-destructive/40')}>
       <button
@@ -702,24 +716,20 @@ function ToolCard({ item, live }: { item: Extract<Item, { kind: 'tool' }>; live:
               <Sensitive length={14}>{label.title}</Sensitive>
             </span>
             {label.danger && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-destructive/10 px-1.5 text-[11px] font-medium text-destructive">
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-primary/10 px-1.5 text-[11px] font-medium text-primary">
                 <AlertTriangle className="size-3" /> {t('tl.danger')}
               </span>
             )}
-            <Tooltip content={detail && detailFull ? <Sensitive length={20}><span className="max-w-[min(80vw,640px)] font-mono break-all whitespace-pre-wrap">{detailFull}</span></Sensitive> : null}>
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground/80">
-                <Sensitive length={14}>{detail}</Sensitive>
-              </span>
-            </Tooltip>
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground/80">
+              <Sensitive length={14}>{detail}</Sensitive>
+            </span>
           </>
         ) : (
           <>
             <span className="shrink-0 font-medium">{name}</span>
-            <Tooltip content={summary !== full ? <Sensitive length={20}><span className="max-w-[min(80vw,640px)] font-mono break-all">{full}</span></Sensitive> : null}>
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground">
-                <Sensitive length={14}>{summary}</Sensitive>
-              </span>
-            </Tooltip>
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground">
+              <Sensitive length={14}>{summary}</Sensitive>
+            </span>
           </>
         )}
         {stats && (stats.add > 0 || stats.del > 0) && (
@@ -763,7 +773,7 @@ export function groupable(it: Item): boolean {
 /** "Explored 4 files · 2 searches": the read-only calls of a row as one line, their cards inside. */
 export function ToolGroup({ items, live }: { items: Extract<Item, { kind: 'tool' }>[]; live: boolean[] }) {
   const t = useT()
-  const [open, setOpen] = React.useState(false)
+  const [open, setOpen] = React.useState(() => items.some((it) => openCards.has(it.use.id)))
   const n = { read: 0, search: 0, list: 0, look: 0 }
   let pending = false
   let failed = false

@@ -3,6 +3,93 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
+## 2.0.0-alpha.172 - 2026-11-25
+
+Fixed:
+- **Theme cards in Settings show up at once.** Every theme's card is now drawn from its own colors, like Solid and Glass, instead of loading its preview picture or its wallpaper (often several hundred KB each). The picture is still used for its Community listing.
+- **Continue in Sessions opens one copy.** Two clicks at once (a double click, two tabs) no longer open two sessions on the same Claude thread.
+- **Feedback works with a damaged setting or folder name.** A damaged registration section in the settings no longer breaks the Feedback window, a folder name that is not UTF-8 no longer skips the check before sending, and the three answer buttons wrap instead of overflowing the window.
+- **The license background check keeps running** when one of its saved values is damaged.
+
+## 2.0.0-alpha.171 - 2026-11-25
+
+Changed:
+- **The getting started guide no longer asks for your language**: it speaks the language of Harness (Settings -> General), and starts straight at *Beginner* or *Intermediate*.
+
+## 2.0.0-alpha.170 - 2026-11-25
+
+New:
+- **Getting started guide.** Help (**?** at the bottom left) -> **Getting started guide**, also proposed once after this update or the installation (`?guide` in an address opens it too): choose your language, *Beginner* or *Intermediate*, then the *full tour* (about 5 minutes: sessions, Zones and Tabs, memory, agents on their page and in the sessions, scheduled jobs, phone, pages to switch on) or a *partial tour* (about 2 minutes) with only what you want to use, the recommended parts already ticked. Each step lights up the part of the screen it explains, with a tip, and Opus writes for you, as you go, one or two ready-to-send examples about your own projects (or what you imported from another agent), each following on from what you just did. **Try it** puts the example in a new session's message box, nothing is sent by itself; the guide waits on the right edge of the screen and picks up where you left off, on any device. A page that is off is switched on from the step.
+
+Fixed:
+- **Feedback: real bugs reach the team.** Your Harness, which reads a message before it is sent, now knows what your installation changed (customizations of the product, uncommitted changes, your extensions and themes): a bug there is answered here, any other bug report is sent unless your Harness can point to what explains it for sure. After an answer, **Send to the team anyway** is a real button, and a screenshot that cannot be read no longer makes Send do nothing silently.
+- **A session no longer stays stuck in "Session ID … is already in use" after a server restart.** When a turn was killed with the server, every later message of that session failed; the stale claim left by the dead process is now cleared before the thread resumes, and a new thread that the killed turn had already created is resumed instead of being created again.
+- **Mute one session on your phones.** Once a phone gets Mobile notifications, a session's **…** window has a *Mobile notifications* switch, and the new-session form a checkbox: off, that session never rings your phones; the others still do. (#185, suggested by bristouflex)
+- **On a phone, the session tabs fold away while you type.** In the Tabs view, the tab bar under the session header stays on screen while you read and scroll, folds away when you tap the message box, and comes back when you leave it.
+- **On a small phone, the message box stays two rows high during a turn.** Stop, microphone and Send are a little smaller on narrow screens, so they fit on the same row as the other buttons instead of a third row.
+- **Restoring a backup no longer switches an agent back on.** On a server in use, an agent switched off here, or one of its triggers switched off here, stays off after a restore, like scheduled jobs and extensions already did.
+
+## 2.0.0-alpha.169 - 2026-11-24
+
+New:
+- **Themes.** Settings -> Appearance now starts with the theme: *Solid* (the default) or *Glass*, and any theme Harness installed for you, each shown as a small preview. Below it, the options of that theme: dark or light mode, accent color, background and fonts; the layout of the device gets its own card. Ask Harness for a theme ("in the colors of my brand", "a warm glass with a wallpaper") or to install one from Community: it is a simple file of colors and sizes, checked before it is used, so a theme can never make the interface unreadable or break after an update; it can also bring its own logo, shown instead of the Harness one; what it leaves out keeps the Solid or Glass look. For what colors and sizes cannot do, a theme may add a few style rules of its own ("advanced CSS"): you can switch them off in the theme's options, and an update that changes the interface switches them off by itself until Harness has checked them again. [Show me](#show:themes)
+- **Settings -> Extensions in the same four parts as Community.** Widgets, Pages, and now **Agents views** (the views of the Overview of the Agents page, until now mixed with the pages) and **Themes** (the installed themes, their state, and a button to ask Harness for a new one).
+
+Fixed:
+- **The Harness Browser no longer keeps a session's pages running after its turn.** 15 minutes after the turn ends, if no new turn uses them, the tabs it opened sleep (a 3D render left open kept the CPU busy). They are still listed and open again at the next turn.
+- **Changing a mailbox's port now changes its security too.** In the mailbox dialog of the E-mail page, typing 465 or 993 picks SSL/TLS and 587, 25 or 143 picks STARTTLS (a security picked afterwards is kept). SSL/TLS on a port that expects STARTTLS now fails with "this port expects STARTTLS" instead of a bare TLS error.
+- **A session change made twice in quick succession is no longer missed.** When a session was written twice within a few milliseconds, the server could take the second change for no change: its new state, a turn's end or a held message showed up late, or only at the next change.
+- **Sending several files at once works up to the size limit of each file.** The limit used to apply to the whole sending; it now applies to each file, as it says.
+- **A Team group only sends to the people really in it.** A group created by a contact could list one of your other contacts who was never invited; your messages in that group are no longer sent to them.
+- **Tool lines in a session no longer open a popup on hover**: the line expands in place when you click it.
+- **Search stays fast while you type** in a workspace with many sessions.
+
+## 2.0.0-alpha.168 - 2026-11-24
+
+New:
+- **Webhooks and events: automations without AI.** Two new pages in Settings -> Automate. **Webhooks** gives your
+  server URLs that other services call (Stripe, Shopify, GitHub, Tally, n8n, Zapier, a Shortcut on your phone that
+  sends a photo and gets a link back); **Events** acts when something happens in Harness (a notification arrives, an
+  agent or a cron job finishes or fails). Each one does one thing by itself, at once and for free: run a script (update
+  a site after a push, restart a service when it is down), call a URL (Discord, Slack, ntfy, n8n), keep the data (a
+  table of your sales, CSV, dashboard widgets) or post a notification. **New webhook** / **New event** opens a short
+  form, as for a cron job; or ask Harness in a session: it writes the script, creates it, tests it and tells you where
+  to paste the URL. The pages show the last calls with what was received, **Replay**, **Send a test** (marked *Test* in
+  the list), the URL to copy and an on/off switch. Every webhook is there: your notification webhooks (same URL, now
+  managed there) and those of your agents. With AI, it is still an agent. [Show me](#show:webhooks)
+- **Settings, tidied up.** A new **Notifications** group: **Alerts** (what this browser and your phone do: a finished
+  answer, Team messages, sound, badge, mobile notifications), **Feed** (the notifications feed: its sources, what goes
+  to Telegram, server problems) and **Telegram**. **Automate** keeps Crons, Webhooks and Events; **Voice** moves to
+  General. Old links to Settings -> Notifications open Alerts.
+- **Send before the files are up.** Press send while attachments are still uploading: the message goes by itself as
+  soon as the last file is up (press again to cancel; a failed file stops it and says why).
+- **Agents come more alive.** They breathe and look around all the time (lists, headers, the office), not only while they work, at a slow and calm pace; a switched-off agent sleeps, breathing slowly with "z" floating above its head; three new faces (grin, cheeky, calm), nine new hairstyles (afro, ponytail, mohawk, buzz cut, bob, braids, pigtails, space buns, side swept) plus three special characters (a frog, a big brain, a giga chad) and a lightly matte skin; a random character now has a matte or lightly matte skin four times in five.
+
+Changed:
+- **Jarvis continues the sessions you already have, and tidies up after itself.** New work on the same subject
+  now goes to a recent session of the topic it belongs to (active in the last 30 days, never one you wrote in during
+  the last 30 minutes, never one of another topic) instead of a new one each time. And once a piece of work is done,
+  the session Jarvis started for it goes to the Archives, unless you wrote in it; it comes back by itself if Jarvis
+  follows the work up. Both are on by default, in the settings of Jarvis (gear icon).
+  `maxxing sessions new` from Jarvis's conversation is refused while such a session exists, with the list, closest
+  to the subject first; for another subject Jarvis starts one with a reason, shown on its card in the work board.
+- **Only your own words look like your messages.** Everything else a session receives is folded into one small
+  card that says who sent it: another session or Jarvis, an agent, a scheduled job, a group, an event, an e-mail, the
+  command line or Harness itself. Jarvis's morning brief comes as a card of its backstage agent, the reports that
+  come back to Jarvis say if the work answered, asks you or failed, and a click shows the message (only what is meant
+  for you, not the instructions for Claude around it). Messages you type to an agent, on Telegram or by voice stay
+  bubbles.
+- **The video tools take about 90 MB less disk.** Remotion was installed with a second copy of its native parts,
+  built for another kind of Linux and never used on yours: it is now left out (≈ 413 MB -> 325 MB).
+
+Fixed:
+- **`@Jarvis` in a message reaches Jarvis, once.** The `@` menu of a session showed each of Jarvis's daily
+  conversations as a session; it now has a single **@Jarvis** line at the top, with its own icon, which always writes
+  into its conversation of the moment.
+- **"Let me do it" on a device hands it over.** Asked to let you take over a computer or a phone, Claude pointed to the Watch line above the message box, which is gone once its turn ends. It now hands the device over with a card that opens it.
+- **No more message stuck on "Sending…".** Two messages sent close together (while Harness was summarizing a session, or before a turn starts) arrive as one: the first one stayed below the conversation as "Sending…" forever. Each message is now recognized by its id.
+- **A long message no longer hides the end of the conversation.** As the message box grew line after line, the conversation above it (sessions, Jarvis) let go of the bottom and the last message slipped under the box. It now stays at the bottom while you type.
+
 ## 2.0.0-alpha.167 - 2026-11-24
 
 Fixed:
@@ -2033,7 +2120,7 @@ Fixes:
 
 ## 2.0.0-alpha.74 - 2026-10-20
 
-Improvements:
+New:
 
 - **The Tasks page and its dashboard widget load faster on a big board.** With thousands of tasks the list
   is about six times faster and the widget is instant.

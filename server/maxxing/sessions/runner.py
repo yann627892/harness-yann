@@ -438,7 +438,7 @@ class Runner:
                                     "source": item.get("source") or "web", "kind": kind,
                                     **({"voice": [str(v["path"]) for v in voices]} if voices else {}),
                                     **({"client_ids": item["client_ids"]} if item.get("client_ids") else {}),
-                                    **_relay_from(item), **_mentions_shown(item), "at": self.turn_at})
+                                    **_sender(item), **_mentions_shown(item), "at": self.turn_at})
         if voices:
             heard, err = self._voice(item, voices)
             if heard is None:                          # stopped, or nothing to send: no Claude call
@@ -560,6 +560,8 @@ class Runner:
         else:
             self._end_proc()
             self.proc_launch, self.proc_core, self.proc_plan = launch, core, mcp_plan
+            if not fresh:
+                _free_stale_claim(csid, env)
             a = self.attempt(base + (["--session-id", csid] if fresh else ["--resume", csid]),
                              prompt, cwd, env, timeout_s, hold=not fresh, csid=csid,
                              prev_total=0.0 if fresh else store.thread_prev_cost(meta, csid),
@@ -567,6 +569,14 @@ class Runner:
         a.fresh = fresh
         if a.handover:
             self.keep_proc = True
+        if fresh and a.rc != 0 and not a.saw_init and not a.stopped and not a.handover and _thread_exists(a):
+            # the thread was created by an earlier turn killed before Harness recorded it: resume it
+            store.update(self.sid, fresh=False)
+            fresh = False
+            _free_stale_claim(csid, env)               # that killed turn's process may still claim the thread
+            a = self.attempt(base + ["--resume", csid], prompt, cwd, env, timeout_s, hold=True, csid=csid,
+                             prev_total=store.thread_prev_cost(meta, csid), prev_est=store.thread_estimated(meta, csid))
+            a.fresh = False
         if not fresh and a.rc != 0 and not a.saw_init and not a.stopped and not a.handover and _resume_lost(a):
             csid = str(uuid.uuid4())
             store.update(self.sid, csid=csid, fresh=True)
@@ -941,7 +951,7 @@ class Runner:
                                         "attachments": head.get("attachments") or [],
                                         "source": head.get("source") or "web", "kind": "user", "injected": True,
                                         **({"client_ids": head["client_ids"]} if head.get("client_ids") else {}),
-                                        **_relay_from(head), **_mentions_shown(head), "at": time.time()})
+                                        **_sender(head), **_mentions_shown(head), "at": time.time()})
 
     def _steer_step(self, pr: _Proc) -> bool:
         """One pass of a pending steer: True when the process can take the steered message now (the step it was
@@ -1218,10 +1228,30 @@ SHORT_ANSWER_NOTE = ("[Your final answer is read by an assistant, not shown to a
                      "long (results, lists, a report) goes to a file in this topic: give its path.]")
 
 
-def _relay_from(item: dict) -> dict:
-    """The log line of a message sent by another session's turn: who sent it (shown on the message)."""
+def _sender(item: dict) -> dict:
+    """The log line of a message the owner did not type: who sent it (the UI folds it into a card) and, when the
+    rest is instructions for Claude, the part for the owner (`shown`). Nothing for the owner's own messages.
+    `from` = {kind, title, path?, session?}: kind `session` / `agent` for another session's turn (relay; `agent`
+    when that session is an agent's run), else the queue item's `sender` (send_message), else its source (cron,
+    github, cli, system). The reports of Jarvis's work board add their numbers and outcomes ({id, outcome:
+    done | asks | failed}, several when reports were read together)."""
     r = item.get("relay") or {}
-    return {"from": {"session": r["from"], "title": r.get("title") or ""}} if r.get("from") else {}
+    src = item.get("source") or "web"
+    if r.get("from"):
+        path = r.get("path") or ""
+        out: dict = {"kind": "agent" if "/agents/" in f"/{path.strip('/')}/" else "session", "session": r["from"],
+                     "title": r.get("title") or "", "path": path}
+        ids = r.get("reports") or ([r["report"]] if r.get("report") else [])
+        if ids:
+            outs = r.get("outcomes") or [r.get("outcome") or "done"] * len(ids)
+            out["reports"] = [{"id": i, "outcome": (outs[n] if n < len(outs) else "done")} for n, i in enumerate(ids)]
+    elif isinstance(item.get("sender"), dict) and item["sender"].get("kind"):
+        out = dict(item["sender"])
+    elif r or src in ("cli", "cron", "github", "system"):
+        out = {"kind": "cli" if r or src == "cli" else src}
+    else:
+        return {}
+    return {"from": out, **({"shown": item["shown"]} if item.get("shown") else {})}
 
 
 def _merge_reports(item: dict, q: list) -> dict:
@@ -1230,15 +1260,19 @@ def _merge_reports(item: dict, q: list) -> dict:
     rel = item.get("relay") or {}
     if not rel.get("report") or item.get("held"):
         return item
-    texts, refs = [item.get("text") or ""], [rel["report"]]
+    texts, refs, outs = [item.get("text") or ""], [rel["report"]], [rel.get("outcome") or "done"]
+    shown = [item.get("shown") or ""]
     while q and (q[0].get("relay") or {}).get("report") and not q[0].get("held") and not q[0].get("attachments"):
         nxt = q.pop(0)
         texts.append(nxt.get("text") or "")
+        shown.append(nxt.get("shown") or "")
         refs.append(nxt["relay"]["report"])
+        outs.append(nxt["relay"].get("outcome") or "done")
         rel = {**rel, "hops": max(int(rel.get("hops") or 0), int(nxt["relay"].get("hops") or 0))}
     if len(texts) == 1:
         return item
-    return {**item, "text": "\n\n".join(texts), "relay": {**rel, "reports": refs}}
+    return {**item, "text": "\n\n".join(texts), "relay": {**rel, "reports": refs, "outcomes": outs},
+            **({"shown": "\n\n---\n\n".join(x for x in shown if x)} if any(shown) else {})}
 
 
 def relay_preface(r: dict) -> str:
@@ -1249,7 +1283,8 @@ def relay_preface(r: dict) -> str:
             "\n\n")
 
 
-MENTION_KIND = {"session": "a Harness session", "agent": "a Harness agent", "team": "a person on Team"}
+MENTION_KIND = {"jarvis": "Jarvis, the user's assistant on Harness (its conversation of the moment)",
+                "session": "a Harness session", "agent": "a Harness agent", "team": "a person on Team"}
 
 
 def _copy_note(meta: dict, cwd: str) -> str:
@@ -1591,6 +1626,42 @@ def _auth_error(a: Attempt, ok: bool) -> str | None:
     else:
         return None
     return claude_auth.detect("\n".join(p for p in parts if p))
+
+
+CLAIM_MAX = 64 * 1024                                 # bytes of a claim file read (a few hundred in practice)
+
+
+def _free_stale_claim(csid: str, env: dict) -> int:
+    """Claude Code records each running conversation in <config>/sessions/<pid>.json and refuses `--resume` of a thread
+    that file claims ("Session ID ... is already in use"), even when that process is gone: a turn killed with the
+    server (reboot, OOM, a stray kill) then made every later message of the session fail. Removes the claims on this
+    thread left by a process that no longer runs (same pid reused by another process: also stale)."""
+    root = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "sessions"
+    n = 0
+    for p in root.glob("*.json"):
+        if not p.stem.isdigit() or p.is_symlink() or not p.is_file():
+            continue                                    # a FIFO or a link there would hang or lead the turn elsewhere
+        try:
+            with p.open("rb") as f:
+                claim = json.loads(f.read(CLAIM_MAX + 1))
+        except (OSError, ValueError):
+            continue                                    # unreadable, or over CLAIM_MAX (cut: not JSON)
+        if not isinstance(claim, dict) or claim.get("sessionId") != csid:
+            continue
+        try:
+            start = Path(f"/proc/{p.stem}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError):
+            start = None                                # no such process
+        if start is not None and str(claim.get("procStart") or start) == start:
+            continue                                    # still running: really in use
+        p.unlink(missing_ok=True)
+        n += 1
+    return n
+
+
+def _thread_exists(a: Attempt) -> bool:
+    """`--session-id` refused because that thread already exists."""
+    return bool(re.search(r"session id .{0,80} is already in use", a.stderr, re.I))
 
 
 def _resume_lost(a: Attempt) -> bool:

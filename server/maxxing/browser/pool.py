@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -44,12 +45,22 @@ WATCH_EVERY = 15.0
 CHILD_IDLE = 300.0                     # a turn's tools stop after this long without a call
 CONTROL_IDLE = 60.0                    # the person's hand on a tab lapses after this long without input
 TAB_WAIT = 100.0                       # Claude's command on a tab the person has waits at most this long
+TURN_END_SLEEP = 15 * 60.0             # a session's tabs sleep this long after its turn ended (if no new turn)
 CLAUDE_BUSY = 15.0                     # Claude acted on a tab this recently: it is "using" it
 EXIT_POLL = 10.0                       # a tool waiting for its exit checks it this often
 TRAIL_MAX = 30                         # pages a person went to in a tab of a turn (told to Claude after)
 PICTURE_MAX = 400_000                  # bytes of the picture given back to Claude with a hand-back
 MEM_WARN, MEM_CRITICAL = 0.85, 0.92    # share of the server's memory (or of a browser's cap)
 UPLOAD_MAX = 50 * 1024 * 1024          # one file given to a page (by Claude or by the person)
+
+
+def _session_running(sid: str) -> bool:
+    from ..sessions import store
+    try:
+        m = store.read(sid)
+    except Exception:  # noqa: BLE001 - unreadable: not running
+        return False
+    return bool(m and m.get("state") == "running")
 
 
 class Turn:
@@ -97,6 +108,7 @@ class Browser:
         self.released = asyncio.Event()
         self.released.set()
         self.claude_at: dict[str, float] = {}       # targetId -> last command of a turn on it
+        self.turn_ended: dict[str, float] = {}      # session navigator -> when its last turn ended
         self.trail: dict[str, list[dict]] = {}      # targetId -> pages the person went to
         self.mem = 0
         self.last_input: dict[str, float] = {}      # navigator -> the person's last input in it
@@ -322,10 +334,18 @@ class Pool:
         if not browser.feature_on() or p is None:
             return await self.stop(b.pid, "turned off" if p else "its profile was deleted")
         for sid, t in list(b.turns.items()):
-            if not await asyncio.to_thread(turn_alive, sid) or (now - t.last_call > CHILD_IDLE and not t.lock.locked()):
+            ended = not await asyncio.to_thread(turn_alive, sid)
+            if ended or (now - t.last_call > CHILD_IDLE and not t.lock.locked()):
                 await t.stop()
                 b.turns.pop(sid, None)
                 self._changed()
+                if ended and navs.kind(t.nav) == "session":
+                    b.turn_ended[t.nav] = now
+        for nav, at in list(b.turn_ended.items()):
+            if any(x.nav == nav for x in b.turns.values()):
+                b.turn_ended.pop(nav, None)                 # a new turn uses it again
+            elif now - at > TURN_END_SLEEP and await self._sleep_turn_tabs(b, nav):
+                b.turn_ended.pop(nav, None)
         for nav, c in list(b.control.items()):
             if now - c["at"] > CONTROL_IDLE:
                 self._release(b, nav)
@@ -336,6 +356,24 @@ class Pool:
         b.mem = await asyncio.to_thread(unit.memory_current, b.pid, b.proc)
         await self._level(b)
         await self._sleep_tabs(b, s, now)
+
+    async def _sleep_turn_tabs(self, b: Browser, nav: str) -> bool:
+        """A session's turn ended TURN_END_SLEEP ago: its tabs sleep (a page left running - a 3D render, a video -
+        would keep the CPU busy). They stay in the list; the next turn opens them again. Not while the person
+        watches or drives that navigator, nor while another turn of it runs (False: try again later)."""
+        if navs.kind(nav) != "session":
+            return True
+        if not b.watcher or b.control.get(nav) or b.watcher.watched(nav) or any(x.nav == nav for x in b.turns.values()):
+            return False
+        if await asyncio.to_thread(_session_running, nav.split(":", 1)[1]):
+            return False                # a new turn that has not used the browser yet: its pages may be in use
+        going = b.tabs.awake(nav)
+        for tab in going:
+            await b.watcher.close_tab(tab["target"], sleep=True)
+        if going:
+            log.info("Harness Browser %s: %d tab(s) of %s asleep (turn ended)", b.pid, len(going), nav)
+            self._changed()
+        return True
 
     async def _close_sessions(self) -> None:
         """A session's navigator is temporary: once the session has had no turn on it for `idle_min`, its tabs are
@@ -975,22 +1013,53 @@ def trail_text(trail: list[dict]) -> str:
 
 # ---- files given to a page ---------------------------------------------------------------------------------------
 def stage(b: Browser, name: str, data: bytes | None = None, src: Path | None = None) -> str:
-    """Copy a file into the profile's uploads folder (emptied at each start); returns its path as Chromium sees it."""
-    ids = unit.user_ids()
-    root = b.run / "uploads"
-    d = root / secrets.token_hex(6)
-    d.mkdir(parents=True, exist_ok=True)
-    safe = re.sub(r"[^\w.\- ]", "_", Path(name).name).strip(" .")[:120] or "file"
-    f = d / safe
-    if src is not None:
-        shutil.copyfile(src, f)
-    else:
-        f.write_bytes(data or b"")
-    for x, mode in ((root, 0o750), (d, 0o750), (f, 0o640)):
-        os.chmod(x, mode)
-        if ids and not unit._direct():
-            os.chown(x, ids[0], ids[1])
-    return str(f) if unit._direct() else f"/mxrun/uploads/{d.name}/{safe}"
+    """Copy a file into the profile's uploads folder (emptied at each start); returns its path as Chromium sees it.
+    run/<profile> belongs to the browser's user, who could put a link in place of `uploads`: every step goes through
+    folders opened without following links, `uploads` and below belong to the server (the browser's group reads)."""
+    ids = None if unit._direct() else unit.user_ids()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    b.run.mkdir(parents=True, exist_ok=True)
+    run = os.open(b.run, flags)
+    fds = [run]
+    try:
+        try:
+            st = os.lstat("uploads", dir_fd=run)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():    # a link, a file, a folder of the browser
+                if stat.S_ISDIR(st.st_mode):
+                    shutil.rmtree("uploads", dir_fd=run)
+                else:
+                    os.unlink("uploads", dir_fd=run)
+                raise FileNotFoundError
+        except FileNotFoundError:
+            os.mkdir("uploads", 0o750, dir_fd=run)
+        root = os.open("uploads", flags, dir_fd=run)
+        fds.append(root)
+        if os.fstat(root).st_uid != os.geteuid():         # swapped in between: never written into
+            raise browser.BrowserError(409, "upload", "The uploads folder of this browser changed: try again.")
+        sub = secrets.token_hex(6)
+        os.mkdir(sub, 0o750, dir_fd=root)
+        d = os.open(sub, flags, dir_fd=root)
+        fds.append(d)
+        safe = re.sub(r"[^\w.\- ]", "_", Path(name).name).strip(" .")[:120] or "file"
+        fd = os.open(safe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=d)
+        with os.fdopen(fd, "wb") as out:
+            if src is not None:
+                with open(src, "rb") as f:
+                    shutil.copyfileobj(f, out)
+            else:
+                out.write(data or b"")
+            os.fchmod(out.fileno(), 0o640)
+            if ids:
+                os.fchown(out.fileno(), -1, ids[1])
+        for x in (root, d):
+            os.fchmod(x, 0o750)
+            if ids:
+                os.fchown(x, -1, ids[1])                # the browser's group: it reads, it cannot write
+    finally:
+        for x in fds:
+            os.close(x)
+    f = b.run / "uploads" / sub / safe
+    return str(f) if unit._direct() else f"/mxrun/uploads/{sub}/{safe}"
 
 
 def claude_file(b: Browser, owner_path: str, raw: str) -> str:

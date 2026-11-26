@@ -174,7 +174,7 @@ def public(meta: dict, exits_waiting: dict[str, dict] | None = None) -> dict:
             "model": m.get("model") or "", "effort": m.get("effort") or "", "real_model": m.get("real_model") or None,
             "context_tokens": m.get("context_tokens"), "context_window": _context_window(m),
             "archived": bool(m.get("archived")), "favorite": bool(m.get("favorite")),
-            "notify": bool(m.get("notify")), "source": m.get("source") or "web", "cron": bool(m.get("cron")),
+            "notify": bool(m.get("notify")), "push": m.get("push") is not False, "source": m.get("source") or "web", "cron": bool(m.get("cron")),
             "unread": (bool(finished) and finished > seen or bool(m.get("marked_unread"))) and m.get("state") != "running",
             "last_text": m.get("last_text") or "", "error": m.get("error") or None,
             "plan_mode": bool(m.get("plan_mode")), "plan_ready": bool(m.get("plan_ready")),
@@ -312,6 +312,19 @@ def _extras(client_id: str | None, silent_ok: bool, ref: str | None, call: str |
             **({"refs": [str(ref)]} if ref else {}), **({"call": call} if call else {})}
 
 
+SENDER_KINDS = ("session", "agent", "cron", "feed", "mail", "group", "manual", "cli", "github", "system")
+
+
+def _sent_by(sender: dict | None, shown: str | None) -> dict:
+    """The queue item's `sender` and `shown` (send_message), when set: only known kinds and short strings."""
+    out: dict = {}
+    if isinstance(sender, dict) and sender.get("kind") in SENDER_KINDS:
+        out["sender"] = {k: str(sender[k])[:200] for k in ("kind", "title", "path", "session") if sender.get(k)}
+    if shown and str(shown).strip():
+        out["shown"] = str(shown).strip()
+    return out
+
+
 def _check_attachments(paths: list[str] | None) -> list[str]:
     out = []
     for p in paths or []:
@@ -341,6 +354,7 @@ def _enqueue(sid: str, item: dict, *, reset_cron: bool = False) -> bool:
         m["updated"] = time.time()
         if reset_cron:                    # a cron session you talk to becomes a normal one
             m["cron"], m["archived"] = False, False
+            m.pop("jarvis_archived", None)    # archived by Jarvis once its work was done: followed up
         busy = m.get("state") == "running" and store.runner_alive(sid, m)
         held = not busy and _handoff_held(m)     # runner._handoff puts the seed first and starts it
         if not busy and not held:                # pid=None: a dead runner's pid is never signalled (it may be reused)
@@ -374,9 +388,12 @@ def create_session(path: str, message: str | None = None, title: str | None = No
                    permission_mode: str = "", auto_title: bool = False, voice_path: str | None = None,
                    client_id: str | None = None, silent_ok: bool = False, ref: str | None = None,
                    provider: str | None = None, effort: str | None = None, worktree: dict | None = None,
-                   call: str | None = None) -> dict:
-    """`worktree` = {repo, base?, prepare?, copy_env?, pr?}: the session works on a separate copy (worktrees.py),
+                   call: str | None = None, sender: dict | None = None, shown: str | None = None,
+                   push: bool = True) -> dict:
+    """`push`: False = this session never rings the phones (Mobile notifications, api/push.py).
+    `worktree` = {repo, base?, prepare?, copy_env?, pr?}: the session works on a separate copy (worktrees.py),
     made before its first turn.
+    `sender`, `shown`: as send_message's, for the first message.
     `auto_title`: `title` was made from the first message by the caller (Telegram) - still worth a short title.
     `silent_ok`: a scheduled job that reports every run - its turn may answer [SILENT] (runner, spawn.CRON_SILENT).
     `provider`: the credential its turns use (gateway:<id> | anthropic); "" = the default provider.
@@ -397,6 +414,8 @@ def create_session(path: str, message: str | None = None, title: str | None = No
                           permission_mode=permission_mode)
     if prov:
         meta["provider"] = prov
+    if not push:
+        meta["push"] = False
     automatic, has_text = auto_title or not given, bool((message or "").strip())
     if effort:
         meta["effort"] = effort
@@ -420,7 +439,8 @@ def create_session(path: str, message: str | None = None, title: str | None = No
             from .. import worktrees
             worktrees.undo(meta["id"], meta["worktree"])
         raise
-    first = _item((message or "").strip(), files, source, **_extras(client_id, silent_ok, ref, call))
+    first = _item((message or "").strip(), files, source, **_extras(client_id, silent_ok, ref, call),
+                  **_sent_by(sender, shown))
     if audio:
         _enqueue_voice(meta["id"], first, audio)
     elif (message or "").strip() or files:
@@ -481,12 +501,16 @@ def _enqueue_voice(sid: str, item: dict, audio: str, *, reset_cron: bool = False
 def send_message(sid: str, text: str, attachments: list[str] | None = None, source: str = "web",
                  voice_path: str | None = None, ref: str | None = None,
                  client_id: str | None = None, silent_ok: bool = False, mentions: list[dict] | None = None,
-                 relay: dict | None = None, call: str | None = None) -> dict:
+                 relay: dict | None = None, call: str | None = None, sender: dict | None = None,
+                 shown: str | None = None) -> dict:
     """`ref`: an id the caller (Telegram) finds again in the meta of the turn that ran this message
     (`turn_refs` while it runs, `last_turn.refs` once it ended; see live_refs). `client_id`: the web page's own id
     for it, kept in its queue item and its log line (`client_ids`). `mentions`: the @ of the composer ({kind, ref},
     see mentions.resolve): Claude reads with the message how to write to each. `relay`: sent by another session's
-    turn (relay_message). `call`: sent during a voice call, in that language (runner.CALL_PREFACE)."""
+    turn (relay_message). `call`: sent during a voice call, in that language (runner.CALL_PREFACE).
+    `sender`: who sent it when it is neither the owner nor a session's turn (relay) - {kind, title?, path?, session?},
+    kind = cron | agent | feed | mail | group | manual | cli | github | system (shown as a card, runner._sender).
+    `shown`: the part of the text for the owner, when the rest is instructions for Claude (the card shows it)."""
     _require(sid)
     files = _check_attachments(attachments)
     audio = _check_voice(voice_path)
@@ -499,14 +523,18 @@ def send_message(sid: str, text: str, attachments: list[str] | None = None, sour
             extra["mentions"] = found
     if relay:
         extra["relay"] = relay
+    extra.update(_sent_by(sender, shown))
     if text.strip():
         titles.first_message(sid, text.strip())
     item = _item(text.strip(), files, source, **extra)
+    if source in OWNER_SOURCES and not relay and "sender" not in extra:
+        store.update(sid, owner_at=time.time())         # the owner wrote here (Jarvis: reuse and archiving rules)
     reset = source != "cron"
     queued = _enqueue_voice(sid, item, audio, reset_cron=reset) if audio else _enqueue(sid, item, reset_cron=reset)
     return {"queued": queued, "session": get_session(sid)}
 
 
+OWNER_SOURCES = ("web", "telegram")                  # a message typed by the owner (not a session, agent, cron)
 MAX_HOPS = 3                                           # session -> session -> ... (agents count too)
 
 
@@ -518,7 +546,7 @@ def relay_message(to: str, text: str, attachments: list[str] | None = None, send
     (the sender turn's, + 1): refused above MAX_HOPS, so two sessions never answer each other forever.
     `short`: its answer is a report read by another turn (Jarvis's board): Claude is asked for a short final answer
     (runner.SHORT_ANSWER_NOTE, not displayed). -> {queued, session}"""
-    target = find_session(to)
+    target = _jarvis_target(to) or find_session(to)
     if sender and target["id"] == sender.get("id"):
         raise SessionError(400, "self", "A session cannot send a message to itself")
     check_hops(hops)
@@ -529,6 +557,21 @@ def relay_message(to: str, text: str, attachments: list[str] | None = None, send
     if short:
         relay["short"] = True
     return send_message(target["id"], text, attachments, "session" if sender else "cli", relay=relay)
+
+
+def _jarvis_target(to: str) -> dict | None:
+    """`to` = "jarvis" (its feature on): Jarvis's conversation of the moment (made when there is none yet); one of
+    its past conversations -> the current one too (it changes each morning, a send never lands in yesterday's)."""
+    from .. import jarvis
+    if not jarvis.feature_on() or not jarvis.is_jarvis_project(jarvis.PROJECT):
+        return None
+    want = (to or "").strip()
+    if want.casefold() == "jarvis":
+        sid = jarvis.current_session()
+        return (get_session(sid) if sid else None) or jarvis.conversation()
+    if store.is_valid_id(want) and want != (cur := jarvis.current_for(want)):
+        return get_session(cur)
+    return None
 
 
 def check_hops(hops: int) -> None:
@@ -801,7 +844,7 @@ def update_session(sid: str, title: str | None = None, model: str | None = None,
                    archived: bool | None = None, notify: bool | None = None,
                    plan_mode: bool | None = None, favorite: bool | None = None,
                    path: str | None = None, provider: str | None = None,
-                   effort: str | None = None) -> dict:
+                   effort: str | None = None, push: bool | None = None) -> dict:
     cur = _require(sid)
     if model is not None:
         model = _check_model(model)
@@ -828,6 +871,8 @@ def update_session(sid: str, title: str | None = None, model: str | None = None,
             m["archived"] = bool(archived)
         if notify is not None:
             m["notify"] = bool(notify)
+        if push is not None:
+            m["push"] = bool(push)
         if favorite is not None:
             m["favorite"] = bool(favorite)
         if plan_mode is not None:
@@ -904,6 +949,8 @@ def handoff(sid: str) -> dict:
                          env=meta.get("env"), timeout_s=meta.get("timeout_s"), effort=meta.get("effort") or "")
     if meta.get("favorite"):                 # the continuation stays in the user's favorites
         new["favorite"] = True
+    if meta.get("push") is False:            # and muted on the phones
+        new["push"] = False
     if meta.get("effort"):
         new["effort"] = meta["effort"]
     new["handoff_pending"] = time.time()     # messages sent to it wait for the summary seed (runner._handoff)
@@ -936,8 +983,10 @@ def read_raw(sid: str, offset: int = 0, max_bytes: int = READ_CHUNK) -> tuple[li
                 return [], offset
             chunk += rest
             cut = len(chunk) - 1
-    chunk = chunk[: cut + 1]
-    return chunk.decode("utf-8", "replace").splitlines(), offset + len(chunk)
+    # cut on b"\n" only: str.splitlines() also cuts on U+2028 / U+2029 / U+0085, which json.dumps(ensure_ascii=False)
+    # leaves raw in a line, and the whole event (a tool call, its result) would vanish from the thread
+    lines = [ln.decode("utf-8", "replace").removesuffix("\r") for ln in chunk[:cut].split(b"\n")]
+    return lines, offset + cut + 1
 
 
 def read_events(sid: str, offset: int = 0) -> tuple[list[dict], int]:
@@ -1530,7 +1579,7 @@ def trash_sessions(ids: list[str], dest: Path) -> None:
 # ---- turn-end watcher ----------------------------------------------------------------------
 _turn_cbs: list[Callable[..., Any]] = []
 _watch_task: asyncio.Task | None = None
-_known: dict[str, tuple[int, int, str, bool]] = {}      # sid -> (mtime_ns, turns, state, unread)
+_known: dict[str, tuple[tuple, int, str, bool]] = {}    # sid -> ((inode, mtime_ns, size), turns, state, unread)
 
 
 def on_turn_end(cb: Callable[[dict, dict | None], Any]) -> None:
@@ -1553,7 +1602,7 @@ RUNNING_RECHECK_S = 1.0
 _checked: dict[str, float] = {}
 
 
-_damaged: dict[str, int] = {}          # session -> mtime of a meta file public() could not read
+_damaged: dict[str, tuple] = {}        # session -> (inode, mtime_ns, size) of a meta file public() could not read
 
 
 _held: dict[str, float] = {}           # continuation with queued messages -> when its hand-off hold expires
@@ -1580,6 +1629,13 @@ def _ended(s: dict, m: dict, died: bool = False) -> dict:
     return {**s, "last_turn": m.get("last_turn") if isinstance(m.get("last_turn"), dict) else {}, "turn_died": died}
 
 
+def _ident(p: Path) -> tuple[int, int, int]:
+    """(inode, mtime_ns, size) of a meta file, as meta_ident: two writes in the same tick of the kernel's coarse
+    clock keep the same mtime_ns, but an atomic write is a new inode (and mostly a new size)."""
+    st = p.stat()
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
 def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
     """One pass over the meta files -> (turn ends, sessions changed, workspace changed)."""
     ends: list[tuple[dict, dict | None]] = []
@@ -1591,7 +1647,7 @@ def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
     for sid in store.list_ids():
         alive.add(sid)
         try:
-            mt = (d / f"{sid}.json").stat().st_mtime_ns
+            mt = _ident(d / f"{sid}.json")
         except OSError:
             continue
         prev = _known.get(sid)
@@ -1614,7 +1670,7 @@ def _scan(primed: bool) -> tuple[list[tuple[dict, dict | None]], bool, bool]:
             _damaged[sid] = mt                         # logged once: read again only when the file changes
             continue
         try:
-            mt = (d / f"{sid}.json").stat().st_mtime_ns
+            mt = _ident(d / f"{sid}.json")
         except OSError:
             pass
         cur = (mt, s["turns"], s["state"], s["unread"])

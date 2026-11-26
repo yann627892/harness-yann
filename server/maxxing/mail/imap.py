@@ -18,6 +18,7 @@ import email.parser
 import email.policy
 import email.utils
 import imaplib
+import json
 import re
 import socket
 import ssl
@@ -49,6 +50,15 @@ class MailError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def tls_error(host: str, port: int, tls: str, e: ssl.SSLError) -> MailError:
+    """An SSL error, said plainly when the cause is known: SSL/TLS on a port that answers in clear text (587, 25,
+    143) fails with WRONG_VERSION_NUMBER, and the fix is STARTTLS."""
+    reason = str(e.reason or e)
+    if tls == "ssl" and "WRONG_VERSION_NUMBER" in reason:
+        return MailError("tls", f"{host}:{port}: this port expects STARTTLS, not SSL/TLS: set Security to STARTTLS ({reason})")
+    return MailError("tls", f"{host}:{port}: TLS error ({reason})")
 
 
 # ---------------------------------------------------------------- modified UTF-7 (RFC 3501 folder names)
@@ -131,7 +141,7 @@ def open_imap(host: str, port: int, tls: str, username: str, password: str) -> i
         e.timed_out = True
         raise e from None
     except ssl.SSLError as e:
-        raise MailError("tls", f"{host}:{port}: TLS error ({e.reason or e})") from None
+        raise tls_error(host, port, tls, e) from None
     except (OSError, imaplib.IMAP4.error) as e:
         raise MailError("unreachable", f"{host}:{port}: {e}") from None
     try:
@@ -776,6 +786,18 @@ def summaries(acc: dict, folder: str, uids: list[int]) -> list[dict]:
         _select(m, folder, readonly=True)
         rows = _fetch_summaries(m, [int(u) for u in uids])
     return with_trust(acc, rows)
+
+
+def identity(acc: dict, folder: str, uid: int) -> str | None:
+    """What tells this message from another one given the same uid later (size, arrival, Message-ID), from a
+    headers-only FETCH; None when the message is gone."""
+    with session(acc) as m:
+        _select(m, folder, readonly=True)
+        rows = _fetch_summaries(m, [int(uid)])
+    if not rows:
+        return None
+    r = rows[0]
+    return json.dumps([r.get("size"), r.get("received"), r.get("message_id") or ""])
 
 
 def new_since(acc: dict, folder: str, last_uid: int | None, limit: int = 50) -> dict:

@@ -6,6 +6,7 @@ import { FILE_HREF, useFileViewer } from '@/features/files/viewerStore'
 import { useMyBrowserOpen } from '@/features/browser/open'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
+import { useThemeSync } from '@/features/themes/useThemeSync'
 import { useGlobalBus } from '@/lib/sse'
 import { api } from '@/lib/api'
 import { startIdlePrefetch } from '@/lib/prefetchIdle'
@@ -32,6 +33,7 @@ import { useBootReadyWhenIdle } from '@/lib/bootLoader'
 const CommandPalette = React.lazy(() => import('./CommandPalette').then((m) => ({ default: m.CommandPalette })))
 const ShortcutsDialog = React.lazy(() => import('./ShortcutsDialog').then((m) => ({ default: m.ShortcutsDialog })))
 const TourHost = React.lazy(withGroups(['tour'], () => import('@/tour/Tour').then((m) => ({ default: m.TourHost }))))
+const GuideHost = React.lazy(withGroups(['tour'], () => import('@/guide/Guide').then((m) => ({ default: m.GuideHost }))))
 const InstallDialog = React.lazy(() => import('@/pwa/InstallDialog').then((m) => ({ default: m.InstallDialog })))
 
 /** Mounts its children once the browser is idle (or after 2.5 s), so they never compete with the first paint. */
@@ -185,10 +187,10 @@ function GlobalHotkeys() {
   const toggleSidebar = useUI((s) => s.toggleSidebar)
   const setShortcuts = useShortcutsDialog((s) => s.setOpen)
   const nav = useNav()
-  useHotkey('mod+k', () => setPalette(!useCommandStore.getState().open), { allowInInput: true })
-  useHotkey('mod+\\', toggleSidebar, { allowInInput: true })
+  useHotkey('mod+k', () => setPalette(!useCommandStore.getState().open), { allowInInput: true, repeat: false })
+  useHotkey('mod+\\', toggleSidebar, { allowInInput: true, repeat: false })
   useHotkey('?', () => setShortcuts(true))
-  useHotkey('shift+p', () => useUI.getState().setPresentation(!useUI.getState().presentation))
+  useHotkey('shift+p', () => useUI.getState().setPresentation(!useUI.getState().presentation), { repeat: false })
   return (
     <>
       {nav.map((n) => (
@@ -239,6 +241,7 @@ export function AppShell() {
   const bus = useGlobalBus(true)
   useSyncLanguage()
   useShareLook()
+  useThemeSync()
   useBootReadyWhenIdle()
   usePrefetch()
   useDoneNotifier()
@@ -286,6 +289,7 @@ export function AppShell() {
         <InstallDialog />
         <WhatsNew />
         <TourHost />
+        <GuideHost />
       </WhenIdle>
     </div>
   )

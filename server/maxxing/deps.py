@@ -964,6 +964,43 @@ def _up_chromium(c: dict, explicit: bool = False) -> tuple[str, str]:
     return ("installed" if done else "ok"), ", ".join(sorted(set(revs.values())))
 
 
+def _libc_ok(want: list, libc: str) -> bool:
+    """npm's rule for `libc` (like `os`/`cpu`): a list of only `!x` entries means "any but x"."""
+    names = [str(x) for x in want]
+    if f"!{libc}" in names:
+        return False
+    if all(x.startswith("!") for x in names):
+        return True
+    return libc in names
+
+
+def drop_other_libc(modules: Path, libc: str | None = None) -> list[str]:
+    """Remove the native packages built for another C library than this host's (glibc only).
+
+    npm 10 does not keep the `libc` field in package-lock.json, so `npm ci` installs both the glibc and the
+    musl builds of a native package (Remotion: the rspack binding and the compositor, ~90 MB never loaded on a
+    glibc host). Only top-level and scoped packages are looked at (native builds are hoisted); returns their names."""
+    if libc is None:
+        libc = "glibc" if platform.libc_ver()[0] == "glibc" else ""
+    if libc != "glibc":                         # musl or unknown: keep everything
+        return []
+    gone = []
+    for pkg in sorted([*modules.glob("*/package.json"), *modules.glob("@*/*/package.json")]):
+        # a linked package or scope (npm link, a workspace) points outside node_modules: never delete through it
+        if pkg.parent.is_symlink() or pkg.parent.parent.is_symlink():
+            continue
+        try:
+            data = json.loads(pkg.read_text())
+        except (OSError, ValueError):
+            continue
+        want = data.get("libc") if isinstance(data, dict) else None
+        if isinstance(want, list) and want and not _libc_ok(want, libc):
+            shutil.rmtree(pkg.parent, ignore_errors=True)
+            if not pkg.parent.exists():
+                gone.append(pkg.parent.relative_to(modules).as_posix())
+    return gone
+
+
 def _up_remotion(c: dict, explicit: bool = False) -> tuple[str, str]:
     dest = expand(c["path"])
     have = installed("remotion")["version"]
@@ -987,6 +1024,7 @@ def _up_remotion(c: dict, explicit: bool = False) -> tuple[str, str]:
     if code != 0 or out.strip() != c["version"]:
         shutil.rmtree(new, ignore_errors=True)
         raise DepError("npm ci of Remotion failed (kept the previous one): " + out.strip()[-300:])
+    drop_other_libc(new / "node_modules")
     shutil.rmtree(old, ignore_errors=True)
     if dest.exists():
         os.replace(dest, old)

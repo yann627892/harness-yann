@@ -14,6 +14,7 @@ const DEMO_DIAGRAM = `flowchart LR
   D --> E`
 
 const SHOWCASES: Record<string, TourStep[]> = {
+  themes: [{ id: 'themes', targets: ['themes'], title: 'show.themes.title', body: 'show.themes.body', route: (c) => (c.pathname === '/settings/appearance' ? null : '/settings/appearance') }],
   look: [{ id: 'look', targets: ['accent'], title: 'show.look.title', body: 'show.look.body', route: (c) => (c.pathname === '/settings/appearance' ? null : '/settings/appearance') }],
   diagram: [{ id: 'diagram', targets: [], title: 'show.diagram.title', body: 'show.diagram.body', cta: 'show.try', after: () => showDiagram(DEMO_DIAGRAM) }],
   'text-zoom': [{ id: 'text-zoom', targets: [], title: 'show.textZoom.title', body: 'show.textZoom.body' }],
@@ -42,6 +43,7 @@ const SHOWCASES: Record<string, TourStep[]> = {
   jarvis: [{ id: 'jarvis', targets: [], title: 'show.jarvis.title', body: 'show.jarvis.body', route: (c) => (c.pathname === '/settings/features' ? null : '/settings/features') }],
   devices: [{ id: 'devices', targets: ['devices-feature'], title: 'show.devices.title', body: 'show.devices.body', route: (c) => (c.pathname === '/settings/features' ? null : '/settings/features') }],
   'mobile-header': [{ id: 'mobile-header', targets: [], title: 'show.mobileHeader.title', body: 'show.mobileHeader.body' }],
+  webhooks: [{ id: 'webhooks', targets: ['webhooks-new'], title: 'show.webhooks.title', body: 'show.webhooks.body', route: (c) => (c.pathname === '/settings/webhooks' ? null : '/settings/webhooks') }],
   'touch-nav': [{ id: 'touch-nav', targets: ['touch-sessions', 'nav'], title: 'show.touchNav.title', body: 'show.touchNav.body', before: (c) => c.mobile && useTouchNav.getState().setPanel(null) }],
 }
 

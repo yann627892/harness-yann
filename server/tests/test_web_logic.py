@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -175,7 +176,8 @@ def _html_to_text(tmp_path: Path, tree: str, body: str):
     """Run htmlToText (plainText.ts imports remark: only its HTML part is taken) on a small fake DOM built by `tree`
     (node has no DOMParser), then `body` (`run()` gives the text)."""
     src = (WEB / "features" / "files" / "plainText.ts").read_text(encoding="utf-8")
-    part = src[src.index("const HTML_SKIP"):src.index("/** Cells separated by tabs")]
+    part = src[src.index("// Trims written as loops"):src.index("export function markdownToText(")] + \
+        src[src.index("const HTML_SKIP"):src.index("/** Cells separated by tabs")]
     dom = """
 class T { constructor(v) { this.nodeType = 3; this.nodeValue = v; this.childNodes = [] } }
 class E {
@@ -190,7 +192,6 @@ class E {
 const h = (tag, attrs, ...kids) => new E(tag, attrs, kids)
 let BODY
 globalThis.DOMParser = class { parseFromString() { return { body: BODY } } }
-const edges = (s: string) => s.replace(/^\\n+|\\s+$/g, '')
 """
     (tmp_path / "main.ts").write_text(dom + part + f"\nBODY = (() => {{ {tree} }})()\nconst run = () => htmlToText('')\n"
                                       f"console.log(JSON.stringify((() => {{ {body} }})()))\n", encoding="utf-8")
@@ -284,3 +285,345 @@ def test_a_voice_call_failure_reads_the_message_the_server_sends(tmp_path):
                 await m.failure(res(422, { detail: { message: 'old shape' } })),
                 await m.failure(new Response('<html>', { status: 502 }))]""")
     assert out == ["audio too long", "old shape", "HTTP 502"]
+
+
+def test_a_remote_picture_without_slashes_still_waits_for_a_click(tmp_path):
+    """`http:evil.com/p.png` is absolute for a browser on an https page: remote, like `https://…` and `//…`."""
+    src = (WEB / "components" / "ui" / "markdown.tsx").read_text(encoding="utf-8")
+    rx = re.search(r"^const EXTERNAL = (/.+/i)$", src, re.M)[1]
+    mod = tmp_path / "ext.ts"
+    mod.write_text(f"export const EXTERNAL = {rx}\n", encoding="utf-8")
+    out = _run_ts(tmp_path, mod, """return ['http:evil.com/?d=1', 'HTTPS:evil.com', 'https://evil.com', '//evil.com',
+        '/\\\\evil.com', '/sessions', '/api/files/raw?p=a.png', 'img/a.png', '#top'].map((u) => m.EXTERNAL.test(u))""")
+    assert out == [True, True, True, True, True, False, False, False, False]
+
+
+def test_only_the_widget_itself_speaks_to_the_page_that_frames_it(tmp_path):
+    """A link in widget.html can load another site INTO the frame (same window, origin 'null'): without the key of
+    the mount from the fragment, its messages are ignored and it gets no data."""
+    out = _run_ts(tmp_path, WEB / "pages" / "dashboard" / "widgetKey.ts", """const a = m.frameKey(), b = m.frameKey()
+        return [/^[0-9a-f]{32}$/.test(a), a !== b, m.ours({loads: 1, hellos: 1}), m.ours({loads: 0, hellos: 1}),
+                m.ours({loads: 2, hellos: 1}), m.ours({loads: 1, hellos: 0})]""")
+    assert out == [True, True, True, True, False, False]
+    src = (WEB / "pages" / "dashboard" / "HtmlWidget.tsx").read_text(encoding="utf-8")
+    assert "if (m.key !== key) return" in src and "vars: themeVars(), key }" in src
+    assert src.count("ours(seen.current) &&") == 2                 # data and theme
+    from maxxing.api.extensions import WIDGET_BRIDGE
+    assert "K=String(init.key||'')" in WIDGET_BRIDGE and "post({mx:'hello'})" in WIDGET_BRIDGE
+    assert "parent.postMessage(m,'*')" in WIDGET_BRIDGE and WIDGET_BRIDGE.count("parent.postMessage") == 1
+
+
+def test_a_link_to_a_chat_that_is_gone_keeps_the_team_header():
+    """?chat=<gone> (a group left, an old notification): the chat cannot load, the page still has its header (title,
+    New chat, and on a phone the button to the list and the menu)."""
+    src = (WEB / "features" / "team" / "TeamPage.tsx").read_text(encoding="utf-8")
+    assert "const known = !chatId || !team || team.chats.some((c) => c.id === chatId)" in src
+    assert "{(!chatId || !known || (isError && !team)) && <PageHeader" in src
+
+
+def test_a_dictation_cancelled_then_started_again_while_asking_leaves_no_mic_on(tmp_path):
+    """start(); cancel(); start(); then the permission comes: one recorder only, the first stream is given back."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    src = (WEB / "features" / "voice" / "recorder.ts").read_text(encoding="utf-8")
+    (tmp_path / "rec.ts").write_text(src.replace("from 'react'", "from './react.mjs'").replace("from './mic'", "from './mic.mjs'"))
+    (tmp_path / "react.mjs").write_text(
+        "export const useState = (v) => [v, () => {}]\nexport const useRef = (v) => ({ current: v })\n"
+        "export const useCallback = (f) => f\nexport const useEffect = () => {}\n")
+    (tmp_path / "mic.mjs").write_text(
+        "export const asks = []\nexport const openMic = () => new Promise((res) => asks.push(res))\n")
+    (tmp_path / "main.mjs").write_text("""
+import { useRecorder } from './rec.ts'
+import { asks } from './mic.mjs'
+const recorders = []
+globalThis.window = { isSecureContext: true, setInterval: () => 1, clearInterval() {} }
+Object.defineProperty(globalThis, 'navigator', { value: { mediaDevices: { getUserMedia() {} } }, configurable: true })
+globalThis.MediaRecorder = class { constructor(s) { this.state = 'inactive'; this.stream = s; recorders.push(this) }
+  start() { this.state = 'recording' } stop() { this.state = 'inactive'; this.onstop?.() } requestData() {} }
+globalThis.requestAnimationFrame = () => 0
+globalThis.cancelAnimationFrame = () => {}
+const stream = () => { const s = { on: true, getTracks: () => [{ stop: () => { s.on = false } }] }; return s }
+const r = useRecorder()
+const first = r.start(); r.cancel(); const second = r.start()
+const a = stream(), b = stream()
+asks[0](a); asks[1](b)
+await first; await second
+console.log(JSON.stringify({ recorders: recorders.length, firstOn: a.on, secondOn: b.on, records: recorders[0]?.stream === b }))
+""")
+    r = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "main.mjs"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode and ("strip-types" in r.stderr or "Unknown file extension" in r.stderr):
+        pytest.skip("this node cannot strip types")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"recorders": 1, "firstOn": False, "secondOn": True, "records": True}
+
+
+def test_both_sidebars_dragged_wide_still_leave_the_page_its_room(tmp_path):
+    """Sidebars dragged to 440 + 520 px: on a 1024 px window the page kept 48 px. Now it keeps MAIN_MIN (480)."""
+    out = _run_ts(tmp_path, WEB / "components" / "shell" / "barWidths.ts", """
+        const S = {min: 220, max: 440}, T = {min: 220, max: 520}
+        return [1024, 1100, 1280, 1920, 700].map((vw) => {
+          const side = Math.min(440, m.sideMax(vw, S, T)), second = Math.min(520, m.secondMax(vw, side, T))
+          return [side, second, vw - side - second]
+        })""")
+    assert out == [[324, 220, 480], [400, 220, 480], [440, 360, 480], [440, 520, 960], [220, 220, 260]]
+    for f, call in (("Sidebar.tsx", "sideMax(useViewportWidth(), SIDEBAR_W, SECOND_W)"),
+                    ("PageList.tsx", "secondMax(useViewportWidth(), left, SECOND_W)")):
+        src = (WEB / "components" / "shell" / f).read_text(encoding="utf-8")
+        assert call in src and "max={maxW}" in src, f
+
+
+def test_a_relative_date_that_is_not_a_number_is_empty_not_a_crash(tmp_path):
+    out = _run_ts(tmp_path, WEB / "lib" / "format.ts", """return [undefined, NaN, 'x', null, Infinity].map((v) => m.fmtRelative(v, 'en', 1000))
+        .concat([m.fmtRelative(1000 - 7200, 'en', 1000)])""")
+    assert out == ["", "", "", "", "", "2 hr. ago"]
+
+
+def test_a_member_stopped_in_a_group_message_is_not_shown_as_a_recipient(tmp_path):
+    src = (WEB / "features" / "agents" / "mentions.tsx").read_text(encoding="utf-8")
+    mod = tmp_path / "named.ts"
+    mod.write_text(src[src.index("const ALL_WORDS"):src.index("/** A member (null = @all) as a chip")]
+                   .replace("export function useMentionMap", "function useMentionMap_")
+                   .replace("export type MentionMap = Map<string, AgentGroupMember | null>", "type MentionMap = Map<string, any>")
+                   .replace("AgentGroupMember", "any"), encoding="utf-8")
+    run = tmp_path / "run"
+    run.mkdir()
+    out = _run_ts(run, mod, """const bob = { handle: 'bob' }, ann = { handle: 'ann' }
+        const map = new Map([['all', null], ['bob', bob], ['ann', ann]])
+        return ['stop @Bob', 'stop @bob and @ann, go', '@bob please', 'nonstop @bob'].map((t) => m.namedIn(t, map, [bob, ann]).map((x) => x.handle))""")
+    assert out == [[], ["ann"], ["bob"], ["bob"]]
+
+
+def test_a_quick_add_made_only_of_tokens_is_refused_before_the_server(tmp_path):
+    out = _run_ts(tmp_path, WEB / "features" / "tasks" / "model.ts", "return m.parseQuickAdd('#bug ^fri', [], '2026-11-25').title")
+    assert out.strip() == ""                               # nothing left for a title
+    page = (WEB / "pages" / "tasks" / "index.tsx").read_text(encoding="utf-8")
+    add = page[page.index("const addParsed"):page.index("const endOf")]
+    assert add.index("if (!p.title.trim())") < add.index("create.mutateAsync") and "tasks.titleRequired" in add
+    for form in ("Board.tsx", "Calendar.tsx"):              # a refused add keeps the text, no unhandled rejection
+        src = (WEB / "features" / "tasks" / form).read_text(encoding="utf-8")
+        assert "await onAdd(text)\n" in src and "} catch {" in src[src.index("await onAdd(text)"):][:200]
+
+
+def test_the_source_headings_are_the_ones_the_preview_draws(tmp_path):
+    src = (WEB / "features" / "files" / "readPos.ts").read_text(encoding="utf-8")
+    mod = tmp_path / "headings.ts"
+    mod.write_text(src[src.index("export function sourceHeadings"):src.index("/** Heading index + progress")], encoding="utf-8")
+    run = tmp_path / "run"
+    run.mkdir()
+    cases = ["# A\ntext\n\nTitle\n=====\n\n## B",                 # setext headings count
+             "Para\nmore\n---\n\n# C",                            # ... on the first line of their paragraph
+             "````\n```\n# no\n````\n# yes",                      # a shorter fence does not close a longer one
+             "```js\n# no\n```js\n# still no\n```\n# yes",        # nor one with an info text
+             "~~~\n# no\n```\n~~~\n# yes",                        # nor one of the other character
+             "- a\nb\n---\n# H",                                  # a list's line underlined: a rule
+             "***\n---\nP\n==="]                                  # rules are no paragraph
+    out = _run_ts(run, mod, f"return {json.dumps(cases)}.map((c) => m.sourceHeadings(c))")
+    assert out == [[1, 4, 7], [1, 5], [5], [6], [5], [4], [3]]
+
+
+def test_the_team_chat_name_keeps_its_room_next_to_the_header_buttons():
+    chat = (WEB / "features" / "team" / "Chat.tsx").read_text(encoding="utf-8")
+    head = chat[chat.index("function ChatHeader"):]
+    assert head.count("min-w-24 flex-1") == 2                 # a dm and a group: never squashed to 0 px
+    page = (WEB / "features" / "team" / "TeamPage.tsx").read_text(encoding="utf-8")
+    assert "newChat('max-xl:sr-only')" in page and "max-xl:sr-only\">{t('team.toBubble')}" in page
+
+
+REACT_STUB = """export function useRef(v) { return { current: v } }
+export function useEffect(f) { f() }
+export function useLayoutEffect(f) { f() }
+"""
+
+
+def _run_ts_stubbed(tmp_path: Path, source: Path, script: str, prelude: str = "", swap: dict | None = None):
+    """_run_ts for a module that imports React (a stub running effects at once) or an `@/` module (`swap`: its
+    import line -> a replacement); `prelude` runs before the import (globals such as window, localStorage)."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    text = source.read_text(encoding="utf-8")
+    for old, new in (swap or {}).items():
+        assert old in text, old
+        text = text.replace(old, new)
+    (tmp_path / "node_modules/react").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "node_modules/react/package.json").write_text('{"name": "react", "type": "module", "main": "index.js"}')
+    (tmp_path / "node_modules/react/index.js").write_text(REACT_STUB)
+    (tmp_path / "mod.ts").write_text(text, encoding="utf-8")
+    (tmp_path / "pre.mjs").write_text(prelude, encoding="utf-8")
+    (tmp_path / "main.mjs").write_text(
+        "import './pre.mjs'\nconst load = (q = '') => import('./mod.ts' + q)\nconst m = await load()\n"
+        f"console.log(JSON.stringify(await (async () => {{ {script} }})()))\n", encoding="utf-8")
+    r = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "main.mjs"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode and ("strip-types" in r.stderr or "Unknown file extension" in r.stderr):
+        pytest.skip("this node cannot strip types")
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_a_toggle_shortcut_held_down_runs_once(tmp_path):
+    out = _run_ts_stubbed(tmp_path, WEB / "commands/shortcuts.ts", """
+      const ev = (o) => ({ key: 'p', shiftKey: true, ctrlKey: false, metaKey: false, altKey: false, isComposing: false,
+        defaultPrevented: false, repeat: false, target: { tagName: 'BODY', closest: () => null }, preventDefault() {}, ...o })
+      let toggled = 0, zoom = 0
+      m.useHotkey('shift+p', () => toggled++, { repeat: false })
+      m.useHotkey('+', () => zoom++)
+      const fire = (e) => globalThis.L.forEach((f) => f(e))
+      fire(ev({})); for (let i = 0; i < 7; i++) fire(ev({ repeat: true }))
+      fire(ev({ key: '+' })); fire(ev({ key: '+', repeat: true }))
+      return [toggled, zoom]""", prelude="globalThis.L = []\nglobalThis.window = { addEventListener: (_, f) => L.push(f), "
+                                         "removeEventListener() {} }\n")
+    assert out == [1, 2]                                  # zoom keys still repeat
+
+
+def test_a_row_back_before_its_exit_ends_is_shown_again(tmp_path):
+    out = _run_ts_stubbed(tmp_path, WEB / "lib/presence.ts", """
+      let cancelled = false
+      const el = { inert: false, offsetLeft: 1, offsetTop: 2, offsetWidth: 3, offsetHeight: 4,
+        style: { pointerEvents: '', position: 'relative', left: '', top: '', width: '', height: '', margin: '', zIndex: '' },
+        animate: () => ({ cancel: () => { cancelled = true } }) }
+      m.animateOut(el, 'y')
+      const out = { inert: el.inert, position: el.style.position }
+      m.animateBack(el)
+      return [out, el.inert, el.style.position, el.style.pointerEvents, el.style.width, cancelled]""",
+                          prelude="globalThis.window = { matchMedia: () => ({ matches: false }) }\n")
+    assert out == [{"inert": True, "position": "absolute"}, False, "relative", "", "", True]
+
+
+def test_media_positions_of_two_tabs_are_merged_not_erased(tmp_path):
+    out = _run_ts_stubbed(tmp_path, WEB / "features/files/mediaMemory.ts", """
+      const b = await load('?tab-b')
+      m.resumePos('x', 100); b.resumePos('y', 100)            // each tab reads the (empty) key once
+      m.setMediaPos('a', 40); await new Promise((r) => setTimeout(r, 1100))
+      b.setMediaPos('b', 50); await new Promise((r) => setTimeout(r, 1100))
+      m.clearMediaPos('a'); await new Promise((r) => setTimeout(r, 1100))
+      return Object.keys(JSON.parse(globalThis.S.get('mx-media-pos'))).sort()""",
+                          prelude="const s = new Map()\nglobalThis.S = { get: (k) => s.get(k) ?? null, "
+                                  "set: (k, v) => s.set(k, v) }\n",
+                          swap={"import { store } from '@/lib/utils'": "const store = globalThis.S"})
+    assert out == ["b"]                                   # b's position kept, the one cleared in a stays cleared
+
+
+def test_a_long_pasted_quick_add_normalizes_each_project_name_once(tmp_path):
+    """The quick add is parsed at every key: the project names are normalized once per parse, not per @word."""
+    out = _run_ts(tmp_path, WEB / "features" / "tasks" / "model.ts", """let reads = 0
+        const projects = Array.from({ length: 30 }, (_, i) => {
+          const p = { id: 'p' + i }
+          Object.defineProperty(p, 'name', { get: () => { reads++; return 'Project ' + i } })
+          return p
+        })
+        const r = m.parseQuickAdd('@ab '.repeat(25000) + '@project-7 x', projects, '2026-11-25')
+        return [reads, r.project_id, r.title.length]""")
+    assert out[0] <= 60 and out[1] == "p7" and out[2] == len("@ab " * 25000 + "x")
+
+
+def test_the_spreadsheet_filter_follows_a_deferred_query_on_precomputed_rows():
+    """The Filter field of a sheet: rows lowered once per sheet, the table filtered on a deferred value (not at each key)."""
+    src = (WEB / "features" / "files" / "docs.tsx").read_text(encoding="utf-8")
+    view = src[src.index("function SheetsView"):src.index("const open = (i: number)")]
+    assert "React.useDeferredValue(q)" in view and "[rows, query])" in view
+    assert "lows.current?.rows !== rows" in view and "c.toLowerCase()" not in view
+
+
+def test_plain_text_trims_stay_linear_on_long_runs_of_blanks(tmp_path):
+    """« Copy as plain text » on a file with a long run of spaces or empty lines that is not at its end: no freeze."""
+    out = _html_to_text(tmp_path, "return h('body', {}, h('pre', {}, ' '.repeat(100000)), h('p', {}, 'end'))", """
+        const t0 = Date.now()
+        const blanks = ' '.repeat(100000), lines = '\\n'.repeat(100000)
+        const r = [edges('a' + blanks + 'b  '), oneLine('a' + blanks + 'b\\n  \\n c'), cutEnd('x' + blanks + 'y' + blanks, (c) => c === ' '),
+                   endBreaks('a' + lines + 'b' + lines).toString(), run()]
+        return [r[0].length, r[1].slice(-5), r[2].length, r[3], r[4].trim(), Date.now() - t0 < 3000]""")
+    assert out == [100002, "  b c"[-5:], 100002, "100000", "end", True]
+
+
+def _md_light(tmp_path: Path, body: str):
+    src = (WEB / "features" / "files" / "plainText.ts").read_text(encoding="utf-8")
+    part = src[src.index("// Trims written as loops"):src.index("/** Above this size")] + \
+        src[src.index("/** A longer line"):src.index("const mdBlocks")]
+    (tmp_path / "main.ts").write_text(part + f"\nconsole.log(JSON.stringify((() => {{ {body} }})()))\n", encoding="utf-8")
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    r = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "main.ts"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode and ("strip-types" in r.stderr or "Unknown file extension" in r.stderr):
+        pytest.skip("this node cannot strip types")
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_a_big_markdown_is_made_plain_without_the_parser(tmp_path):
+    """Over MD_PARSE_MAX characters, « Copy as plain text » takes the marks off line by line: 2 MB in well under a second."""
+    src = (WEB / "features" / "files" / "plainText.ts").read_text(encoding="utf-8")
+    fn = src[src.index("export function markdownToText("):src.index("/** A longer line")]
+    assert "if (md.length > MD_PARSE_MAX) return markdownToTextLight(md)" in fn
+    out = _md_light(tmp_path, """
+        const small = markdownToTextLight('# Title\\r\\n\\n> **bold** and *it* `code` ~~gone~~\\n* item [x](https://a.b) [y](y) ![pic](p.png)\\n```\\n# kept\\n```\\n---\\n')
+        const t0 = Date.now()
+        const big = markdownToTextLight('Hello **world** [x](https://a.b) é\\r\\n\\r\\n'.repeat(50000))
+        return [small, big.split('\\n')[0], Date.now() - t0 < 1500]""")
+    assert out == ["Title\n\nbold and it code gone\n- item x (https://a.b) y pic\n# kept", "Hello world x (https://a.b) é", True]
+
+
+def test_a_live_batch_of_text_does_not_copy_the_tool_index_nor_the_hidden_messages():
+    """fold() runs for every live batch: the tool index and the hidden messages are copied only by a batch that
+    changes them (once), not by each batch (its cost grew with the whole history loaded)."""
+    src = (WEB / "pages" / "sessions" / "log.ts").read_text(encoding="utf-8")
+    fold = src[src.index("function fold("):src.index("return { ...st, items, toolIdx")]
+    assert "{ ...st.toolIdx }" not in fold and "hidden = { ...hidden, [" not in fold
+    assert fold.count("if (!ownIdx) {") == 1 and fold.count("if (!ownHidden) {") == 1
+    use = fold[fold.index("case 'tool_use':"):fold.index("case 'tool_result':")]
+    assert use.index("toolIdx = { ...toolIdx }") < use.index("toolIdx[ev.id] = items.length")
+
+
+def test_the_space_office_pauses_what_cannot_be_seen():
+    """Each desk runs about ten endless animations: a bay far from the screen pauses them, and past CALM_ABOVE agents
+    only the desks of agents at work or waiting keep theirs."""
+    src = (WEB / "features" / "agents" / "OfficeFuture.tsx").read_text(encoding="utf-8")
+    bay = src[src.index("function Bay("):src.index("<DropBar side={dnd.side} vertical={false} />")]
+    assert "const away = useAway(ref)" in bay and "ref={ref}" in bay and "away && 'mx-wait'" in bay
+    desk = src[src.index("function Console("):src.index('data-testid="office-desk"')]
+    assert "calm && !working && st.id !== 'waiting' && 'mx-wait'" in desk
+    assert "> CALM_ABOVE" in src and "calm={calm}" in src
+    css = (WEB / "styles" / "globals.css").read_text(encoding="utf-8")
+    assert ".mx-wait, .mx-wait * { animation-play-state: paused !important; }" in css
+def test_the_demo_server_knows_the_phone_notifications(tmp_path):
+    """The demo server (screenshots, UI checks): a phone registered, `push` kept at creation and by PATCH (with
+    favorite and effort), so the per-session switch shows as on the real server."""
+    import socket
+    import time
+    import urllib.request
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    env = {**os.environ, "MOCK_PORT": str(port), "MOCK_DIST": str(tmp_path)}
+    proc = subprocess.Popen([node, str(WEB.parent / "mock" / "server.mjs")], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def call(method, path, body=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "X-Maxxing": "1"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+    try:
+        for _ in range(100):
+            try:
+                devices = call("GET", "/api/push/devices")
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            pytest.fail("the demo server did not start")
+        assert len(devices) == 1
+        topic = call("GET", "/api/sessions")[0]["path"]
+        s = call("POST", "/api/sessions", {"path": topic, "push": False})
+        assert s["push"] is False
+        s = call("PATCH", f"/api/sessions/{s['id']}", {"push": True, "favorite": True, "effort": "high"})
+        assert s["push"] is True and s["favorite"] is True and s["effort"] == "high"
+    finally:
+        proc.terminate()
+        proc.wait(5)

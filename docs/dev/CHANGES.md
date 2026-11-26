@@ -5,6 +5,179 @@ Private, technical counterpart of `CHANGELOG.md`. `CHANGELOG.md` is **public**: 
 `maxxing update`. This file is for us: API, data formats, migrations, internals, gotchas. It is never
 shown in the product. Newest first, same version headings as `CHANGELOG.md`.
 
+## 2.0.0-alpha.172 - 2026-11-25
+
+- Themes: `ThemePreview` loses its `image` and `wallpaper` props (no `<img>`, no `url()`): the tile is always the drawn
+  window, a glass theme's backdrop = `wall-a`/`wall-b` or the accent mix. `preview` stays in `/api/themes` (Community).
+  `/api/themes/{id}/file/{name}`: `stale-while-revalidate=604800` added to `max-age=300`.
+- Audit fixes (FEU, straight to `main` then merged into `beta`): `agents.continue_in_sessions` under `_continue_mu`
+  (check for a copy + creation in one step); `api/system` license loop catches one bad pass, `license.move_due`
+  reads a non-number / non-finite `move_tried_at` as never tried; `feedback` encodes the whole prompt with
+  `errors="replace"` (folder names with lone surrogates); `register.settings()` and `api/onboarding` read a
+  non-dict `register` section as the defaults; `FeedbackDialog` footer `sm:flex-wrap`.
+
+## 2.0.0-alpha.171 - 2026-11-25
+
+- Guide: `language` phase removed from `GuideDialog` (starts at `level`); the cards already use `config.language`, which
+  AppShell copies into the UI. Keys `guide.languageDesc` / `guide.languageCurrent` removed.
+
+## 2.0.0-alpha.170 - 2026-11-25
+
+- Guide (FEU): `maxxing/guide.py` + `api/guide.py` (`/api/guide`, `/cards`, `/reset`), state in
+  `<state>/guide/guide.json`. Cards = one `claude -p --model opus --tools ""` call per step (worker thread, one at a
+  time, queue lost on restart -> shown `failed`, asked again by the UI); output checked (`_clean_card`: known topic or
+  `default_topic`, `_BANNED` commands, 1 prompt beginner / 2 intermediate / 3 final). Facts sent: topics, 12 recent
+  session titles, agents, pages on, global memory.md (3 KB) and the last IMPORT_REPORT.md (2 KB), both through
+  `backup.LEAKS` redaction. UI: `web/src/guide/` (steps.ts ids = `guide.STEPS`, checked by test_guide), spotlight
+  helpers moved to `tour/spot.ts`; the old 8-step tour (`tour/steps.ts` STEPS, FinalCard, `tourDone`,
+  `mx-tour-pending`) removed, `tour/Tour.tsx` plays showcases only. `data-tour="view-switch"` on the Tabs/Zones switch.
+- Push (#185): session meta `push` (absent = on; `false` = muted, kept by a hand-off), `Session.push`, accepted by
+  `POST /api/sessions` and `PATCH`; `api/push.rings()` is false for a muted session. UI: `useHasPushDevice()` (any device).
+- Backup (#186): `_keep_local_rules` -> `_keep_switched_off`: on a server in use, a local `agent.json` with
+  `"enabled": false` stays off, and each local trigger with `"enabled": false` stays off (matched by trigger `id`).
+- Sessions: before `--resume`, the runner frees a dead process's claim in `~/.claude/sessions/<pid>.json` (regular
+  files only, read capped); a `fresh` turn killed after Claude created its thread is resumed (`--resume`) on
+  "already in use" instead of `--session-id` again.
+- Feedback: the filter gets the customizations, uncommitted files, extensions and themes of the install; a bug is sent
+  unless explained for sure; "Send to the team anyway" is a real button.
+- Phone, Tabs view: the tab bar folds only while the message box has focus (folding on scroll looped, dropped).
+
+## 2.0.0-alpha.169 - 2026-11-24
+
+- Browser (FEU): `pool.TURN_END_SLEEP` 15 min; `turn_ended[nav]` set when a session navigator's turn is found dead,
+  popped by a new turn; its tabs sleep after the delay (`_sleep_turn_tabs`). Known gap: a turn whose browser tools were
+  stopped for idleness (`CHILD_IDLE`) is not recorded, its tabs fall back to the unused-tab rule.
+- Team (audit, d80ae9b20): a roster from a remote creator makes one of our contacts a member only if they were already
+  in or the roster carries a well-formed pair key for them (`teampeer._key_ok`). Known limit: the key is not verified,
+  a creator can still vouch for a contact (who would only see what the creator can relay anyway).
+- Uploads (audit, f9aa93047): the request ceiling is `upload_max_mb` x `uploads.REQUEST_FILES` (10) + 1 MB; each file
+  is held to `upload_max_mb` by `save_upload`. Routes with smaller limits still check after the body is spooled.
+- Search (audit, b36a119b1): `SESSIONS_FRESH_S` 0.5 s, a query within that window of the last session refresh does not
+  stat every session again (`_state["sessions_at"]`). `test_group_conversations_are_searched` sets it to 0.
+- Sessions: the hover popup of tool lines is gone (`Items.tsx`), the row expands instead.
+- Mail: `AccountDialog.tsx` `setPort()` sets `imap_tls` / `smtp_tls` from `PORT_TLS` (SMTP 465 ssl, 587/25 starttls; IMAP 993 ssl, 143 starttls, as `cmd_mail` picks them) when a well-known port is typed; other ports and a later Security choice are left alone. `imap.tls_error()` (used by `open_imap` and `mail.open_smtp`) turns `WRONG_VERSION_NUMBER` with `tls == "ssl"` into "this port expects STARTTLS, not SSL/TLS". Test: `test_ssl_on_a_starttls_port_says_to_pick_starttls`.
+- Settings, Extensions group: sections `views` (`ViewsSection`, `Extensions.tsx` kind `views` = `agents_view` or type
+  `view`; pages = type `page` only, widgets = type `widget`; a page / widget that also brings a view shows in both with a
+  badge) and `themes` (`sections/Themes.tsx`: installed themes from `/api/themes`, in use, `css_state`, warnings count,
+  `errors`, New theme = draft in the Harness topic, link to Appearance). `CommunityLink` takes `type` (`?type=`).
+- Appearance: cards Theme (`ThemePicker`, tiles with `ThemePreview` for `material` solid / glass then installed themes) -> Options of <theme> (mode, accent, tint, fonts) -> Layout. Store fields unchanged (`material` is the theme). Keys `appearance.theme*`, `appearance.default`, `appearance.solidDesc` / `glassDesc`, `appearance.options*` added; `appearance.colors*`, `appearance.fonts`, `settings.material*` removed; `shell.theme` reads Mode.
+- Themes: `maxxing/themes.py` (contract `TOKENS` = CSS variables of globals.css a theme may set, by kind; only ever add,
+  renames via `ALIASES`; `load()` cleans values by kind, drops unknown keys, checks text contrast per mode on the effective
+  values (`_effective`, built-in levels `_LEVELS` / `_TEXT`) and drops failing pairs then the levels; `install()` copies
+  theme.json + named images + README/LICENSE). API `GET /api/themes`, `GET /api/themes/{id}/file/{name}` (api/themes.py).
+  CLI `maxxing themes list|check|install|verify|remove|tokens` (cmd_themes.py); `install` / `verify` / `remove` owner-only in agent turns
+  (agent_guard `OWNER_SUBS`). Skill `maxxing-theme`. Web: `lib/themes.ts` (`themeLook` -> CSS on
+  `html[:not(.dark)|.dark][data-theme-id]`, `<style id="mx-theme">`), store `customTheme` (persisted, painted by index.html
+  before the app) + `pickTheme` (base + preset options) / `refreshTheme`; `features/themes/useThemeSync` (AppShell)
+  refreshes or drops it from the server list; HtmlWidget resends the theme variables when it changes. Appearance: cards
+  Theme (`ThemePicker`: Solid, Glass, installed; `ThemePreview` from the theme's values; Ask Harness -> a draft in the
+  Harness topic) -> Options of <theme> (mode fixed for a one-mode theme, accent / background hidden when the theme sets
+  `primary` / a surface) -> Layout. Mock: `/api/themes` (nord, sunset). Tests `test_themes.py` (tokens exist in
+  globals.css, fonts / accents = catalog, docs list every token). Upgrade note a169: add the `maxxing themes` row,
+  the `maxxing-theme` skill row and the Appearance clause of `templates/workspace/CLAUDE.md`, and the `39-themes.md` row
+  of the help topic.
+- Themes, logo: `logo` / `logo_dark` (png/jpg/webp/avif, `MAX_LOGO` 512 KB, one fills the other; svg refused: it
+  could run script when opened at its URL) -> `Theme.logo {light, dark}`, served by `/file/`, copied by `install`. Web:
+  `ThemeLook.logo` (`isThemeFile` check, also on the persisted store), `LogoMark` uses it per mode and falls back to the
+  product logo on error (signed out: theme files need a session); `applyFavicon(accent, logo)` and index.html set the
+  tab icon once the image loads (signed out it 401s: the product icon stays) (manifest / apple-touch icons unchanged).
+- Themes, advanced CSS: one `"css"` field in theme.json (string or list of lines, 16 KB), checked by `themes._css`
+  (refused whole: url()/image()/element(), at-rules but @media/@supports/@container, `position: fixed`, `<`, `\`,
+  unbalanced braces/quotes, control characters incl. CR/FF, `var()` in `position`; comments stripped). `css_state`
+  none|on|stale: on while `<theme>/.css-check.json` `{ui, css}` matches `ui_fingerprint()` + the css hash (hash of the served build's `assets/*.css` names, `webbuild.active_dist()`), written by `install` and
+  `maxxing themes verify <id>` ⇒ an update that changes the interface's CSS switches it off until Claude verifies it.
+  Web: `ThemeLook.extra` (nested in `html[data-theme-id]`, re-checked client side `ADVANCED_OK`), `themeCss()`, store
+  `themeCssOff` (per browser, reset by `pickTheme`), index.html paints it too; Appearance Options row "Advanced CSS"
+  (switch, or "Ask Harness to check" when stale). `useThemeSync` keeps the look while the theme is in `errors`;
+  `install --force` swaps folders (`.old`) instead of delete-then-rename; shadows need balanced parentheses;
+  `pickTheme` no longer writes a one-mode theme's mode into the Mode setting (and `load` drops `options.mode` of a
+  one-mode theme). Extensions: an extension with a wrong `type` stays in Pages (its error shows). Mock: `nord` css on, `sunset` css stale.
+- Session watcher (`service._scan`): a meta file is identified by `(inode, mtime_ns, size)` (`_ident`, as `meta_ident` and `store._cache`), no longer by `mtime_ns` alone: two atomic writes in one tick of the kernel's coarse clock share the mtime, and the second was skipped (an idle session until its next write, a running one until `RUNNING_RECHECK_S`). `_known` / `_damaged` hold that tuple. `tests/test_agent_turn_bus.py` failed about 2 runs in 3 because of it.
+
+## 2.0.0-alpha.168 - 2026-11-24
+
+- Devices: `ask_human` description and skill `maxxing-devices` cover taking over ("let me do it"), not only passwords and codes; the session's Watch line exists only during a turn (`SessionDevices.tsx`), so Claude points to `ask_human` or Settings -> Devices.
+- `Pending.cid` (the outbox id sent as `client_id`); `usePending.settle(sid, text, ids)` drops every pending whose `cid` is in the event's `client_ids` (a merged event carries several, its text is the joined texts), else the first same-text one as before. Mock: `MOCK_HOLD_MS` holds an idle session's messages, then starts one merged turn with all their ids.
+- Agents avatar: skin `olive`, hair `afro` / `ponytail` / `mohawk` / `buzz` / `bobcut` / `braids` / `pigtails` / `spacebuns` / `swept`, faces `grin` / `cheeky` / `calm` (agents.AVATAR + pixels.ts, appended); `MATTE_SKINS` / `MATTE_SHARE` 0.8 for random characters (`randomAvatar`, `agents.random_skin` in `agents new`); `pixelsOf` splits `head` / `bust` at `NECK`, `animate` (default from 24 px) draws `.mx-px-nod` (head breathes, 6 s; all agent animations slowed for a calm page) and `.mx-px-look` (eyes); asleep (`mood="sleep"`) `.mx-px-snore` (9 s) and two 4x4 `.mx-px-z` rising beside the head (`zzz={false}` in the office, which has its own chip); special characters `SPECIALS` (hair `frog` / `bigbrain` / `chad`, = agents.SPECIAL_HAIR: own body, bust, eyes, blink, asleep; no face/accessory; never random, nor in the name-seeded pick); `pixelsOf().look` = how far the eyes may glance (only onto skin: `--mx-look-l/-r`), the blink stays out of the glance; mouths of 5 faces one row down and `focused` one row shorter: a free row between eyes and mouth and between eyes and fringe. `usePending.setQueued` changes a pending message in place after the send (no re-add once settled); `settle` by text skips messages that carry their own id when the event has ids. `Textarea` autosize pins its parent's `min-height` while it measures. Mock: `/api/jarvis*`, `MOCK_JARVIS_EVENTS`, `MOCK_HOLD_MS`.
+- Jarvis reuse and archiving: settings `reuse` and `archive_done` (`jarvis.DEFAULTS`, both True; `SettingsIn`,
+  `maxxing jarvis set`), written into its `rules.md` (`RULES` lines Sessions / Finished work) and the skill (§ 2 step
+  1, § 3). Session meta `owner_at` (epoch): set by `service.send_message` for a message of source `web` or `telegram`
+  with no `relay` (`OWNER_SOURCES`), i.e. typed by the owner. `jarvis_made: true`: set by `cmd_sessions._new` when the
+  session reports to Jarvis's board (`_reporting` -> `(True, "")`). `jarvis.close()` archives the session
+  (`archived`, `jarvis_archived: true`, item `archived: true`, printed by `work close`) when `_archivable`: setting on,
+  `jarvis_made`, no `owner_at`, item without `kind` / `to` / `question`, no other open item for that session, idle, not
+  an agent's. `_enqueue` (any non-cron message, which already unarchived) drops `jarvis_archived`.
+  `jarvis.topic_sessions(path, days=30)` -> `maxxing sessions list --topic P/T [--days N] [--json]`: sessions of that
+  exact path updated in the window, not agents', archived ones only when `jarvis_archived`, newest first, 10 max; rows
+  `{id, title, state, updated, archived, started_by_jarvis, owner_wrote, context_tokens, last_answer, reusable,
+  why_not}`, `why_not` = `running` (running or queued) | `owner_active` (`owner_at` < 30 min) | `context_full`
+  (>= 80 % of the path's `auto_compact_tokens`, else of the model window). Tests `test_jarvis_reuse.py`.
+- One card for every message the owner did not type. Log line `mx_user.from` (`runner._sender`, was
+  `_relay_from`) = `{kind, title?, path?, session?, reports?: [{id, outcome: done|asks|failed}]}`, kind `session` |
+  `agent` (relay from another session's turn; `agent` when its path is an agent's) | `cron` | `feed` | `mail` |
+  `group` | `manual` | `cli` | `github` | `system`; `mx_user.shown` = the part of the text for the owner (the rest is
+  instructions for Claude). Owner messages (web, Telegram, voice, the owner on an agent's page) have neither.
+  `service.send_message` / `create_session(..., sender=, shown=)` (queue item `sender`, `shown`, `_sent_by`: known
+  kinds only; a message with a sender never sets `owner_at`); no sender + source `cron` / `cli` / `github` /
+  `system`, or a relay without `from`, -> that kind. Senders: `agents.run_sender(trigger, source)` for every run that
+  is not the owner's (`_fire`), `crons._sender(job)` (job name), `agent_rooms._group_sender`, `{kind: system}` for
+  the memory clean, the update assistant, the browser exit back online and the usage-limit retry. Jarvis: the
+  backstage brief is sent with `sender = {kind: agent, title: backstage, path: AGENT_PATH, session: <run>}` and
+  `shown = <brief>`, its fallback with `BRIEF_SENDER` (`{kind: cron, title: Morning brief}`); reports carry `shown =
+  _report_body()`, `_merge_reports` joins them. `relay.jarvis` is gone (no Jarvis case in the display).
+  `normalize` now passes `from` whole (it kept only `session` / `title`, dropping `reports`) and `shown`; lines
+  without `kind` = `session`. Web: `pages/sessions/RelayCard.tsx` -> `MessageCard.tsx` (type `RelayFrom` ->
+  `MessageFrom`), icon and label per kind (`sessions.from.<kind>` / `<kind>Named`), link to the session, else the
+  agent or the group; the outcome dot wraps under the title on narrow screens. Older lines: no `from` + source
+  `cron` / `cli` / `github` / `system` / `browser` -> a card; bodies between `<<WORK-x` / `<<BRIEF-x` marks shown;
+  reports read from `[Work #N · …]`. `sessions.msg.from` and `sessions.relay.fromJarvis` removed.
+- `deps.drop_other_libc(node_modules)`, called by `_up_remotion` after `npm ci`: npm 10 does not store `libc` in
+  package-lock.json, so `npm ci` installed both `@rspack/binding-linux-x64-{gnu,musl}` and
+  `@remotion/compositor-linux-x64-{gnu,musl}`. On a glibc host (`platform.libc_ver()`) the top-level and scoped
+  packages whose `package.json` `libc` excludes glibc are removed (musl or unknown host: nothing removed).
+  -88 MB on <state>/tools/remotion (413 -> 325 MB); a render checked after the removal. Applied at the next
+  Remotion install or update (a pin or lock change), not to an existing install.
+- Webhooks & events (`webhooks.py`, new): automations without AI, one trigger (`in`: `/api/hooks/<token>`, sources
+  stripe / shopify / github / generic / phone, GET+POST, multipart files, `filter` events / branch globs, `reply`
+  now|wait; `event`: feed / agent / cron with `when`) + one action (`shell` in a transient unit
+  `maxxing-hook-<id>-<call>` via `maxxing webhooks run`, request as files + `MAXXING_WEBHOOK_*` / `MAXXING_RESPONSE_FILE`,
+  never in the command; `call` httpx with templates, `{{key:NAME}}` vault headers, `X-Harness-Signature`, retries;
+  `store` SQLite `data/<id>.db`; `notify` = `feed.post` with `feedhooks.PARSERS`). Store `<state>/webhooks/`
+  (`hooks.json` under flock, `calls/<id>.jsonl` last 50 + per-call folders, `spool/`, `feed-pos.json`), secrets in
+  secrets.json `webhooks`. Durable queue (record before run, `recover()` at start), per-hook `queue.parallel` /
+  `max_waiting` (503 + Retry-After), 120/min, 4 waiting callers, 30 s wait (504). See INTERNALS.md `maxxing.webhooks`.
+- API: `/api/webhooks` (list + `feed_hooks` + `https`, create, get, PATCH, DELETE, rotate, secret, test,
+  calls, call, replay, data json/csv) in `api/webhooks.py` (also the loop: spool every 2 s, feed scan every 5 s,
+  `MAXXING_WEBHOOKS_LOOP=0` turns it off); `api/hooks.py` serves a webhooks token first (GET/POST, multipart, wait
+  reply), any other token is a feed webhook as before (unchanged URLs, no migration). API.md "Webhooks & events".
+- Settings: group `notify` (sections `alerts` = `AlertsSection`, `feed` = `FeedSection`, `telegram`), `voice` in
+  `general`; `SECTION_MOVED.notifications` -> `/settings/alerts`; push test URL `/settings/alerts`. Feed webhooks
+  (`feedhooks.py`, storage unchanged) are listed and managed on Settings -> Webhooks (`FeedHookRow`: test, secret, new
+  URL, delete; an agent's one: link to the agent, no delete) through `/api/feed/hooks`; the feed's add dialog is gone
+  (`useCreateHook` removed). Form `features/webhooks/HookEditor.tsx` (`useSaveWebhook`: POST, or PATCH with the whole
+  `trigger` / `action` merged over the hook's own). Test sample of a phone hook: `Test sent from the Webhooks page`.
+- CLI `cmd_webhooks.py`: `maxxing webhooks list|show|add|edit|describe|on|off|remove|url|rotate|secret|calls|call|test|
+  replay|data|run` (`add`/`edit` JSON by `--spec` or stdin, secret on stdin, `test`/`replay` inline).
+- `agent_guard`: `WEBHOOKS_OWNER_ONLY` (add, edit, remove, on, off, rotate, secret, replay, test, run, describe) in
+  `OWNER_SUBS`: agents may only read hooks.
+- `bodylimit`: `/api/hooks/<token>` capped by the hook's own `max_mb` (`webhooks.cap_for_token`), else
+  `feedhooks.MAX_BODY`.
+- `feed.PRODUCT_SOURCES` gains `webhooks` (the failures of hooks; agents and webhooks cannot post as it); feed events of
+  that source and with `hops >= 3` never start event hooks; `notify` from an event carries `hops + 1`.
+- Emitters: `crons.run_job` (final outcome, not before a retry) and `agents.on_turn_end` (automatic runs only, next to
+  `chain_after`) call `webhooks.emit()`, which writes the spool only when an enabled event hook listens.
+- Extensions: `ctx["webhook_data"](id_or_name, after=0, limit=100)` -> the rows of a store hook.
+- Skill `maxxing-webhooks` (new); `maxxing-feed`, `maxxing-cron`, `maxxing-agents`, `maxxing-extension` point to it;
+  workspace CLAUDE.md template (CLI table, skills table, "Use what Harness already has"), the `help` topic index and
+  the Jarvis skill list it. User docs `37-webhooks.md`, `38-events.md`; `08-crons`, `24-feed`, `30-agents`,
+  `14-skills`, `17-cli-reference`, `01-welcome`, README updated. Tests `tests/test_webhooks.py`.
+- Mentions: new kind `jarvis` (`mentions.KINDS`, `MentionKind`, `ChipKind`): `candidates()` offers one row
+  `{kind: jarvis, ref: jarvis, label: Jarvis, state}` first when `jarvis.feature_on()` (not from one of its own
+  conversations) and drops every session under `projects/jarvis` from the sessions; `resolve()` gives the command
+  `maxxing sessions send jarvis`. `service.relay_message` (`_jarvis_target`): `to` = `jarvis` -> its current
+  conversation (made when none), a past conversation's id -> the current one (`jarvis.current_for`). Composer: the
+  group `@jarvis` has no title (`SlashMenu.groupTitle` returns "" -> no header), chip/route `/jarvis`, Sparkles icon.
+
 ## 2.0.0-alpha.167 - 2026-11-24
 
 - `agent_guard.check_cli`: for `heavy`, a `-h`/`--help` after the command's first word is the command's (REMAINDER),
