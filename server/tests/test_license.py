@@ -121,6 +121,8 @@ def _licensed_with_custom(code, tmp_path, monkeypatch):
     opt = _licensed_install(tmp_path, work)
     monkeypatch.setattr(config, "CODE", opt)
     monkeypatch.setattr(license, "GIT_URL", str(code["origin"]))
+    from maxxing import cmd_core as _cc
+    monkeypatch.setattr(_cc, "signature_mode", lambda branch: "off")    # this fake GitHub publishes unsigned versions
     config.set_secret(license.TOKEN, "a1.tok")
     config.set_secret(license.KEY, "HM-ABCD-EFGH-JKMN-PQRS")
     (opt / "server" / "maxxing" / "rules.py").write_text("LIMIT = 50\nNAME = 'product'\n")
@@ -494,7 +496,7 @@ def test_an_activation_token_that_is_not_utf8_leaves_no_key(mx, monkeypatch):
     assert not config.get_secret(license.KEY) and not config.get_secret(license.SEAT)
 
 
-@pytest.mark.parametrize("bad", ["abc", [1], {"a": 1}, "nan", 1e999])
+@pytest.mark.parametrize("bad", ["abc", [1], {"a": 1}, "nan", 1e999, 1e300])
 def test_a_damaged_move_tried_at_does_not_break_the_move_check(mx, bad):
     config.update_config(license={"move_tried_at": bad})
     assert license.move_due() is True                                # as if never tried

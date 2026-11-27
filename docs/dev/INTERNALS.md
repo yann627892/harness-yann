@@ -279,7 +279,8 @@ events"; CLI `cmd_webhooks.py`; public endpoint `api/hooks.py`; management + loo
   `calls/<id>/<call>/` (`request.json` with redacted headers, `body`, `payload.json`, `files/`, `stdout`, `response`,
   `response.type`, `result.json`); `data/<id>.db` (SQLite WAL, `rows(id, at, call, data)`, purged past `keep`);
   `spool/*.json`; `feed-pos.json`. Secrets in secrets.json `webhooks: {id: {token, secret?, sign?}}`, never in
-  hooks.json nor an API answer. Every write of hooks.json and the call records goes through `_locked()` = a thread
+  hooks.json nor an API answer. The `secret` of a phone hook (its access key) is kept as `sha256:<hex>` only
+  (`_hash_phone_keys`: at every write of the store, and at the first call for a key stored in clear before). Every write of hooks.json and the call records goes through `_locked()` = a thread
   RLock + `flock` on `webhooks/.lock` (the CLI writes too).
 - **Incoming** `receive(token, method, headers, query, body, fields, files)`: token lookup (`feedhooks._same`,
   constant time), enabled (503), method (405), `max_mb` (413; `bodylimit` already caps the stream with
@@ -545,9 +546,12 @@ either a text key or a file, never both (`name_taken`; `vault.put` refuses a nam
   (`file_required`); `None` fields keep their value (no `data` = metadata only). The bytes go to a temp file of the
   same directory (`mkstemp`, chmod 600, fsync) then `os.replace`; the metadata is saved under `config._lock` like
   `vault.put`. `delete(name) -> bool` removes file + entry. `list_files()` -> metadata only, sorted, never the
-  content. `read(name) -> bytes | None` (CLI `get-file`; no HTTP route calls it), `exists(name)`.
+  content. `read(name) -> bytes | None` (CLI `get-file`; no HTTP route calls it), `exists(name)`. `read`, `path_of`,
+  `list_files` and `exposed_files_env` only count a file whose bytes match the entry's sha256: a put killed between
+  the metadata save and the rename never serves the old bytes; the next `put`/`delete` sweep drops such an entry with
+  its stale file.
 - `exposed_files_env() -> {NAME: "/abs/path"}` for entries flagged `expose` whose file exists (a regular file, not a
-  symlink); never raises. The value is the PATH, never the content. Merged wherever `vault.exposed_env()` is:
+  symlink, the entry's bytes); never raises. The value is the PATH, never the content. Merged wherever `vault.exposed_env()` is:
   `sessions.spawn._exposed_vault` (so `auth_env()` and the shell cron jobs through it) and the fallback of
   `crons._job_env`. An agent's turn (`auth_env(keys=...)`) never gets a file: its `keys` setting is about text keys.
 - Not in the backup: `backup.collect` walks the workspace only and prunes any `secret-files` folder
@@ -1002,12 +1006,20 @@ clears the list - jobs of existing installs are never touched (their key is alre
   (the rest is the root user and its capabilities, which the product needs).
 
 ## Signed updates (`update_verify_signature`)
-- Config `update_verify_signature` (default false). `cmd_update`, right after the fetch and before anything
-  changes (auto-save of dirty files, pre-update ref, merge/rebase): `verify_target(origin/<branch>)` =
-  `git verify-commit <sha>`, else `git verify-tag` of each `git tag --points-at <sha>`; failure -> FAIL line,
-  `_notify`, exit 1. Skipped when already up to date and on licensed installs (archive verified with ed25519).
-  `--resume` / `--rollback` do not re-check (the target was checked when the update started).
-- Doctor `update_signature` (only when on): verifies `origin/<current branch>` (else HEAD), WARN if unsigned.
+- `server/maxxing/release-signers`: the publishers' SSH keys (git allowed-signers format, `namespaces="git"`). The
+  cloud's `publish.py` signs the tag `v<version>` with the publisher's own key before `stable` moves.
+- Config `update_verify_signature`: `false` (default until both publishers sign; then `"stable"`); `"stable"` =
+  checked when the branch followed is `stable`; `true` = every branch. `cmd_core.signature_mode(branch)` -> `auto` / `on` / `off`.
+- `cmd_update`, right after the fetch and before anything changes (auto-save of dirty files, pre-update ref,
+  merge/rebase): fetch of `refs/tags/v*`, then `verify_target(origin/<branch>)` = `git verify-commit <sha>`, else
+  `git verify-tag` of each `git tag --points-at <sha>`, first with the installed `release-signers` (the trust anchor
+  is the version already running, never the one being installed), then with the keys git knows on the server (gpg
+  keyring, `gpg.ssh.allowedSignersFile`). Failure -> FAIL line, `_notify`, exit 1. Skipped when already up to date
+  and on licensed installs. `auto` on a server that cannot check (`signature_unavailable()`: git < 2.34, no
+  ssh-keygen) warns and goes on; `on` stops. `--resume` / `--rollback` do not re-check.
+- Doctor `update_signature`: OK / WARN when checked, silent when off (a line in Settings -> Security).
+- A key is added or removed by a version signed with a key already listed. What it does not cover: a new install
+  (install.sh clones without a trust anchor), the branches `beta` and `main`, a downgrade to an older signed version.
 
 ## External components (deps.toml, deps.py)
 - `server/maxxing/deps.toml` is the one list of what Harness Maxxing installs besides apt packages: version, URL
@@ -1129,6 +1141,13 @@ the session meta keeps `effort` and the runner passes it as `claude --effort <le
   existing file's, else `0666 & ~umask`), `os.replace`. `config.json` / `secrets.json` that do not
   parse are read as `{}` (defaults) and copied to `<name>.damaged-<stamp>` before any save
   (`_keep_damaged`, `damaged_copy_of`; doctor `state_files`).
+- Sealed secrets (`maxxing keys encrypt` / `decrypt` = `config.seal_secrets` / `unseal_secrets`): when
+  `<state>/secrets.json.cred` exists it is the store. `load_secrets` pipes it through `systemd-creds decrypt
+  --name=maxxing-secrets - -` once per (inode, mtime, size) of the file (per process), every write
+  (`set_secrets`, `write_json(secrets_path())`) goes through `_write_sealed`: `systemd-creds encrypt --with-key=auto`,
+  decrypt back and compare, temp file + `os.replace`, under `config._lock`. A failed decrypt raises
+  `SecretsUnreadable` (never `{}`), so a write is refused too; doctor `secrets_store`. Never open secrets.json by
+  path: `config.load_secrets()`.
 - `cmd_core.git_auth_env(token)`: the update token reaches git through `GIT_CONFIG_COUNT/KEY_0/VALUE_0`
   (`http.extraHeader`), never through `-c` arguments; used by `cmd_core._git` and `api/system._git`.
 

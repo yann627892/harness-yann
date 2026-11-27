@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import subprocess
@@ -88,7 +89,7 @@ def test_the_proxy_refuses_local_answers_and_raw_addresses(tmp_path, monkeypatch
             if host not in answers:
                 raise OSError("no such host")
             return [(2, 1, 6, "", (answers[host], port))]
-        monkeypatch.setattr(loop, "getaddrinfo", fake)
+        monkeypatch.setattr(px, "_resolve", fake)
         assert await px.check("public.test", 443) == ["93.184.216.34"]
         for h in ("rebind.test", "lan.test", "localhost", "127.0.0.1", "[::1]", "x.localhost", "nowhere.test"):
             assert await px.check(h, 443) is None, h
@@ -128,6 +129,103 @@ def test_a_one_way_stream_is_not_closed_as_idle(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def test_a_half_closed_client_still_gets_the_answer(tmp_path):
+    """The client sends its request then shuts its writing side: the site sees the end, answers, and the answer
+    still reaches the client (the half-close is passed on, the tunnel is not torn down)."""
+    import socket
+    from maxxing.browser import proxy
+
+    async def go():
+        px = proxy.Proxy(tmp_path / "p.sock")
+        a1, a2 = socket.socketpair()
+        b1, b2 = socket.socketpair()
+        br, bw = await asyncio.open_connection(sock=a1)
+        pr, pw = await asyncio.open_connection(sock=a2)
+        ur, uw = await asyncio.open_connection(sock=b2)
+        sr, sw = await asyncio.open_connection(sock=b1)
+
+        async def site():
+            data = await sr.read()                    # up to the client's end of writing
+            await asyncio.sleep(0.2)
+            sw.write(b"pong:" + data)
+            await sw.drain()
+            sw.close()
+        last = [time.monotonic()]
+        tunnel = asyncio.gather(px._pipe(pr, uw, True, last), px._pipe(ur, pw, False, last), site())
+        bw.write(b"ping")
+        await bw.drain()
+        bw.write_eof()
+        assert await asyncio.wait_for(br.read(), 3) == b"pong:ping"
+        await asyncio.wait_for(tunnel, 3)
+        bw.close()
+    asyncio.run(go())
+
+
+def test_a_client_that_stops_reading_does_not_hold_its_slot(tmp_path, monkeypatch):
+    """The site keeps sending, the client keeps the socket open but no longer reads (a paused tab): the stalled
+    way gives up after IDLE_TIMEOUT and ends the whole tunnel, so the connection slot is freed."""
+    import socket
+    from maxxing.browser import proxy
+
+    monkeypatch.setattr(proxy, "IDLE_TIMEOUT", 0.5)
+
+    async def go():
+        px = proxy.Proxy(tmp_path / "p.sock")
+        a1, a2 = socket.socketpair()
+        b1, b2 = socket.socketpair()
+        br, bw = await asyncio.open_connection(sock=a1)
+        pr, pw = await asyncio.open_connection(sock=a2)
+        ur, uw = await asyncio.open_connection(sock=b2)
+        sr, sw = await asyncio.open_connection(sock=b1)
+        bw.transport.pause_reading()
+
+        async def flood():
+            with contextlib.suppress(Exception):
+                while True:
+                    sw.write(b"x" * 65536)
+                    await asyncio.wait_for(sw.drain(), 0.1)
+        flooding = asyncio.ensure_future(flood())
+        try:
+            await asyncio.wait_for(px._tunnel(pr, pw, ur, uw), 4)
+        finally:
+            flooding.cancel()
+            for w in (bw, sw):
+                w.close()
+    asyncio.run(go())
+
+
+def test_a_plain_http_client_left_open_after_the_answer_does_not_hold_its_slot(tmp_path, monkeypatch):
+    """A plain http request: the site answers and closes, the client keeps its socket open without a next request:
+    the way out gives up after IDLE_TIMEOUT and the tunnel ends, so the connection slot is freed."""
+    import socket
+    from maxxing.browser import proxy
+
+    monkeypatch.setattr(proxy, "IDLE_TIMEOUT", 0.5)
+
+    async def go():
+        px = proxy.Proxy(tmp_path / "p.sock")
+        a1, a2 = socket.socketpair()
+        b1, b2 = socket.socketpair()
+        br, bw = await asyncio.open_connection(sock=a1)
+        pr, pw = await asyncio.open_connection(sock=a2)
+        ur, uw = await asyncio.open_connection(sock=b2)
+        sr, sw = await asyncio.open_connection(sock=b1)
+
+        async def site():
+            sw.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await sw.drain()
+            sw.close()
+        tunnel = asyncio.ensure_future(px._tunnel(pr, pw, ur, uw, (0, False)))
+        await site()
+        try:
+            await asyncio.wait_for(asyncio.shield(tunnel), 3)
+        finally:
+            tunnel.cancel()
+            bw.close()
+        assert (await asyncio.wait_for(br.read(), 1)).endswith(b"ok")
+    asyncio.run(go())
+
+
 def test_the_proxy_tries_ipv4_first_then_the_next_address(tmp_path, monkeypatch):
     """A site with an IPv6 address first (Wikipedia) opened through a phone exit with no IPv6 way out: IPv4 is tried
     first, and an address that fails gives way to the next one instead of failing the page."""
@@ -141,7 +239,7 @@ def test_the_proxy_tries_ipv4_first_then_the_next_address(tmp_path, monkeypatch)
         async def fake(host, port, **kw):
             return [(10, 1, 6, "", ("2a02:ec80::1", port, 0, 0)), (2, 1, 6, "", ("185.15.59.224", port)),
                     (2, 1, 6, "", ("185.15.59.225", port))]
-        monkeypatch.setattr(loop, "getaddrinfo", fake)
+        monkeypatch.setattr(px, "_resolve", fake)
         assert await px.check("wiki.test", 443) == ["185.15.59.224", "185.15.59.225", "2a02:ec80::1"]
 
         async def echo(r, w):
@@ -830,6 +928,8 @@ def test_a_turn_sees_only_the_tabs_of_its_own_browser(mx):
         assert v.outgoing({"id": 8, "method": "Page.navigate", "sessionId": "S2", "params": {"url": "https://a.example"}}) is None
         assert used == ["page1"] and v.page("S2") == "page1"
         assert v.outgoing({"id": 9, "method": "Target.getTargets", "params": {}}) is None
+        for twin in (9, 9.0, True, "9", None, -1, 10**10):         # never one the browser could read as the awaited 9
+            assert v.outgoing({"id": twin, "method": "Runtime.evaluate", "params": {}}), twin
         listed, _ = await v.incoming({"id": 9, "result": {"targetInfos": [
             {"targetId": "page1", "type": "page"}, {"targetId": "page2", "type": "page"},
             {"targetId": "tab2", "type": "tab"}, {"targetId": "b", "type": "browser"}]}})
@@ -1371,6 +1471,52 @@ def test_claude_gives_a_page_only_files_of_its_folder(tmp_path, monkeypatch):
             pool_mod.claude_file(B(), "projects/acme/topics/blog", bad)
 
 
+def test_a_folder_swapped_for_a_link_never_carries_an_outside_file_to_a_page(tmp_path, monkeypatch):
+    import io
+    import threading
+    from maxxing import browser, config
+    from maxxing.browser import pool as pool_mod
+    monkeypatch.setenv("MAXXING_BROWSER_LAUNCH", "direct")
+    ws = tmp_path / "ws"
+    topic = ws / "projects" / "acme" / "topics" / "blog"
+    (topic / "real").mkdir(parents=True)
+    (topic / "real" / "f.txt").write_text("inside")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "f.txt").write_text("SECRET")
+    monkeypatch.setattr(config, "workspace", lambda: ws)
+
+    class B:
+        run = tmp_path / "run" / "main"
+    d, real, stop = topic / "d", topic / "real", threading.Event()
+
+    def swap():                         # the folder of the path, then a link to elsewhere, then the folder again
+        while not stop.is_set():
+            os.rename(d, real)
+            os.symlink(tmp_path / "outside", d)
+            os.unlink(d)
+            os.rename(real, d)
+    os.rename(real, d)
+    t = threading.Thread(target=swap)
+    t.start()
+    leaked = 0
+    try:
+        for _ in range(3000):
+            try:
+                out = pool_mod.claude_file(B(), "projects/acme/topics/blog", "d/f.txt")
+            except browser.BrowserError:
+                continue
+            leaked += Path(out).read_text() == "SECRET"
+    finally:
+        stop.set()
+        t.join()
+    assert leaked == 0
+    monkeypatch.setattr(pool_mod, "UPLOAD_MAX", 10)       # a file that grew after the size check: never copied whole
+    with pytest.raises(browser.BrowserError) as e:
+        pool_mod.stage(B(), "big.bin", src=io.BytesIO(b"x" * 11))
+    assert e.value.status == 413
+    assert not any(f.is_file() and f.name == "big.bin" for f in (B.run / "uploads").rglob("*"))
+
+
 def test_an_agent_uses_its_project_profile_unless_it_chooses_another(client, topic, mx):
     from maxxing import agents, browser
     _agent(client)
@@ -1808,6 +1954,15 @@ def test_network_events_never_carry_the_sites_cookies():
     ev = {"method": "Fetch.requestPaused", "params": {"request": {"headers": {"cookie": "a=secret3"}},
                                                        "responseHeaders": [{"name": "Set-Cookie", "value": "b=secret4"}]}}
     assert "secret3" not in (t := relay.no_cookies(json.dumps(ev))) and "secret4" not in t
+    ev = {"method": "Audits.issueAdded", "sessionId": "s1", "params": {"issue": {"code": "CookieIssue", "details": {
+        "cookieIssueDetails": {"rawCookieLine": "sid=secret5; SameSite=None", "cookie": {"name": "sid", "domain": "bank.example",
+                                                                                          "path": "/"},
+                               "cookieWarningReasons": [], "cookieExclusionReasons": ["ExcludeSameSiteNoneInsecure"],
+                               "operation": "SetCookie"}}}}}
+    out = json.loads(relay.no_cookies(json.dumps(ev)))
+    issue = out["params"]["issue"]["details"]["cookieIssueDetails"]
+    assert "secret5" not in json.dumps(out) and "bank.example" not in json.dumps(out)
+    assert issue["cookieExclusionReasons"] == ["ExcludeSameSiteNoneInsecure"]     # the issue itself still reaches the tools
     other = json.dumps({"method": "Page.frameNavigated", "params": {"frame": {"url": "https://a/?cookie=1"}}})
     assert relay.no_cookies(other) == other
 

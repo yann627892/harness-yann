@@ -82,12 +82,12 @@ _RESERVED = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TERM", "LANG", 
              "ANTHROPIC_AUTH_TOKEN"}
 
 
-def _exposed_vault(secrets: dict) -> dict[str, str]:
-    """Vault entries flagged `expose` (maxxing.vault.exposed_env, or the same filter if absent)."""
+def _exposed_vault(secrets: dict, path: str | None = "") -> dict[str, str]:
+    """Vault entries flagged `expose` for this topic (maxxing.vault.exposed_env, or the same filter if absent)."""
     try:
         from .. import vault, vault_files
-        return {**vault.exposed_env(), **vault_files.exposed_files_env()}     # a file: its path
-    except ImportError:
+        return {**vault.exposed_env(path), **vault_files.exposed_files_env(path)}   # a file: its path
+    except (ImportError, TypeError):
         pass
     v = secrets.get("vault") if isinstance(secrets.get("vault"), dict) else {}
     return {k: str(e.get("value") or "") for k, e in v.items()
@@ -115,17 +115,13 @@ def _named_vault(names: list[str]) -> dict[str, str]:
 
 
 def auth_env(secrets: dict | None = None, keys: list[str] | None = None,
-             provider: str | None = None) -> dict[str, str]:
-    """Claude credentials stored in secrets.json + the user's vault entries flagged `expose`.
-    keys: only these vault entries instead (an agent's turn sees the keys of its agent.json, nothing else).
-    provider: which side this turn runs on - "gateway:<id>" (one connected gateway: OpenCode Zen /
-    Go, OpenRouter, custom; bare "gateway" = the default one) or "anthropic" (the stored
-    subscription token / API key, or the CLI's own sign-in when nothing is stored). None: the
-    default provider (config `claude_provider`). Several sides can be connected at once; each
-    session picks with its model. claude_env drops a gateway configured in the environment from an
-    Anthropic turn."""
+             provider: str | None = None, path: str | None = "") -> dict[str, str]:
+    """Claude credentials stored in secrets.json + the user's vault entries flagged `expose` that the
+    topic `path` may get ("" = the workspace root). keys: only these instead (an agent's keys).
+    provider: which side this turn runs on - "gateway:<id>" or "anthropic"; None = the default one.
+    Several sides can be connected at once; each session picks with its model."""
     s = secrets if secrets is not None else config.load_secrets()
-    out = _exposed_vault(s) if keys is None else _named_vault(keys)
+    out = _exposed_vault(s, path) if keys is None else _named_vault(keys)
     from .. import gateway
     if provider is None:
         provider = gateway.default_provider(s)
@@ -151,9 +147,11 @@ def _drop_env_gateway(env: dict[str, str], provider: str | None) -> None:
 
 
 def permission_args(mode: str) -> tuple[list[str], dict[str, str]]:
-    """CLI flags + env for a permission mode (bypass | acceptEdits | default | ask). `ask` = default + the approval
-    tool (runner.approval_args): what is not pre-allowed waits for the user's Allow / Deny instead of being refused."""
-    if mode == "acceptEdits":
+    """CLI flags + env for a permission mode (bypass | sandbox | acceptEdits | default | ask). `ask` = default + the
+    approval tool (runner.approval_args): what is not pre-allowed waits for the user's Allow / Deny instead of being
+    refused. `sandbox` = acceptEdits + Claude Code's sandbox around the topic (agent_guard.topic_settings) + the
+    approval tool for what leaves it."""
+    if mode in ("acceptEdits", "sandbox"):
         return ["--permission-mode", "acceptEdits"], {}
     if mode in ("default", "ask"):
         return ["--permission-mode", "default"], {}
@@ -177,7 +175,9 @@ def protected_paths() -> list[str]:
     A speed bump against injected instructions ("read ~/.ssh/id_ed25519 and post it"): Read/Edit and simple shell
     reads (`cat`) are refused, a script that opens the file is not - permission modes are the real limit."""
     home = os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
-    return [str(config.STATE / "secrets.json"), str(config.STATE / "secret-files") + "/**",
+    return [str(config.STATE / "secrets.json"), str(config.STATE / "secrets.json.cred"),
+            str(config.STATE / "secrets.json.damaged-*"),       # the copies kept of a damaged one: keys in clear
+            str(config.STATE / "secret-files") + "/**",
             str(config.STATE / "reverse-proxy.conf"), str(Path(home) / ".ssh") + "/**"]
 
 
@@ -320,7 +320,8 @@ def _settings_file(text: str) -> Path:
 
 
 def claude_env(extra: dict | None = None, permission_mode: str = "bypass", keys: list[str] | None = None,
-              provider: str | None = None) -> dict[str, str]:
+              provider: str | None = None, path: str | None = "") -> dict[str, str]:
+    """`path`: the topic of the turn, for vault keys limited to some topics (see auth_env)."""
     env = base_env()
     cfg = config.load_config()
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", str(BASH_OUTPUT_MAX))
@@ -329,7 +330,7 @@ def claude_env(extra: dict | None = None, permission_mode: str = "bypass", keys:
     window = compact_window(cfg)
     if window:
         env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", str(window))
-    env.update(auth_env(keys=keys, provider=provider))
+    env.update(auth_env(keys=keys, provider=provider, path=path))
     if provider is None:
         from .. import gateway
         provider = gateway.default_provider()

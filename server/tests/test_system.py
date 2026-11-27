@@ -94,10 +94,15 @@ def test_health_issue_marked_seen(client, org, services, monkeypatch):
     assert next(i for i in h["issues"] if i["id"] == job["id"])["seen"] is True
     assert all(not i["seen"] for i in h["issues"] if i["id"] != job["id"])
     # the same job failing with another exit code keeps its mark (numbers left out); another job is a new issue
-    assert health.issue_id({"code": "cron_failed", "text": 'Scheduled job "Nightly" failed (code 7)'}) == job["id"]
+    assert health.issue_id({"code": "cron_failed", "text": 'Scheduled job "Nightly" failed (code 7)', "ref": "c_a"}) \
+        == job["id"]
     assert health.issue_id({"code": "cron_failed", "text": 'Scheduled job "Weekly" failed (code 2)'}) != job["id"]
     assert health.issue_id({"code": "cron_failed", "text": 'Scheduled job "Backup 1" failed (code 1)'}) \
         != health.issue_id({"code": "cron_failed", "text": 'Scheduled job "Backup 2" failed (code 1)'})
+    # two jobs with the same name failing: two issues, each with its own mark
+    crons.append_run({"id": "r2", "cron_id": "c_b", "name": "Nightly", "at": time.time() - 30, "ok": False, "code": 3})
+    ids = [i["id"] for i in client.get("/api/system/health?force=1").json()["issues"] if i["code"] == "cron_failed"]
+    assert len(ids) == 2 and len(set(ids)) == 2 and job["id"] in ids
     # the mark ends after 24 h
     marks = json.loads(health._seen_path().read_text())
     health._seen_path().write_text(json.dumps({job["id"]: marks[job["id"]] - health.SEEN_TTL_S - 1}))
@@ -108,6 +113,19 @@ def test_health_issue_marked_seen(client, org, services, monkeypatch):
     client.post("/api/system/health/seen", json={"id": job["id"]})
     h = client.post("/api/system/health/seen", json={"id": job["id"], "seen": False}).json()
     assert next(i for i in h["issues"] if i["id"] == job["id"])["seen"] is False
+
+
+def test_a_mark_made_before_ids_held_the_job_keeps_the_issue_seen(mx, monkeypatch):
+    iss = health._issue("warn", "cron_failed", 'Scheduled job "Backup" failed (code 1)', ref="c_backup")
+    old_id = health.issue_id(iss, ref=False)              # the id of that issue before ids held the job
+    assert old_id != health.issue_id(iss)
+    health._seen_path().write_text(json.dumps({old_id: time.time() - 60}))
+    health._apply_seen([iss])
+    assert iss["seen"] is True and iss["id"] == health.issue_id(iss)
+    assert set(json.loads(health._seen_path().read_text())) == {iss["id"]}     # kept under the new id
+    other = health._issue("warn", "cron_failed", 'Scheduled job "Weekly" failed (code 1)', ref="c_weekly")
+    health._apply_seen([other])
+    assert other["seen"] is False
 
 
 def test_two_marks_at_once_are_both_kept(mx, monkeypatch):

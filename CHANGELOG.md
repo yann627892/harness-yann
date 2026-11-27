@@ -3,6 +3,58 @@
 All notable changes to Harness Maxxing. Versions follow semantic versioning.
 `maxxing update` prints the lines added here since your installed version.
 
+## Unreleased
+
+## 2.0.0-alpha.175 - 2026-11-27
+
+New:
+- **Sessions in the order you choose.** In the Sessions list, drag a session above or below another one of its topic: it keeps that place, on every device. New sessions come first, as before; a running session can change place too (only moving it to another topic waits for the end of its turn).
+- **Signed versions (optional for now).** A published version can carry the signature of its publishers, and a server that follows the published versions (branch `stable`) can refuse any version without it: set `"update_verify_signature": "stable"` in config.json and `maxxing update` checks the signature before anything changes, against the keys of the version already installed. `true` asks for a signature on every branch. Off by default until every published version is signed.
+- **Protections, at a glance.** Settings → Security starts with what protects this server (two-step sign-in, permission mode, how the secrets are stored, firewall and security updates, the address the interface listens on) and what is left to turn on.
+- **A key only for the topics you choose.** In Settings → Keys, a key (or a secret file) given to Claude can be limited to some projects or topics: sessions and jobs elsewhere no longer receive it (`maxxing keys set NAME --topics projects/shop`). A key without a choice goes everywhere, as before.
+- **Two-step sign-in with an authenticator app.** Settings → Security: an app (Aegis, 2FAS, Google Authenticator...) can give the sign-in code, with or without Telegram, and 10 recovery codes replace a code once each when your phone is out of reach. Telegram stays the default.
+- **Signed-in devices.** Settings → Security lists the browsers signed in (last seen, address), with Disconnect for one and "Disconnect all the others". Nobody is signed out by the update.
+- **Secrets sealed on disk (optional).** `maxxing keys encrypt` seals the server's secrets with the machine's key (systemd-creds, and the TPM when there is one); `maxxing keys decrypt` goes back. It protects a copy of the file, not someone who is already root on the server. Tools that read `secrets.json` directly must use `maxxing keys get NAME` once it is sealed.
+- **What a shared package does, before it is installed.** `maxxing community check PATH` reads an extension, a skill or a theme coming from someone else and lists the code that would run on the server, the sites it calls, the keys it reads and the commands it starts, with file and line; `maxxing community install` installs exactly what was read (pinned by its sha256) and Settings shows where an installed package came from and whether its files changed since. A reading aid, not a verdict.
+- **New installations work in the sandbox by default.** On a server installed from this version on, a session works freely inside its topic folder and asks before leaving it (an Allow / Deny request, with Full access in one click per topic); the `system` project keeps full access, so Harness still repairs and updates itself. Servers already installed keep the mode they have: nothing switches by itself, and `maxxing doctor` now shows which mode is in use.
+- **The anonymous count is asked at the installation.** The installer asks one question instead of turning it on (`ANON_COUNT=1` or `0` answers in advance; without a terminal, nothing is sent). Servers already installed keep their choice.
+- **Sandbox mode for a topic.** A new permission mode (topic menu -> Permissions, Settings -> Claude, a scheduled job): Claude works without asking inside the topic folder, and its commands can neither write elsewhere nor read the server's keys, the SSH keys or the rest of the home folder. What has to leave the topic (install a package, restart a service, another folder) is asked to you first, with a **Full access** button that allows it and gives the topic full access from its next message. Nothing changes for existing topics: `bypass` stays the default.
+- **Agents and topics learn by themselves.** After a run, an agent adds one line to its own memory when the run taught something (a faster way a tool pointed to, what worked after a failure). Once a day, a topic where you asked for the same procedure three times gets a skill written from those sessions, and a correction you gave twice becomes a rule in its memory. Each one is written at once and shown in Notifications with **Undo**; at most three in 24 hours for one agent or topic, and a skill of yours is never replaced. `"memory_review": "ask"` in `config.json` makes each one wait for **Accept** / **Refuse** instead; `false` turns it off.
+
+Changed:
+- **Tools updated: Scrapling 0.5.1, Remotion 4.0.547, uv 0.13.10, Node.js 22.23.5.** Your server moves to them by itself after the update. With Scrapling 0.5, `scrapling extract fetch` uses the human-like browser (it can also pass a Cloudflare check with `--solve-cloudflare`); `extract stealthy-fetch` and `DynamicFetcher` are gone. A scraping script of yours that uses them needs the new name: Claude does it after the update.
+
+Fixed:
+- **Dragging a topic or a session in the list shown on hover.** When the sessions list was shown over the page (second sidebar closed), it went away as soon as a drag started, and the drag did nothing: it now stays until the drop.
+- Git page and Changes view: a filter program added to a repository's configuration after its first listing could run on the server at the next listing. The filters are now read before every git call (reported by Anthony14FR).
+- Restoring a backup on a server in use: an agent group keeps its own members, trust setting and limits, and a group that is new comes back without trust between its members (reported by Anthony14FR).
+- A request to delete something sent as a file upload, without being signed in, was read in full before being refused. It is refused first (reported by Anthony14FR).
+- **Terminals and live views close when a sign-in ends.** A terminal, a Browser or a Device view left open kept working after a sign-out or a password change; they now close with the sign-in they belonged to.
+- **The secret key of a phone webhook is stored hashed.** Reading the server's files no longer gives the address that starts the webhook.
+- **Security: 51 fixes from the audit of 24/11.** Among them: an agent no longer drives Jarvis, reads the address of a webhook or marks your notifications as read; a side question in an agent session keeps the agent's walls; an approval whose summary hides characters can no longer be allowed in one tap, shows every line of the file to write and says when an edit replaces every occurrence; an HTML attachment received by e-mail or Team opens without scripts or network; imported skills lose their hooks wherever they are; the update installs exactly the commit whose signature was checked; a Stripe event sent twice runs its action once; a restore on a server in use keeps its own backup list; unlinking Telegram forgets the trusted browsers; wrong sign-ins by strangers no longer block your password change; the Harness Browser refuses a tab of another browser, an exit that reaches its own address and names that never resolve; a diagram loads nothing from another site.
+- **A link that pre-fills a prompt works from inside Harness only.** A `?new=1&prompt=` address opened from elsewhere (a pasted link, a new tab) opens the new session empty.
+- **Team: selected text in your own messages is visible.** Selecting text in one of your bubbles (to copy it) showed no highlight, the selection colour being the bubble's.
+
+## 2.0.0-alpha.174 - 2026-11-27
+
+Fixed:
+- **Dashboard: Jarvis's backstage sessions no longer count as Unread.** The Activity widget counted the sessions Jarvis keeps hidden from you; they could never be opened or read, so Unread never went back to 0 and went up with every backstage run. Reported by a user.
+
+## 2.0.0-alpha.173 - 2026-11-26
+
+Improved:
+- **Agents, Jarvis, Team and Tasks open as smoothly as Sessions.** On the first visit, their lists rise in row by row like the Sessions list. Their data and Jarvis's page start loading as soon as the pointer is over the link, so the page shows up complete sooner.
+- **The sidebar's active mark glides from the row you leave.**
+
+Fixed:
+- **Themes install safely.** A failed `--force` install puts the installed theme back, a killed install leaves no work folders, and theme cards are drawn in the mode they get once picked.
+- **The getting-started guide survives a damaged `guide.json`** and ignores values of the wrong type.
+- **Health:** two failing jobs with the same name are two issues, a CPU that could not be read shows a dash, and the sign-in-ending-soon issue opens Settings > Claude.
+- **Mail:** wildcard senders over a public suffix are refused, a non-boolean trigger value is read as off, and a port corrected in the account dialog keeps its security.
+- **Tasks quick add:** an `@` with no letters no longer picks the first project.
+- **Security:** the browser relay strips cookies from more events and refuses odd DevTools ids; Team accepts only real group ids from other servers; HTML widgets never answer a foreign page.
+- Smaller fixes: the resize handle, tooltips, dashboard charts near zero, agent group `stop @name`, the Extensions folder mark.
+
 ## 2.0.0-alpha.172 - 2026-11-25
 
 Fixed:

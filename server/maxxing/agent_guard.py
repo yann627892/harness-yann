@@ -535,13 +535,43 @@ def settings(path: str, a: dict, approvals: bool = False, chat: bool = False) ->
         # no sandbox, and not free (bypass): Write/Edit reach its `writable` folders (--add-dir), so the files that
         # are the owner's keep off them as in the sandbox; the topic is read without asking, its .env files excepted
         topic = folder.parent.parent
-        deny = [f"Read(/{topic}/{g})" for g in ENV_GLOBS]
+        deny = [f"Read(/{topic}/{g})" for g in ENV_GLOBS] + [_deny_edit(p) for p in locked_paths(path)]
         if a.get("writable"):
-            deny += topic_edit_denied(path)
+            deny += [r for r in topic_edit_denied(path) if r not in deny]
         out["permissions"] = {"deny": deny, "allow": topic_read(path) + ([] if approvals else list(FREE_CLI))}
     if a.get("rules"):
         out["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook_command(path)}]}]}
     return out
+
+
+TOPIC_CLI = ("status", "tasks", "feed", "pdf", "video", "mcp load", "cron list", "sessions list", "infra status",
+             "infra list", "team list", "memory")      # `maxxing` sub-commands a sandboxed topic runs without asking
+TOPIC_OWNED = (".maxxing.json", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json", "agents")
+
+
+def topic_settings(path: str, cwd: str = "") -> dict:
+    """The `--settings` part of a session of a topic in mode `sandbox`: shell commands write in the topic folder only
+    (`cwd`: its separate copy, when it has one), read neither the server's secrets nor the home folder (as an
+    agent's sandbox: `home_wall`, `read_back`), reach any site. What cannot work there is tried again outside by
+    Claude Code (`allowUnsandboxedCommands`), and that retry is asked to the owner (the turn runs in acceptEdits
+    with the approval tool; never bypass, where the retry would pass without a question). `maxxing` runs outside
+    (the server state is hidden inside): a short list passes, the rest is asked. The files that decide what the
+    topic may do (its mode, its MCP servers, its agents) are not writable from inside."""
+    ws = config.workspace()
+    folder = ws / path.strip("/")
+    secrets = secret_paths()
+    owned = [str(folder / p) for p in TOPIC_OWNED]
+    write = [str(folder)] + ([cwd] if cwd and Path(cwd) != folder else [])
+    memory = [str(ws / "memory.md"), str(folder.parent.parent / "memory.md")]     # the levels above: the memory skill
+    deny = _deny_secrets(secrets) + [f"Edit(/{folder}/{p})" for p in TOPIC_OWNED[:4]] \
+        + [f"Edit(/{folder}/agents/**/agent.json)"]
+    return {"sandbox": {"enabled": True, "allowUnsandboxedCommands": True, "failIfUnavailable": True,
+                        "autoAllowBashIfSandboxed": True, "excludedCommands": ["maxxing:*"],
+                        "filesystem": {"denyRead": secrets + [p for p in home_wall() if p not in secrets],
+                                       "allowRead": read_back(), "allowWrite": write, "denyWrite": owned}},
+            "permissions": {"deny": deny,
+                            "allow": ["WebFetch(domain:*)", "WebSearch"] + [f"Bash(maxxing {c}:*)" for c in TOPIC_CLI]
+                            + [f"Edit(/{m})" for m in memory]}}
 
 
 def _deny_secrets(paths: list[str]) -> list[str]:
@@ -693,6 +723,8 @@ def sandboxed_turn() -> str | None:
     """The agent path when this process belongs to a sandboxed agent turn (its systemd unit), else None. The owner's
     conversation with that agent is not one: it runs outside the sandbox (agents.run_settings)."""
     meta = turn_meta()
+    if meta is None and not _unit():        # no unit (no systemd-run): the environment is all there is
+        meta = {"path": (os.environ.get("MAXXING_AGENT") or "").strip(), "env": dict(os.environ)}
     p = (meta or {}).get("path") or ""
     from . import agents
     return p if p and _sandboxed(p) and not agents.manager_turn(meta) else None
@@ -711,7 +743,14 @@ AGENT_MANAGER = {"cron", "webhook", "watch", "after", "on", "off", "silent", "lo
 
 # ...and so is what starts something with the owner's rights outside the agent's guards (a session of any topic,
 # a scheduled job now): an agent hands work to another agent (`maxxing agents send`), which keeps its own
-OWNER_ONLY = {"sessions": {"new", "send"}, "cron": {"run", "restore"}}
+OWNER_ONLY = {"sessions": {"new", "send"}, "cron": {"run", "restore"},
+              "jarvis": {"say", "new", "set", "brief", "dream"}}      # + `jarvis work close` (check_cli)
+# ...and, outside the owner's conversation with the agent: what shows the address that starts a webhook (its URL
+# is its key) or what it received; marking the owner's notifications as read
+OWNER_KEPT = {"webhooks": ({"list", "show", "url", "calls", "call", "data"},
+                           "the address of a webhook starts it, and what it received is the owner's. Say what you "
+                           "need in your answer."),
+              "feed": ({"read-all"}, "the notifications are the owner's to mark as read.")}
 
 
 def _manages(turn: dict, words: list[str], argv: list[str]) -> bool:
@@ -754,6 +793,8 @@ OWNER_SUBS = {      # command -> (sub-commands of the owner only in any agent tu
                                     "devices='[\"<id>\"]'`: a request the owner allows)."),
     "themes": (frozenset({"install", "verify", "remove"}), "themes change the owner's interface. Say which theme to install in "
                                                  "your answer."),
+    "community": (frozenset({"install"}), "a package from outside is installed by the owner, who reads what it does "
+                                          "first. Give the `maxxing community check` report in your answer."),
     "webhooks": (WEBHOOKS_OWNER_ONLY, "webhooks and events run commands and calls with the owner's rights, without "
                                       "an agent's budget or guards. Say what should be done in your answer."),
 }
@@ -780,7 +821,11 @@ def check_cli(argv: list[str]) -> str | None:
     subs, why = OWNER_SUBS.get(cmd, ((), ""))
     if turn["path"] and sub in subs:
         return f"`maxxing {cmd} {sub}` is not allowed in an agent turn: {why}"
-    if turn["path"] and not turn.get("manager") and sub in OWNER_ONLY.get(cmd, ()):
+    kept, why = OWNER_KEPT.get(cmd, ((), ""))
+    if turn["path"] and not turn.get("manager") and sub in kept:
+        return f"`maxxing {cmd} {sub}` is not allowed in an agent run: {why}"
+    if turn["path"] and not turn.get("manager") and (sub in OWNER_ONLY.get(cmd, ())
+                                                     or words[:3] == ["jarvis", "work", "close"]):
         return (f"`maxxing {cmd} {sub}` is not allowed in an agent run: it would start work with the owner's rights, "
                 "outside this agent's budget and guards. Hand it to another agent (`maxxing agents send`) or say "
                 "what should be done in your answer.")

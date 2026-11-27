@@ -12,7 +12,7 @@ section: Reference
 | `maxxing serve [--host IP] [--port N]` | run the web server (used by the `claude-maxxing` service) |
 | `maxxing setup-link [--reset]` | print the one-time setup link; `--reset` forgets the password and starts the setup again |
 | `maxxing password` | set a new UI password (interactive) |
-| `maxxing 2fa status\|off\|forget-browsers` | two-step sign-in with Telegram: state, turn it off (the way back in when Telegram does not answer), make every browser ask again |
+| `maxxing 2fa status\|off\|forget-browsers` | two-step sign-in (Telegram, authenticator app): state, turn it off - both methods, recovery codes dropped (the way back in when Telegram does not answer or the phone is lost) -, make every browser ask again |
 | `maxxing status [--json]` | version, URL, service, Claude auth, Telegram, backup, paths |
 | `maxxing doctor [--json] [--live] [--offline] [--deps]` | check the installation; `--live` makes a real Claude call, `--offline` skips the update checks (GitHub, Claude Code release), `--deps` also looks up known vulnerabilities of the installed packages (osv.dev) |
 | `maxxing proxy on [HOST:PORT] [--domain D] [--new-secret]` / `proxy off` / `proxy status [--json]` | a second private listen address (default `172.17.0.1:8790`) for a reverse proxy in Docker, guarded by a secret header; writes the Traefik block to `<state>/reverse-proxy.conf` (`--new-secret`: a new header, copy the block again); `off` also forgets the secret and the block; restart the service after (see [Installation](installation#behind-a-proxy-in-docker)) |
@@ -72,13 +72,15 @@ lists the **workspace upgrade notes** of the versions installed (`<code>/docs/up
 instructions for Claude to adapt your workspace. The easiest path is the topic `system/harness` (`system/update` on older servers):
 say "update" and Claude checks, explains, updates after your yes, then applies these notes.
 
-**Signed updates only (optional).** Set `"update_verify_signature": true` in
-`/var/lib/claude-maxxing/config.json` and `maxxing update` installs a new version only if its commit, or a tag
-pointing at it, carries a valid signature from a key git trusts on this server (`git verify-commit` /
-`git verify-tag`: import the maintainer's GPG key with `gpg --import`, or point `gpg.ssh.allowedSignersFile` at
-their SSH key). Otherwise the update stops before changing anything (exit code `1`, a warning in the
-notifications feed and on Telegram) and the current version keeps running. `maxxing doctor` tells whether the
-latest fetched version passes the check. Off by default.
+**Signed versions (optional for now).** A published version can carry the signature of its publishers. With
+`"update_verify_signature": "stable"` in `/var/lib/claude-maxxing/config.json`, a server that follows the published
+versions (branch `stable`) installs a new version only when its tag is signed by one of the keys shipped with the
+version already installed (`server/maxxing/release-signers`), checked before anything changes. Otherwise the update
+stops (exit code `1`, a warning in the notifications feed and on Telegram) and the current version keeps running.
+`true` asks for a signature on every branch (also `beta` and `main`, whose commits are not signed: add your own
+keys with `gpg --import` or `gpg.ssh.allowedSignersFile`). In the mode `"stable"`, a server without `ssh-keygen` or
+with a git older than 2.34 cannot check: it says so and updates. Off by default until every published version is
+signed; `maxxing doctor` and Settings -> Security tell whether the check is on.
 
 ## maxxing license
 
@@ -99,7 +101,7 @@ See [License](license).
 | `maxxing video render [DIR] [--id Intro] [--out out/video.mp4]` | render a Remotion project with the background priority (through `maxxing heavy`) |
 | `maxxing video status` | Node.js, Remotion and the headless browser on this server (exit 1 if not ready) |
 | `maxxing pdf IN.html OUT.pdf` | print an HTML file or an `https://` URL to PDF (A4, backgrounds) |
-| `scrapling extract get\|fetch\|stealthy-fetch URL OUT.md` | fetch a page (HTTP / browser / stealthy browser) to Markdown, text or HTML |
+| `scrapling extract get\|fetch URL OUT.md` | fetch a page (HTTP / browser) to Markdown, text or HTML |
 | `scrapling-python SCRIPT.py` | run a scraping script with Scrapling and its browser |
 | `bash /opt/claude-maxxing/install.sh --tools` | (re)install Node.js, Chromium, Remotion and Scrapling (= `maxxing deps update`) |
 
@@ -185,13 +187,15 @@ Remotion, the Whisper models, Garage). As root.
 
 | Command | Purpose |
 |---|---|
-| `maxxing keys list [--json]` | names, notes and whether each key is exposed, files marked `file` (never the values or contents) |
+| `maxxing keys list [--json]` | names, notes and whether each key is exposed, files marked `file`, and between brackets the projects / topics a key is limited to (never the values or contents) |
 | `maxxing keys get NAME` | print a value (exit code 1 when missing) |
-| `printf %s "$VALUE" \| maxxing keys set NAME [--note TEXT] [--no-expose]` | create or update a key; the value comes from stdin, never from the command line. A new key is exposed (environment variable of every session and shell job) unless `--no-expose`; an update keeps its note and exposure; a multi-line value (PEM, SSH key) keeps its final line break; a value that is not UTF-8 text is refused (use `put-file`) |
+| `printf %s "$VALUE" \| maxxing keys set NAME [--note TEXT] [--no-expose] [--topics PATHS]` | create or update a key; the value comes from stdin, never from the command line. `--topics projects/a,projects/b/topics/c` gives it only to the sessions and jobs of these projects / topics (`--topics ""`: every topic again; without the option an update keeps its scope). A new key is exposed (environment variable of every session and shell job) unless `--no-expose`; an update keeps its note and exposure; a multi-line value (PEM, SSH key) keeps its final line break; a value that is not UTF-8 text is refused (use `put-file`) |
 | `maxxing keys delete NAME` | remove a key |
-| `maxxing keys put-file NAME PATH [--note TEXT] [--no-expose]` | store a secret **file** (keystore, service-account JSON, certificate; 1 byte to 1 MiB) read from `PATH`, or from stdin with `-`. A new file is exposed (the environment variable `NAME` holds its path in sessions and shell jobs) unless `--no-expose`; never in the backup |
+| `maxxing keys put-file NAME PATH [--note TEXT] [--no-expose] [--topics PATHS]` | store a secret **file** (keystore, service-account JSON, certificate; 1 byte to 1 MiB) read from `PATH`, or from stdin with `-`. A new file is exposed (the environment variable `NAME` holds its path in sessions and shell jobs) unless `--no-expose`; `--topics` as for `set`; never in the backup |
 | `maxxing keys get-file NAME [--output PATH] [--force]` | write the file to stdout, or to `PATH` (mode 600; refuses an existing path unless `--force`) |
 | `maxxing keys delete-file NAME` | remove a secret file |
+| `maxxing keys encrypt` | seal the server's secrets on disk (as root): `secrets.json` becomes `secrets.json.cred`, encrypted by `systemd-creds` with this machine's key (and its TPM when systemd uses one), checked by decrypting it back before the clear file is removed. A copy kept of a once damaged `secrets.json` (`secrets.json.damaged-*`) is not sealed: it is named in a warning, to compare and delete. Refuses, changing nothing, when `systemd-creds` is missing (systemd older than 250) or the check fails. Nothing else changes: the server and every `maxxing` command read it as before. See [Security](15-security.md#secrets-sealed-on-disk-optional) for what it protects and what it does not |
+| `maxxing keys decrypt` | undo it: a clear `secrets.json` (mode 600) again. Needed before moving the state folder to another server |
 | `maxxing infra status` / `infra list [--kind K] [--json]` | the Infra inventory: sources, problems, every site / database / bucket / domain / server (last snapshot) |
 | `maxxing infra refresh` | read everything now (this server, other servers over SSH, Cloudflare, Hostinger, URL checks) |
 | `maxxing infra mail [--refresh] [--json]` | e-mail, view only: mailboxes of the E-mail page, Cloudflare Email Routing forwards, Hostinger e-mail, DNS health (MX, SPF, DKIM, DMARC) of the mail domains with what to fix |
@@ -244,6 +248,17 @@ OAuth sign-ins (state "To connect") are done in Settings -> MCP -> **Connect**. 
 `AGENT` = `project/topic/agent` (or `projects/P/topics/T/agents/A`, or the agent's name when it is unique). See
 [Agents](30-agents.md) and [Agent groups](31-agent-groups.md).
 
+## Community packages
+
+What an extension, a skill or a theme written by someone else does, read before it is installed
+([13-page-extensions.md](13-page-extensions.md#what-a-package-does-before-it-is-installed)). A reading aid, not a verdict.
+
+| Command | Purpose |
+|---|---|
+| `maxxing community check PATH [--kind extension\|skill\|theme] [--json]` | read a folder or a zip without running it: code on the server, network, keys, processes, downloads, paths outside its folder (file and line), and the sha256 of the content; nothing installed |
+| `maxxing community install PATH [--sha256 HASH] [--yes] [--read] [--force] [--source TEXT]` | show the report, ask, then install exactly that content (refused when it differs from `--sha256`); `--yes` needs `--sha256`, findings marked danger need `--read`; `--force` replaces an installed one; exit code 3 = waiting for the owner's agreement; refused in an agent's run |
+| `maxxing community list [--json]` | what was installed this way: sha256, source, date, and whether its files changed since |
+
 ## Themes
 
 Settings -> Appearance -> [Theme](39-themes.md): a theme is a `theme.json` of values (no code; at most one field of advanced CSS), made or
@@ -254,6 +269,7 @@ installed by Harness (skill `maxxing-theme`).
 | `maxxing themes list [--json]` | installed themes, and folders that are not usable with the reason |
 | `maxxing themes check FOLDER [--json]` | read a theme like the interface will: what it sets, what is dropped and why (nothing installed) |
 | `maxxing themes install FOLDER [--force]` | check it, then copy it into `<workspace>/themes/<id>/` (`--force` replaces it); refused in an agent's run |
+| `maxxing themes install FOLDER --sha256 HASH [--source TEXT] [--yes] [--read]` | a theme from outside: installs only the content `maxxing community check` reported, and records it |
 | `maxxing themes verify ID` | its advanced CSS was checked with this version of the interface: switch it back on (an update that changes the interface's CSS switches it off); refused in an agent's run |
 | `maxxing themes remove ID` | delete an installed theme (browsers using it go back to its base); refused in an agent's run |
 | `maxxing themes tokens [--json]` | the variables a theme may set and their kind |
@@ -343,6 +359,7 @@ See [Harness Browser](33-browser.md).
 | Command | Purpose |
 |---|---|
 | `maxxing memory [--json]` | every memory.md with its line count and the line limit (Settings -> Memory) |
+| `maxxing memory-review undo ID` / `list [--json]` / `apply ID\|all` / `reject ID` / `daily` | what [agents and topics learned](memory): `undo` takes back a bullet or a skill that was written (same as Undo of its notification); `list`, `apply`, `reject` are for the proposals that wait in `"memory_review": "ask"` mode; `daily` runs the daily look at the busy topics now |
 | `maxxing sessions send SESSION MESSAGE... [--file PATH] [--json]` | write to a session as if typed in it (SESSION: its id, its first 8 characters or its title - case and accents ignored, a unique beginning is enough; `--file` repeatable). Run by Claude from a session, the message says which session sent it; 3 sends in a row between sessions or agents at most. Refused in a sandboxed agent |
 | `maxxing sessions new TOPIC [MESSAGE...] [--title T] [--model M] [--effort E] [--file PATH] [--fresh REASON] [--json]` | start a session in a topic (TOPIC: `<project>/<topic>` or `projects/<project>/topics/<topic>`) with a first message; no `--title`: made from the message. Run by Claude from a session or an agent, the message says which session started it, with the same limit of 3 sends in a row. From Jarvis's conversation it is refused (exit 3, with their list, closest to the subject first) while the topic has sessions that can take the work: `sessions send` to one of them, or `--fresh "<reason>"` for another subject (the reason shows on its work board card). An agent is started with `maxxing agents run` instead. Refused in a sandboxed agent |
 | `maxxing sessions list [--json]` | the sessions that are not archived: id, state, topic, title |

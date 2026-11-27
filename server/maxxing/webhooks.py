@@ -17,7 +17,8 @@ Storage (state_dir("webhooks")):
   data/<id>.db          rows of a "store" hook
   spool/*.json          events emitted by other processes (cron runs, agent turns), consumed by the server loop
   feed-pos.json         the last feed event read by the "feed" triggers
-Secrets (secrets.json "webhooks"): {id: {token, secret, sign}} - never in hooks.json nor in an API answer.
+Secrets (secrets.json "webhooks"): {id: {token, secret, sign}} - never in hooks.json nor in an API answer. The
+`secret` of a phone hook is its access key: only "sha256:<hex>" of it is kept (`_hash_phone_keys`).
 
 The URL token is the permission. A Stripe / Shopify / GitHub hook refuses every call until its signing secret is
 set (as the feed's webhooks: feedhooks.py, whose checks are reused here); a generic hook checks an HMAC when it has
@@ -70,6 +71,7 @@ DEFAULT_MB = 1
 PHONE_MB = 20
 WAIT_S = 30.0                    # reply "wait": the caller gets the result within this, else 504 (the run goes on)
 SYNC_MAX = 4                     # callers waiting at once, all hooks together
+SYNC_PER_HOOK = 3                # of those, on one hook: a slow hook never takes every place from the others
 MAX_PARALLEL = 4
 DEFAULT_WAITING = 50
 MAX_WAITING = 500
@@ -142,7 +144,32 @@ def _store() -> dict:
     return v if isinstance(v, dict) else {}
 
 
-def _save_store(store: dict) -> None:
+_KEY_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _key_hash(key: str) -> str:
+    return "sha256:" + hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _is_phone(h: dict) -> bool:
+    t = h.get("trigger") or {}
+    return t.get("kind") == "in" and t.get("source") == "phone"
+
+
+def _hash_phone_keys(store: dict, hooks: list[dict]) -> bool:
+    """The access key of a phone hook (`?key=`, Bearer, X-Harness-Key) is kept as its SHA-256 only: a key stored in
+    clear by an earlier version becomes its hash. -> True when `store` changed."""
+    changed = False
+    for h in hooks:
+        s = store.get(h["id"]) if _is_phone(h) else None
+        if isinstance(s, dict) and s.get("secret") and not _KEY_HASH.fullmatch(str(s["secret"])):
+            s["secret"] = _key_hash(str(s["secret"]))
+            changed = True
+    return changed
+
+
+def _save_store(store: dict, hooks: list[dict] | None = None) -> None:
+    _hash_phone_keys(store, _load() if hooks is None else hooks)
     config.set_secret("webhooks", store or None)
 
 
@@ -388,11 +415,11 @@ def create(spec: dict, secret: str | None = None) -> dict:
         if h["trigger"]["kind"] == "in":
             s["token"] = _secrets.token_urlsafe(24)
             if secret:
-                s["secret"] = secret
+                s["secret"] = _key_hash(secret) if _is_phone(h) else secret
         if h["action"]["kind"] == "call" and h["action"].get("sign"):
             s["sign"] = _secrets.token_hex(24)
         store[h["id"]] = s
-        _save_store(store)
+        _save_store(store, hooks + [h])
         _save(hooks + [h])
     _changed()
     return public(h)
@@ -417,8 +444,9 @@ def update(hid: str, spec: dict) -> dict:
             s.pop("secret", None)
         if h["action"]["kind"] == "call" and h["action"].get("sign") and not s.get("sign"):
             s["sign"] = _secrets.token_hex(24)
-        _save_store(store)
-        _save([h if x["id"] == hid else x for x in hooks])
+        hooks = [h if x["id"] == hid else x for x in hooks]
+        _save_store(store, hooks)                 # a hook that becomes a phone hook: its secret is a key, hashed
+        _save(hooks)
     _changed()
     return public(h)
 
@@ -464,7 +492,7 @@ def set_secret(hid: str, secret: str | None) -> dict:
         store = _store()
         s = store.setdefault(hid, {})
         if secret:
-            s["secret"] = secret
+            s["secret"] = _key_hash(secret) if _is_phone(h) else secret
         else:
             s.pop("secret", None)
         _save_store(store)
@@ -737,7 +765,8 @@ def _check_auth(h: dict, s: dict, headers: dict, query: dict, body: bytes) -> tu
     if src == "phone":
         got = str(low.get("authorization") or "")
         got = got[7:].strip() if got.lower().startswith("bearer ") else str(low.get("x-harness-key") or query.get("key") or "")
-        return None if got and feedhooks._same(got, secret) else (401, {"error": "bad_key"})
+        want = secret if _KEY_HASH.fullmatch(secret) else _key_hash(secret)
+        return None if got and hmac.compare_digest(_key_hash(got), want) else (401, {"error": "bad_key"})
     return None if feedhooks.verify(src, secret, headers, body) else (401, {"error": "bad_signature"})
 
 
@@ -755,6 +784,17 @@ def _limited(hid: str) -> bool:
     return False
 
 
+def _convert_keys() -> None:
+    """Phone keys still in clear in the store (written before they were hashed) -> their hash."""
+    try:
+        with _locked():
+            store = _store()
+            if _hash_phone_keys(store, _load()):
+                config.set_secret("webhooks", store or None)
+    except Exception:  # noqa: BLE001 - the call goes on: the key is checked against its hash either way
+        log.exception("could not convert the phone webhook keys")
+
+
 def receive(token: str, method: str, headers: dict, query: dict, body: bytes,
             fields: dict | None = None, files: list[tuple[str, str, bytes]] | None = None) -> dict:
     """An incoming call -> {status, json, hook?, call?, wait?}. `wait`: the API waits for the call (reply "wait")."""
@@ -763,6 +803,8 @@ def receive(token: str, method: str, headers: dict, query: dict, body: bytes,
         return {"status": 404, "json": {"error": "not_found"}}
     h, s = found
     t = h["trigger"]
+    if _is_phone(h) and s.get("secret") and not _KEY_HASH.fullmatch(str(s["secret"])):
+        _convert_keys()
     if not h["enabled"]:
         return {"status": 503, "json": {"error": "disabled"}, "retry_after": 3600}
     if method not in t["methods"]:
@@ -781,8 +823,18 @@ def receive(token: str, method: str, headers: dict, query: dict, body: bytes,
     from . import feed, feedhooks
     low = {k.lower(): v for k, v in headers.items()}
     claim = None
+    if s.get("secret") and t["source"] == "generic" and not body:
+        query = {}      # the signature covers the body only: with none, it is the same for any query (a replay's too)
     if s.get("secret") and t["source"] in ("shopify", "github", "generic") and body:
         claim = feedhooks._replay_key(t["source"], low, body)
+    elif s.get("secret") and t["source"] == "stripe" and body:
+        # Stripe signs each retry anew (another `t`): the event id is what tells a delivery already taken
+        try:
+            evt = json.loads(body).get("id")
+        except (ValueError, AttributeError, RecursionError):
+            evt = None
+        claim = f"evt:{evt[:200]}" if isinstance(evt, str) and evt else None
+    if claim:
         if not feed.claim_delivery(f"wh:{h['id']}", claim, feedhooks.REPLAY_KEEP_S.get(t["source"], feedhooks.DEFAULT_REPLAY_S)):
             return {"status": 200, "json": {"ok": True, "duplicate": True}}
     try:
@@ -799,7 +851,7 @@ def receive(token: str, method: str, headers: dict, query: dict, body: bytes,
                 feed.release_delivery(f"wh:{h['id']}", claim)
             return {"status": 503, "json": {"error": "busy", "message": "Too many calls waiting"}, "retry_after": 30}
         wait = t["reply"] == "wait" and not ignored
-        if wait and not dispatcher.sync_slot():
+        if wait and not dispatcher.sync_slot(h["id"]):
             if claim:
                 feed.release_delivery(f"wh:{h['id']}", claim)
             return {"status": 503, "json": {"error": "busy", "message": "Too many callers waiting"}, "retry_after": 10}
@@ -816,7 +868,7 @@ def receive(token: str, method: str, headers: dict, query: dict, body: bytes,
             dispatcher.submit(h["id"], cid, wait=wait)
         except BaseException:
             if wait:
-                dispatcher.sync_release()
+                dispatcher.sync_release(h["id"])
             raise
         if wait:
             return {"status": 202, "json": {"ok": True, "call": cid}, "hook": h["id"], "call": cid, "wait": True}
@@ -1343,12 +1395,16 @@ def data_csv(hid: str, limit: int = 100_000) -> str:
     cols = list(fields) or _scalar_keys(rows)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["id", "at"] + cols)
+
+    def cell(v: Any) -> Any:
+        """The values come from outside callers: one that starts like a formula must not run in a spreadsheet."""
+        v = "" if v is None else json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+        return "'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+    w.writerow(["id", "at"] + [cell(c) for c in cols])
     for r in rows:
         vals = r.get("fields") if fields else (r.get("data") if isinstance(r.get("data"), dict) else {})
         w.writerow([r["id"], dt.datetime.fromtimestamp(r["at"]).isoformat(timespec="seconds")] +
-                   ["" if (vals or {}).get(c) is None else (json.dumps(vals[c], ensure_ascii=False)
-                    if isinstance(vals[c], (dict, list)) else vals[c]) for c in cols])
+                   [cell((vals or {}).get(c)) for c in cols])
     return buf.getvalue()
 
 
@@ -1463,22 +1519,29 @@ class Dispatcher:
         self.waiting: dict[str, deque] = {}
         self.done: dict[str, threading.Event] = {}
         self.sync = 0
+        self.sync_by: dict[str, int] = {}
 
     def has_room(self, h: dict) -> bool:
         with self.lock:
             busy = self.running.get(h["id"], 0) >= h["queue"]["parallel"]
             return not busy or len(self.waiting.get(h["id"], ())) < h["queue"]["max_waiting"]
 
-    def sync_slot(self) -> bool:
+    def sync_slot(self, hid: str) -> bool:
         with self.lock:
-            if self.sync >= SYNC_MAX:
+            if self.sync >= SYNC_MAX or self.sync_by.get(hid, 0) >= SYNC_PER_HOOK:
                 return False
             self.sync += 1
+            self.sync_by[hid] = self.sync_by.get(hid, 0) + 1
             return True
 
-    def sync_release(self) -> None:
+    def sync_release(self, hid: str) -> None:
         with self.lock:
             self.sync = max(0, self.sync - 1)
+            left = self.sync_by.get(hid, 0) - 1
+            if left > 0:
+                self.sync_by[hid] = left
+            else:
+                self.sync_by.pop(hid, None)
 
     def submit(self, hid: str, cid: str, wait: bool = False) -> None:
         try:

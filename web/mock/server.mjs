@@ -637,7 +637,7 @@ function topicObj(p, tp) {
   const ss = S.sessions.filter((s) => s.path === pth && !s.archived)
   const th = S.telegram.threads.find((x) => x.path === pth)
   return { name: tp.name, project: p.name, path: pth, description: tp.description || '', session_count: ss.length, archived_count: S.sessions.filter((s) => s.path === pth && s.archived).length,
-    running: ss.filter((s) => s.state === 'running').length, unread: ss.filter((s) => s.unread).length, errors: ss.filter((s) => s.unread && s.state === 'error').length, telegram_thread: th ? th.thread_id : null,
+    running: ss.filter((s) => s.state === 'running').length, unread: ss.filter((s) => s.unread).length, errors: ss.filter((s) => s.unread && s.state === 'error').length, telegram_thread: th ? th.thread_id : null, session_order: tp.session_order || [],
     ...(MOCK_ALL ? { agents: mockAgents().filter((a) => a.project === p.name && a.topic === tp.name) } : {}) }
 }
 function projectObj(p) {
@@ -1184,6 +1184,48 @@ R('POST', '/api/auth/password', ({ body }) => {
   return { ok: true }
 })
 
+// two-step sign-in with an authenticator app, recovery codes, signed-in browsers (Settings -> Security)
+const MOCK_2F = { totp: false, recovery: 0 }
+const mockCodes = () => Array.from({ length: 10 }, (_, i) => `abcd-efgh-ijkl-mn${String(i).padStart(2, '0')}`)
+R('GET', '/api/auth/second-factor', () => ({ telegram: false, totp: MOCK_2F.totp, recovery_left: MOCK_2F.recovery }))
+R('POST', '/api/auth/totp', ({ body }) => {
+  if (body.password !== S.password) fail(401, 'bad_password', 'Current password is wrong')
+  return { secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP', uri: 'otpauth://totp/Harness%20Maxxing%3Amock?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Harness%20Maxxing&algorithm=SHA1&digits=6&period=30' }
+})
+R('POST', '/api/auth/totp/confirm', ({ body }) => {
+  if (!/^\d{6}$/.test(String(body.code || '').replace(/\s/g, ''))) fail(400, 'bad_code', 'Wrong code')
+  Object.assign(MOCK_2F, { totp: true, recovery: 10 })
+  return { ok: true, recovery_codes: mockCodes() }
+})
+R('POST', '/api/auth/totp/off', ({ body }) => {
+  if (body.password !== S.password) fail(401, 'bad_password', 'Current password is wrong')
+  if (!body.code) fail(400, 'bad_code', 'Wrong code')
+  Object.assign(MOCK_2F, { totp: false, recovery: 0 })
+  return { ok: true }
+})
+R('POST', '/api/auth/recovery-codes', ({ body }) => {
+  if (body.password !== S.password) fail(401, 'bad_password', 'Current password is wrong')
+  MOCK_2F.recovery = 10
+  return { recovery_codes: mockCodes() }
+})
+const MOCK_BROWSERS = { legacy: true, list: [
+  { id: 'b1', label: 'Chrome · Windows', ip: '203.0.113.7', current: true, age: 20 },
+  { id: 'b2', label: 'Safari · iPhone', ip: '198.51.100.24', current: false, age: 5400 },
+  { id: 'b3', label: 'Firefox · Linux', ip: '2001:db8::42', current: false, age: 3 * 86400 },
+] }
+R('GET', '/api/auth/devices', () => ({
+  devices: MOCK_BROWSERS.list.map(({ age, ...d }) => ({ ...d, created: Math.floor(Date.now() / 1000) - age - 3600, seen: Math.floor(Date.now() / 1000) - age })),
+  legacy: MOCK_BROWSERS.legacy, legacy_current: false,
+}))
+R('POST', '/api/auth/devices/disconnect-others', () => {
+  Object.assign(MOCK_BROWSERS, { legacy: false, list: MOCK_BROWSERS.list.filter((d) => d.current) })
+  return { ok: true }
+})
+R('DELETE', '/api/auth/devices/:id', ({ params }) => {
+  MOCK_BROWSERS.list = MOCK_BROWSERS.list.filter((d) => d.id !== params.id)
+  return { ok: true }
+})
+
 /* ---- onboarding */
 R('GET', '/api/onboarding', () => onboardingObj())
 // Installed themes (Settings -> Appearance): two examples, as the server sends them once checked (themes.py).
@@ -1326,6 +1368,12 @@ R('PATCH', '/api/workspace/projects/:project/topics/:topic', ({ params, body }) 
   if (body.description !== undefined) tp.description = body.description
   bus('workspace', 'sessions')
   return topicObj(p, tp)
+})
+R('PUT', '/api/workspace/projects/:project/topics/:topic/sessions-order', ({ params, body }) => {
+  const tp = findProject(params.project).topics.find((x) => x.name === params.topic) || fail(404, 'not_found', 'Topic not found')
+  tp.session_order = [...new Set((body.names || []).filter((x) => typeof x === 'string'))]
+  bus('workspace')
+  return { sessions: tp.session_order }
 })
 R('DELETE', '/api/workspace/projects/:project/topics/:topic', ({ params }) => {
   const p = findProject(params.project)

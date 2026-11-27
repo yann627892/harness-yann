@@ -6,6 +6,7 @@ import io
 import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -168,7 +169,7 @@ def test_a_note_that_is_not_text_is_refused(mx):
 def test_the_list_never_holds_the_content(mx):
     vault_files.put("LEAK_CHECK", b"TOP-SECRET-BYTES", filename="k.json", note="n", expose=True)
     rows = vault_files.list_files()
-    assert set(rows[0]) == {"name", "filename", "size", "sha256", "note", "expose", "updated"}
+    assert set(rows[0]) == {"name", "filename", "size", "sha256", "note", "expose", "topics", "updated"}
     assert "TOP-SECRET-BYTES" not in json.dumps(rows)
 
 
@@ -408,6 +409,18 @@ def test_cli_buffered_output_into_a_closed_pipe_is_quiet(mx, monkeypatch):
     assert cli.main(["zz-print"]) == 141                  # the print is buffered: it fails at the flush
 
 
+def test_cli_help_into_a_closed_pipe_is_quiet(mx, monkeypatch):
+    """`maxxing --help | head -0`: argparse buffers the help then exits; the flush fails inside main (141, no
+    "Exception ignored ... BrokenPipeError" at exit, no code 120)."""
+    class Closed(io.BytesIO):
+        def write(self, b):
+            raise BrokenPipeError(32, "Broken pipe")
+    monkeypatch.setattr(cli, "_stdout_gone", lambda: True)
+    for argv in (["--help"], ["keys", "--help"]):
+        monkeypatch.setattr("sys.stdout", io.TextIOWrapper(Closed()))
+        assert cli.main(argv) == 141, argv
+
+
 def test_cli_get_file_output_leaves_no_partial_file(mx, monkeypatch):
     vault_files.put("PART_FILE", BLOB)
     dest = mx["tmp"] / "out" / "part.bin"
@@ -467,7 +480,7 @@ def test_an_agent_turn_lists_only_its_own_text_keys(mx, monkeypatch, capsys):
     vault_files.put("GCP_SA", b"{}", note="prod GCP", expose=True)
     monkeypatch.setenv("MAXXING_AGENT", "acme/blog/help")
     monkeypatch.setattr(agents, "exists", lambda p: True)
-    monkeypatch.setattr(agents, "load", lambda p: {"keys": ["MINE", "GCP_SA"]})
+    monkeypatch.setattr(agents, "load", lambda p: {"keys": ["MINE", "GCP_SA"], "sandbox": False})
     for argv in (("list",), ("list", "--json")):
         assert run(monkeypatch, *argv) == 0
         out = capsys.readouterr().out
@@ -535,6 +548,58 @@ def test_a_put_killed_between_metadata_and_rename_never_serves_stale_or_phantom_
     config.set_secret("vault_files", files)                 # the state a kill right after the metadata save leaves
     assert vault_files.read("OLD_FILE") is None              # the old bytes are not the entry's: not served
     assert vault_files.read("NEW_FILE") is None
-    assert [f["name"] for f in vault_files.list_files()] == ["OLD_FILE"]
+    assert vault_files.list_files() == []                    # nor listed as if the new bytes were stored
     vault_files.put("NEW_FILE", b"again", create=True)       # the phantom entry does not block the name
     assert vault_files.read("NEW_FILE") == b"again"
+    assert "OLD_FILE" not in config.load_secrets()["vault_files"]    # dropped with its stale bytes by the sweep
+    assert not (vault_files.files_dir() / "OLD_FILE").exists()
+
+
+def test_a_rotation_killed_before_the_rename_never_exposes_the_old_secret(mx):
+    vault_files.put("SVC_JSON", b"old-secret", expose=True)
+    pid = os.fork()
+    if pid == 0:                                            # the put is killed right after saving the metadata
+        real = os.replace
+
+        def kill(src, dst, *a, **k):
+            if str(dst).startswith(str(vault_files.files_dir())):
+                os._exit(9)
+            return real(src, dst, *a, **k)
+        os.replace = kill
+        try:
+            vault_files.put("SVC_JSON", b"new-secret")
+        finally:
+            os._exit(0)
+    os.waitpid(pid, 0)
+    assert "SVC_JSON" not in vault_files.exposed_files_env()     # the path would serve the old bytes
+    assert vault_files.path_of("SVC_JSON") is None and vault_files.list_files() == []
+    with pytest.raises(vault.VaultError) as e:               # a metadata-only put asks for the content again
+        vault_files.put("SVC_JSON", note="edited")
+    assert e.value.code == "file_required" and vault_files.path_of("SVC_JSON") is None
+    vault_files.put("SVC_JSON", b"new-secret", expose=True)  # putting the content again repairs it
+    assert vault_files.read("SVC_JSON") == b"new-secret"
+    assert vault_files.exposed_files_env() == {"SVC_JSON": str(vault_files.files_dir() / "SVC_JSON")}
+
+
+def test_a_file_that_could_not_be_read_once_is_never_swept(mx, monkeypatch):
+    vault_files.put("GOOD", b"good-bytes")
+    real = Path.read_bytes
+
+    def emfile(self):
+        if self.name == "GOOD":
+            raise OSError(24, "Too many open files")
+        return real(self)
+    monkeypatch.setattr(Path, "read_bytes", emfile)
+    vault_files.put("OTHER", b"other-bytes")                 # its sweep cannot read GOOD this time
+    monkeypatch.setattr(Path, "read_bytes", real)
+    assert vault_files.read("GOOD") == b"good-bytes" and vault_files.read("OTHER") == b"other-bytes"
+
+
+def test_an_entry_without_its_hash_is_never_swept(mx):
+    vault_files.put("LEGACY", b"legacy-bytes")
+    files = dict(config.load_secrets()["vault_files"])
+    files["LEGACY"] = {k: v for k, v in files["LEGACY"].items() if k != "sha256"}   # an older or hand-edited entry
+    config.set_secret("vault_files", files)
+    vault_files.put("OTHER", b"other-bytes")
+    assert (vault_files.files_dir() / "LEGACY").read_bytes() == b"legacy-bytes"
+    assert "LEGACY" in config.load_secrets()["vault_files"]

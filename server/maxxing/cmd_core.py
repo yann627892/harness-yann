@@ -51,6 +51,7 @@ COMPACTION_JOB = {
     "enabled": False,               # turned on at the end of the onboarding, once Claude is signed in
     "notify": "failure",
     "timeout_s": 1800,
+    "permission_mode": "bypass",    # it rewrites the memory files of every project, whatever the server's default
 }
 ENABLE_AFTER_ONBOARDING = ("memory-compaction",)   # default jobs created off until Claude is signed in
 
@@ -632,6 +633,14 @@ def do_init(a: argparse.Namespace) -> dict:
                  ("health_feed", not older), ("tasks_page", older), ("agents_page", not older),
                  ("usage_widget", not older)):
         raw.setdefault(k, v)
+    if not older and "permission_mode" not in raw and _sandbox_ready():
+        # a new install: sessions work inside their topic folder (mode sandbox), the `system` project keeps full
+        # access (it repairs and changes Harness itself); an older install keeps the mode it had
+        raw["permission_mode"] = "sandbox"
+        raw["sandbox_default"] = True
+    if getattr(a, "count", None):                 # answered in the installer: never turned on by itself after that
+        reg = raw.get("register") if isinstance(raw.get("register"), dict) else {}
+        raw["register"] = {**reg, "count": a.count == "yes", "asked": True}
     from . import register                        # once (2.0.0a94): anonymous counter on unless the user was asked
     register.migrate(raw)
     config.write_json(config.config_path(), raw)
@@ -653,6 +662,10 @@ def do_init(a: argparse.Namespace) -> dict:
 
     ws = Path(raw["workspace"])
     report["workspace_created"] = copy_templates(ws)
+    if raw.pop("sandbox_default", None):
+        report["permission_mode"] = "sandbox (project system: full access)"
+        _system_full_access(ws)
+        config.write_json(config.config_path(), raw)
     report["skills"] = install_skills()
     report["claude_settings"] = "defaults set (transcripts kept, no AI credit in commits)" if claude_settings_defaults() else "unchanged"
     report["crons"] = "skipped (--no-crons)" if a.no_crons else ensure_default_crons()
@@ -668,6 +681,25 @@ def do_init(a: argparse.Namespace) -> dict:
     if not security.password_is_set():
         report["setup_link"] = f"{cli._base(config.load_config())}/setup?token={security.ensure_setup_token()}"
     return report
+
+
+def _sandbox_ready() -> bool:
+    """What the mode `sandbox` needs is on this server (the AppArmor profile over bubblewrap is loaded when missing)."""
+    from . import agent_guard
+    try:
+        agent_guard.ensure_profile()
+        return bool(agent_guard.available(fresh=True)["ok"])
+    except Exception:  # noqa: BLE001 - never a reason to fail an install
+        return False
+
+
+def _system_full_access(ws: Path) -> None:
+    """The topics of the `system` project in mode bypass, where the server's default is the sandbox."""
+    from . import workspace
+    topics = ws / "projects/system/topics"
+    for d in sorted(topics.iterdir()) if topics.is_dir() else []:
+        if d.is_dir() and not workspace._folder_meta(d).get("permission_mode"):
+            workspace._set_folder_meta(d, "permission_mode", "bypass")
 
 
 def _is_hostname(s: str) -> bool:
@@ -714,6 +746,8 @@ def _cfg_init(p: argparse.ArgumentParser) -> None:
     p.add_argument("--public-url", help="public URL, e.g. https://ui.example.com ('' to clear)")
     p.add_argument("--timezone", help="IANA time zone, e.g. Europe/Paris (default: system)")
     p.add_argument("--language", choices=["en", "fr"], help="UI language")
+    p.add_argument("--count", choices=["yes", "no"],
+                   help="the anonymous daily count of installations, as answered at the installation")
     p.add_argument("--system-clock", choices=["follow", "keep"],
                    help="follow: the system zone follows the configured one; keep: never touch it (shared server)")
     p.add_argument("--claude-dir", help="Claude Code folder for Harness Maxxing (default ~/.claude): another one keeps "
@@ -950,7 +984,14 @@ def check_claude_auth(live: bool = False) -> Check:
     from . import gateway as _gw
     _gw.auth_env(env)                    # a connected gateway overrides the credentials above
     t0 = time.time()
-    code, out = run([b or "claude", "-p", "Reply with the single word: ok"], timeout=120, cwd="/tmp", env=env)
+    # an empty folder of its own, under the state folder: in /tmp any local account could leave project settings
+    # (hooks) or a CLAUDE.md that this call, made as root with the Claude sign-in, would load
+    import tempfile
+    cwd = tempfile.mkdtemp(prefix="doctor-live-", dir=config.STATE if config.STATE.is_dir() else None)
+    try:
+        code, out = run([b or "claude", "-p", "Reply with the single word: ok"], timeout=120, cwd=cwd, env=env)
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
     from . import claude_auth as ca
     if code == 0 and "ok" in out.lower():
         ca.record(True, None, "check")
@@ -1339,6 +1380,24 @@ def check_voice() -> Check:
     return _c("voice", lvl, title, detail, fix)
 
 
+def check_permissions() -> Check | None:
+    """The server's default permission mode: full access is said (not a problem: the owner's choice), a sandbox
+    default that cannot start is one."""
+    from . import agent_guard
+    mode = config.load_config().get("permission_mode") or "bypass"
+    if mode == "bypass":
+        return _c("permissions", INFO, "sessions run with full access to the server (permission mode: bypass)",
+                  "a topic in mode Sandbox works inside its folder, without the server's keys, and asks before leaving it",
+                  "Settings -> Claude -> Permissions -> Sandbox (or a topic's menu -> Permissions)")
+    if mode != "sandbox":
+        return None
+    st = agent_guard.available(fresh=True)
+    if st["ok"]:
+        return _c("permissions", OK, "sessions work in a sandbox by default (full access: per topic)", "")
+    return _c("permissions", FAIL, f"the sandbox cannot start: {', '.join(st['missing'])} - sessions stop",
+              "", "maxxing agents sandbox-setup   (as root)")
+
+
 def check_agent_sandbox() -> Check | None:
     """Only when a sandboxed agent exists: bubblewrap, socat and (Ubuntu 24.04+) the AppArmor profile."""
     from . import agent_guard, agents
@@ -1510,6 +1569,53 @@ def check_state_files() -> Check | None:
               "compare with the current file, restore what is missing (keys: Settings -> Keys), then delete the copy")
 
 
+def check_sign_in() -> Check:
+    """The second step of the sign-in: Telegram, an authenticator app, or the password alone."""
+    from . import twofactor
+    ways = [n for n, on in (("Telegram", twofactor.enabled()), ("authenticator app", twofactor.totp_on())) if on]
+    if ways:
+        return _c("sign_in", OK, f"two-step sign-in on ({' and '.join(ways)})",
+                  f"{twofactor.recovery_left()} recovery code(s) left")
+    return _c("sign_in", WARN, "two-step sign-in off: the password alone opens this server", "",
+              "Settings -> Security -> Two-step sign-in")
+
+
+def security_report() -> list[Check]:
+    """What protects this installation, one line each (Settings -> Security): the doctor checks about security,
+    read together. A check that fails to run is skipped, never an error for the page."""
+    cfg = config.load_config()
+    out: list[Check] = []
+    for fn in (check_sign_in, check_permissions, check_secrets_store, check_security,
+               lambda: check_update_signature(always=True)):
+        try:
+            c = fn()
+        except Exception:  # noqa: BLE001
+            continue
+        if c:
+            out.append(c)
+    bind = str(cfg.get("bind") or "")
+    out.append(_c("listen", OK, "the interface listens on this machine only (reached through the reverse proxy)")
+               if bind in ("127.0.0.1", "::1", "localhost") else
+               _c("listen", INFO, f"the interface listens on {bind}", "reachable without the reverse proxy on that address"))
+    return out
+
+
+def check_secrets_store() -> Check:
+    """How the server's secrets are kept on disk: clear (mode 600), or sealed by `maxxing keys encrypt`."""
+    st = config.secrets_status()
+    if not st["sealed"]:
+        return _c("secrets_store", INFO, "secrets stored in clear (0600)",
+                  "sealing them makes a copy of the file useless on another machine", "maxxing keys encrypt")
+    if not st["ok"]:
+        return _c("secrets_store", FAIL, "the sealed secrets cannot be decrypted - sign-in, keys and tokens are unreadable",
+                  st["error"], "check systemd-creds and /var/lib/systemd/credential.secret (a state folder copied "
+                               "from another server cannot be opened here: run `maxxing keys decrypt` there first)")
+    if st["both"]:
+        return _c("secrets_store", WARN, "secrets sealed, but a clear secrets.json is still there",
+                  str(config.secrets_path()), "maxxing keys encrypt   (removes it when it holds the same content)")
+    return _c("secrets_store", OK, "secrets sealed on disk (systemd-creds)", str(config.sealed_path()))
+
+
 def check_disk(cfg: dict) -> Check:
     p = Path(cfg.get("workspace") or "/")
     while not p.exists() and p != p.parent:
@@ -1600,20 +1706,37 @@ def _fetch_quiet(branch: str) -> None:
     _git("fetch", "-q", "origin", "--", branch, timeout=20, token=config.get_secret(UPDATE_TOKEN) or None)
 
 
-def check_update_signature() -> Check | None:
-    if not config.load_config().get("update_verify_signature") or not (config.CODE / ".git").exists():
+def check_update_signature(always: bool = False) -> Check | None:
+    """`always`: also a line when nothing is checked (Settings -> Security); doctor stays silent then."""
+    if not (config.CODE / ".git").exists():
         return None
     from . import license
     if license.enabled():
         return None                                    # still on archives: checked once it has moved to git
-    ref = f"origin/{_current_branch()}"
+    branch = _current_branch()
+    mode = signature_mode(branch)
+    if mode == "off":
+        if not always:
+            return None
+        if config.load_config().get("update_verify_signature", False) == "stable":
+            return _c("update_signature", INFO, f"updates of the branch {branch} are not signed",
+                      "only published versions (branch stable) carry a signature")
+        return _c("update_signature", INFO, "update signatures are not checked (update_verify_signature is off)",
+                  "", 'set "update_verify_signature": "stable" in config.json')
+    cannot = signature_unavailable()
+    if cannot and mode == "auto":
+        return _c("update_signature", WARN, "update signatures cannot be checked on this server", cannot)
+    ref = f"origin/{branch}"
     target = _rev(ref) or _rev("HEAD")
+    if mode == "auto" and target and target == _rev("HEAD"):
+        return _c("update_signature", OK, "a new version is installed only when signed by its publishers")
     ok, detail = verify_target(target) if target else (False, "no commit")
     if ok:
         return _c("update_signature", OK, f"update signatures checked ({detail})")
-    return _c("update_signature", WARN, f"update_verify_signature is on but {ref} is not signed by a trusted key",
-              detail, "maxxing update will stop until it is: import the maintainer's key (gpg --import) or set "
-                      "gpg.ssh.allowedSignersFile; or set update_verify_signature to false in config.json")
+    return _c("update_signature", WARN, f"{ref} is not signed by a trusted key",
+              detail, f"maxxing update will stop until it is: the keys trusted are in {SIGNERS} (plus the ones git "
+                      "knows: gpg --import, gpg.ssh.allowedSignersFile); or set update_verify_signature to false "
+                      "in config.json")
 
 
 def check_license() -> Check:
@@ -1648,7 +1771,7 @@ def collect_checks(live: bool = False, fetch: bool = True, deps: bool = False) -
         check_python, check_uv, check_claude_cli, lambda: check_claude_version(fetch), lambda: check_claude_auth(live),
         lambda: check_skill_listing(cfg), check_setup,
         check_service, check_hardening, lambda: check_caddy_site(cfg), check_infra_paths, lambda: check_bind(cfg), lambda: check_http(cfg), lambda: check_public_url(cfg),
-        lambda: check_caddy(cfg), check_crontab, lambda: check_timezone(cfg), lambda: check_telegram(cfg), lambda: check_backup(cfg), check_voice, check_tools, check_stale_units, check_cpu_priorities, check_agent_sandbox, check_browser, check_devices, check_managed_deps, check_security, check_state_files,
+        lambda: check_caddy(cfg), check_crontab, lambda: check_timezone(cfg), lambda: check_telegram(cfg), lambda: check_backup(cfg), check_voice, check_tools, check_stale_units, check_cpu_priorities, check_agent_sandbox, check_permissions, check_browser, check_devices, check_managed_deps, check_security, check_state_files, check_secrets_store,
         lambda: check_disk(cfg), check_memory, lambda: check_workspace(cfg), check_skills, check_web,
         check_license, lambda: check_git(fetch), check_update_signature,
     ] + ([check_deps] if deps else [])
@@ -2104,18 +2227,27 @@ def _update_code(a) -> int:
         line(FAIL, "git fetch failed", err)
         return 1
     target = _rev(f"origin/{branch}")              # checked before any checkout: nothing unsigned on disk
-    if config.load_config().get("update_verify_signature") and target and target != old:
+    mode = signature_mode(branch)
+    cannot = signature_unavailable() if mode == "auto" else ""
+    if cannot and target and target != old:        # the default never blocks a server that has no way to check
+        line(WARN, f"the signature of {target[:8]} was not checked: {cannot}")
+    elif mode != "off" and target and target != old:
+        _git("fetch", "-q", "origin", "--", "+refs/tags/v*:refs/tags/v*", timeout=120,
+             token=config.get_secret(UPDATE_TOKEN) or None)        # the signature of a version is on its tag
         ok, detail = verify_target(target)
         if not ok:
-            line(FAIL, f"update stopped: {target[:8]} has no valid signature (update_verify_signature is on)"
+            line(FAIL, f"update stopped: {target[:8]} has no valid signature (update_verify_signature)"
                  f" - nothing changed, {__version__} keeps running",
-                 f"{detail} | check: git -C {config.CODE} verify-commit {target[:8]} ; import the maintainer's "
-                 "key (gpg --import) or set gpg.ssh.allowedSignersFile ; or turn the check off: "
-                 "update_verify_signature false in config.json")
+                 f"{detail} | check: git -C {config.CODE} tag --points-at {target[:8]} ; the keys trusted are in "
+                 f"{SIGNERS} (plus the ones git knows: gpg --import, gpg.ssh.allowedSignersFile) ; to turn the "
+                 "check off: update_verify_signature false in config.json")
             _notify(f"Harness Maxxing update stopped: the new version {target[:8]} is not signed by a trusted "
                     "key (update_verify_signature). Nothing changed.")
             return 1
         line(OK, detail)
+    # what is installed is the commit that was checked, never the ref: another fetch (doctor, the update check) can
+    # move origin/<branch> to a commit nobody verified before the merge below
+    pinned = target or f"origin/{branch}"
     if not resumed:
         _mark_in_progress(old)
     if branch != _current_branch():
@@ -2128,7 +2260,9 @@ def _update_code(a) -> int:
             ran = {c["id"] for c in carried}
             left = [c for c in customs.list_customs(branch, head=stale) if c["id"] not in ran]
             _git("update-ref", f"refs/maxxing/before-switch/{branch}", stale)
-        code, out = _git("checkout", "-q", "-B", branch, "--track", f"origin/{branch}")
+        code, out = _git("checkout", "-q", "-B", branch, pinned)
+        if code == 0:
+            _git("branch", "-q", f"--set-upstream-to=origin/{branch}", branch)
         if code != 0:
             line(FAIL, f"cannot switch to branch {branch}", out.strip()[-300:])
             return 1
@@ -2181,18 +2315,18 @@ def _update_code(a) -> int:
     if old == target or (not mine and _rev("HEAD") == target):
         line(OK, f"code already up to date ({old[:8]})")
     elif not mine:
-        code, out = _git("merge", "--ff-only", "-q", f"origin/{branch}")
+        code, out = _git("merge", "--ff-only", "-q", pinned)
         if code != 0 and customs.same_code_upstream(branch):
             # The repository's history was rewritten upstream (same code, new commits): nothing local to keep, the
             # code directory follows the new history (the rollback point stays the old commit).
-            code, out = _git("reset", "-q", "--hard", f"origin/{branch}")
+            code, out = _git("reset", "-q", "--hard", pinned)
             if code == 0:
                 line(OK, "the history of the repository was rewritten upstream: this server now follows it")
         elif code != 0:
             # Local commits whose changes are all upstream already (a customization merged upstream as another
             # commit): a rebase drops them and the code follows upstream; a conflict leaves everything as it was.
             customs.ensure_identity()
-            code, out = customs.git("rebase", "-q", f"origin/{branch}", timeout=300)
+            code, out = customs.git("rebase", "-q", pinned, timeout=300)
             if code != 0:
                 customs.git("rebase", "--abort")
             else:
@@ -2202,13 +2336,13 @@ def _update_code(a) -> int:
             return 1
     else:
         customs.ensure_identity()
-        code, out = customs.git("rebase", "-q", f"origin/{branch}", timeout=300)
+        code, out = customs.git("rebase", "-q", pinned, timeout=300)
         if code != 0:
             files = customs.conflicts()
             customs.git("rebase", "--abort")
             web_back = bool(_UPDATE_CTX.get("stashed"))
             old = _back_to(old)
-            _, remote_src = _git("show", f"origin/{branch}:server/maxxing/__init__.py")
+            _, remote_src = _git("show", f"{pinned}:server/maxxing/__init__.py")
             info = customs.set_pending(reason="conflict", **{"from": old}, from_version=_from_version(),
                                        target=target, target_version=_version_in(remote_src) or "",
                                        customs=[c["title"] for c in mine], conflicts=files)
@@ -2244,20 +2378,49 @@ def _autosave(dirty: list[str]) -> bool:
     return True
 
 
+SIGNERS = Path(__file__).with_name("release-signers")      # the publishers' keys, shipped with the installed version
+
+
+def signature_mode(branch: str) -> str:
+    """Config `update_verify_signature` -> "on" (true: every branch, stops when it cannot check), "auto"
+    ("stable": the `stable` branch only moves to published versions, each tagged and signed) or "off" (false, the
+    default until every publisher signs)."""
+    v = config.load_config().get("update_verify_signature", False)
+    if v is True:
+        return "on"
+    return "auto" if v == "stable" and branch == "stable" else "off"
+
+
+def signature_unavailable() -> str:
+    """Why this server cannot check an SSH signature ("" = it can): git older than 2.34, no ssh-keygen, no key file."""
+    if not SIGNERS.is_file():
+        return f"{SIGNERS.name} is missing from the installed code"
+    if not shutil.which("ssh-keygen"):
+        return "ssh-keygen is not installed (package openssh-client)"
+    code, out = run(["git", "--version"], timeout=10)
+    m = re.search(r"(\d+)\.(\d+)", out or "")
+    if code != 0 or not m or (int(m.group(1)), int(m.group(2))) < (2, 34):
+        return f"git 2.34 or later is needed ({(out or '').strip() or 'git not found'})"
+    return ""
+
+
 def verify_target(target: str) -> tuple[bool, str]:
-    """Config `update_verify_signature`: the commit to install must carry a valid signature (`git verify-commit`),
-    or a tag pointing at it must (`git verify-tag`). Trust = the keys git knows (gpg keyring, or
-    gpg.ssh.allowedSignersFile for SSH signatures). -> (ok, detail)."""
-    code, out = _git("verify-commit", target, timeout=30)
-    if code == 0:
-        return True, f"commit {target[:8]} signature verified"
-    detail = out.strip()[-300:]
+    """The commit to install must carry a valid signature (`git verify-commit`), or a tag pointing at it must
+    (`git verify-tag`). Trust = the publishers' keys shipped with the installed version (`release-signers`, read
+    before anything of the new version is on disk), then the keys git knows on this server (gpg keyring,
+    gpg.ssh.allowedSignersFile). -> (ok, detail)."""
     _, tags = _git("tag", "--points-at", target)
-    for tag in tags.split():
-        tcode, tout = _git("verify-tag", tag, timeout=30)
-        if tcode == 0:
-            return True, f"tag {tag} signature verified"
-        detail = tout.strip()[-300:] or detail
+    detail = ""
+    for trust in ((["-c", f"gpg.ssh.allowedSignersFile={SIGNERS}"],) if SIGNERS.is_file() else ()) + ([],):
+        code, out = _git(*trust, "verify-commit", target, timeout=30)
+        if code == 0:
+            return True, f"commit {target[:8]} signature verified"
+        detail = detail or out.strip()[-300:]
+        for tag in tags.split():
+            tcode, tout = _git(*trust, "verify-tag", tag, timeout=30)
+            if tcode == 0:
+                return True, f"tag {tag} signature verified"
+            detail = tout.strip()[-300:] or detail
     return False, detail or "no signature"
 
 

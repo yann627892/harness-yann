@@ -11,6 +11,7 @@ import {
   type TeamChat, type TeamFile, type TeamMessage, type TeamState,
 } from '@/lib/queries'
 import { cn, store as ls } from '@/lib/utils'
+import { rise, useListIntro } from '@/lib/presence'
 import { fmtBytes, fmtDate } from '@/lib/format'
 import { useLang, useT } from '@/i18n'
 import {
@@ -23,7 +24,7 @@ import type { Att } from '@/features/composer/AttachmentChip'
 import { VoiceButton } from '@/features/voice/VoiceButton'
 import { DRAFT_EVENT } from '@/lib/drafts'
 import { insertAtCaret } from '@/features/composer/text'
-import { Markdown } from '@/components/ui/markdown'
+import { Markdown, PLAIN_BLOCKS } from '@/components/ui/markdown'
 import { confirm } from '@/components/ui/alert-dialog'
 import { Avatar } from '@/features/profile/Avatar'
 import { projectColor } from '@/features/tasks/model'
@@ -69,6 +70,8 @@ export function ChatList({
   const friends = friendsOf(team)
   const chats = (team?.chats || []).filter((c) => !q || chatTitle(team, c).toLowerCase().includes(q.toLowerCase()))
   const managed = managing ? team?.chats.find((c) => c.id === managing) : undefined
+  // first visit: the conversations rise in, staggered (as the Sessions tree)
+  const intro = useListIntro('team', !!team)
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {!page && <div className={cn('flex items-center gap-2', compact ? 'p-2' : 'p-3')}>
@@ -116,19 +119,22 @@ export function ChatList({
       )}
       <div className={cn('min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-1.5', !page && 'border-t')}>
         {!team && [0, 1, 2].map((i) => <Skeleton key={i} className="m-1 h-14" />)}
-        {chats.map((c) => {
+        {chats.map((c, i) => {
           const last = c.last
           const author = last ? (last.author === team?.me ? t('team.you') : personOf(team, last.author).name.split(' ')[0]) : ''
           const writing = team?.typing?.[c.id] || []
+          const r = rise(intro, i)
           return (
             <WithContextMenu key={c.id} className="w-56" items={<ChatMenuItems team={team} chat={c} onManage={() => setManaging(c.id)} />}>
               <button
                   type="button"
                 data-chat-row={c.id}
                 onClick={() => onOpen(c.id)}
+                style={r.style}
                 className={cn(
                   'flex w-full min-w-0 items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-muted',
                   active === c.id && 'bg-accent',
+                  r.className,
                 )}
               >
                 <ChatAvatar team={team} chat={c} />
@@ -696,7 +702,7 @@ function MessageRow({
               <div
                 className={cn(
                   'max-w-full rounded-2xl px-3.5 py-2 text-[14px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]',
-                  mine ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground',
+                  mine ? 'bg-primary text-primary-foreground selection:bg-primary-foreground/35' : 'bg-muted text-foreground',
                   mine ? (tight ? 'rounded-tr-md' : '') : tight ? 'rounded-tl-md' : '',
                 )}
               >
@@ -936,8 +942,9 @@ function Reactions({ team, chat, m }: { team: TeamState | undefined; chat: TeamC
   )
 }
 
-/** A summary may come from another server: no remote picture (it would tell its owner who reads it, and when). */
-const NO_IMAGES = { img: ({ alt }: { alt?: string }) => (alt ? <span className="text-muted-foreground">[{alt}]</span> : null) }
+/** A summary may come from another server: no remote picture (it would tell its owner who reads it, and when), and
+ *  no live card (a ```pr-review block would be one click from a review published in the owner's name). */
+const SUMMARY_PARTS = { ...PLAIN_BLOCKS, img: ({ alt }: { alt?: string }) => (alt ? <span className="text-muted-foreground">[{alt}]</span> : null) }
 
 function SummaryCard({ m }: { m: TeamMessage }) {
   const t = useT()
@@ -949,7 +956,7 @@ function SummaryCard({ m }: { m: TeamMessage }) {
         {t('team.summaryBy')}
         {s && <span className="ml-auto font-normal text-muted-foreground">{t('team.summaryOf', { count: s.count })}</span>}
       </div>
-      <Markdown components={NO_IMAGES} className="min-w-0 px-3.5 py-2.5 text-[13.5px] [overflow-wrap:anywhere] [&_p]:my-1.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_ul]:my-1">{m.text}</Markdown>
+      <Markdown components={SUMMARY_PARTS} className="min-w-0 px-3.5 py-2.5 text-[13.5px] [overflow-wrap:anywhere] [&_p]:my-1.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_ul]:my-1">{m.text}</Markdown>
     </div>
   )
 }

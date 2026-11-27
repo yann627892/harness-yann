@@ -37,6 +37,8 @@
 #          1 - the same on a server already in use | 0 never)
 #    SOURCE_DIR (a local copy of the code to install instead of a git download)
 #    CACHE_DIR (/var/cache/harness-maxxing - downloads kept until the install succeeds: a re-run does not download again)
+#    ANON_COUNT (ask - a new installation asks whether to send the anonymous daily count; without a terminal: not sent
+#      | 1 send it | 0 never)
 #    FIREWALL (auto - enabled only on a server with nothing else exposed | 1 always | 0 never)
 #    SSH_HARDEN (auto - SSH password logins are turned off only when this very session is proven to use a key
 #      | 1 also when a key is installed but the session cannot be checked | 0 never touch SSH)
@@ -93,6 +95,7 @@ SWAP="${SWAP:-auto}"
 MEMINFO=/proc/meminfo
 FIREWALL="${FIREWALL:-auto}"
 SSH_HARDEN="${SSH_HARDEN:-auto}"
+ANON_COUNT="${ANON_COUNT:-ask}"
 SYSTEM_CLOCK="${SYSTEM_CLOCK:-auto}"
 CLAUDE_DIR="${CLAUDE_DIR:-}"
 RESTORE_TRUST="${RESTORE_TRUST:-0}"
@@ -395,7 +398,8 @@ dep_url() {
 # after a failure reuses it, or resumes a transfer that was cut. Root only (700); the sha256 is checked on every use.
 CACHE_DIR="${CACHE_DIR:-/var/cache/harness-maxxing}"
 cache_ready() { # the cache folder exists, is ours and is not a link (otherwise downloads go straight to $WORK)
-  [ ! -L "$CACHE_DIR" ] && mkdir -p -m 700 "$CACHE_DIR" 2>/dev/null && [ -d "$CACHE_DIR" ] && [ -O "$CACHE_DIR" ]
+  [ ! -L "$CACHE_DIR" ] && mkdir -p -m 700 "$CACHE_DIR" 2>/dev/null && [ -d "$CACHE_DIR" ] && [ -O "$CACHE_DIR" ] \
+    && chmod 700 "$CACHE_DIR" 2>/dev/null     # mkdir -m leaves a folder that was already there as it was
 }
 cache_clear() { # after a successful install: only the files fetch_verified wrote (<sha256>, <sha256>.part)
   [ -d "$CACHE_DIR" ] && [ ! -L "$CACHE_DIR" ] || return 0
@@ -481,6 +485,7 @@ check_inputs() {
   case "$ALLOW_UNPROTECTED" in 0|1) ;; *) die "ALLOW_UNPROTECTED must be 0 or 1" ;; esac
   case "$FIREWALL" in auto|add|0|1) ;; *) die "FIREWALL must be auto, 1 or 0" ;; esac
   case "$SSH_HARDEN" in auto|0|1) ;; *) die "SSH_HARDEN must be auto, 1 or 0" ;; esac
+  case "$ANON_COUNT" in ask|0|1) ;; *) die "ANON_COUNT must be ask, 1 or 0" ;; esac
   case "$TOOLS" in background|foreground|0) ;; *) die "TOOLS must be background, foreground or 0" ;; esac
   case "$SWAP" in auto|0|1) ;; *) die "SWAP must be auto, 1 or 0" ;; esac
   [ -z "$SOURCE_DIR" ] || safe_path SOURCE_DIR "$SOURCE_DIR"
@@ -822,6 +827,17 @@ choose_access() {
   fi
 
   choose_claude_dir
+  if [ -f "$STATE_DIR/config.json" ]; then
+    ANON_COUNT=keep                                   # an installation that exists keeps the choice it has
+  elif [ "$ANON_COUNT" = ask ]; then
+    if has_tty; then
+      echo "      Anonymous count: once a day, a random id, the version, the system and a few health codes."
+      echo "      No IP address, no name, no content. It tells the authors how many servers run which version."
+      if ask_yn "Send this anonymous daily count? (Settings -> Profile changes it later)" y; then ANON_COUNT=1; else ANON_COUNT=0; fi
+    else
+      ANON_COUNT=0
+    fi
+  fi
   if [ "$SSH_HARDEN" = auto ] && has_tty && [ "$(ssh_plan)" = apply ]; then
     ask_yn "You are connected with an SSH key: turn SSH password logins off (open sessions stay connected)?" y || SSH_HARDEN=0
   fi
@@ -1486,6 +1502,10 @@ init_state() {
     args+=(--claude-dir "$CLAUDE_DIR")
   fi
   [ -n "$TIMEZONE" ] && args+=(--timezone "$TIMEZONE")
+  case "$ANON_COUNT" in 0|1)
+    "$(venv_py)" -m maxxing init --help 2>/dev/null | grep -- --count >/dev/null \
+      && args+=(--count "$([ "$ANON_COUNT" = 1 ] && echo yes || echo no)") ;;
+  esac
   :
   rm -f "$STATE_DIR/logs/install-init.log"     # holds the setup link: 0600 (umask), removed after the banner
   mx "${args[@]}" > "$STATE_DIR/logs/install-init.log" 2>&1 || { cat "$STATE_DIR/logs/install-init.log"; die "maxxing init failed"; }
@@ -1618,6 +1638,8 @@ EOF
       die "$CADDYFILE already serves $DOMAIN - remove that block, then re-run"
     fi
     printf '\nimport %s\n' "$CADDY_SITE" >> "$CADDYFILE"
+    grep -qE '^[[:space:]]*admin[[:space:]]' "$CADDYFILE" \
+      || warn "$CADDYFILE keeps Caddy's admin API on 127.0.0.1:2019 (any local user can reconfigure it): add 'admin unix//run/caddy/admin.sock' or 'admin off' to its global options"
   fi
   chmod 644 "$CADDY_SITE" "$CADDYFILE"; chmod 755 /etc/caddy/maxxing-paths
   caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 \

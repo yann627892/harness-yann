@@ -302,15 +302,32 @@ def test_only_the_widget_itself_speaks_to_the_page_that_frames_it(tmp_path):
     """A link in widget.html can load another site INTO the frame (same window, origin 'null'): without the key of
     the mount from the fragment, its messages are ignored and it gets no data."""
     out = _run_ts(tmp_path, WEB / "pages" / "dashboard" / "widgetKey.ts", """const a = m.frameKey(), b = m.frameKey()
-        return [/^[0-9a-f]{32}$/.test(a), a !== b, m.ours({loads: 1, hellos: 1}), m.ours({loads: 0, hellos: 1}),
-                m.ours({loads: 2, hellos: 1}), m.ours({loads: 1, hellos: 0})]""")
-    assert out == [True, True, True, True, False, False]
+        const s = m.newFrame(), seen = []
+        m.frameLoaded(s); seen.push(m.ours(s)); m.frameHello(s); seen.push(m.ours(s))      // load, then the ping's hello
+        m.frameBye(s); seen.push(m.ours(s)); m.frameLoaded(s); seen.push(m.ours(s))         // a link: a foreign page
+        m.frameHello(s); m.frameLoaded(s); seen.push(m.ours(s)); m.frameHello(s); seen.push(m.ours(s))   // Back
+        return [/^[0-9a-f]{32}$/.test(a), a !== b, seen]""")
+    assert out == [True, True, [False, True, False, False, False, True]]
     src = (WEB / "pages" / "dashboard" / "HtmlWidget.tsx").read_text(encoding="utf-8")
     assert "if (m.key !== key) return" in src and "vars: themeVars(), key }" in src
     assert src.count("ours(seen.current) &&") == 2                 # data and theme
+    assert "postMessage({ mx: 'ping' }, '*')" in src and src.count("win.postMessage(") == 2   # replies only via mayReply
     from maxxing.api.extensions import WIDGET_BRIDGE
     assert "K=String(init.key||'')" in WIDGET_BRIDGE and "post({mx:'hello'})" in WIDGET_BRIDGE
+    assert "if(m.mx==='ping')post({mx:'hello'})" in WIDGET_BRIDGE and "post({mx:'bye'})" in WIDGET_BRIDGE
     assert "parent.postMessage(m,'*')" in WIDGET_BRIDGE and WIDGET_BRIDGE.count("parent.postMessage") == 1
+
+
+def test_a_widget_answer_never_reaches_a_page_that_replaced_the_widget(tmp_path):
+    """An api / app answer comes back after an await: only the document that asked gets it."""
+    out = _run_ts(tmp_path, WEB / "pages" / "dashboard" / "widgetKey.ts", """const r = []
+        let s = m.newFrame(); m.frameLoaded(s); m.frameHello(s)
+        const asked = s.gen; m.frameBye(s); r.push(m.mayReply(s, asked)); m.frameLoaded(s); r.push(m.mayReply(s, asked))
+        m.frameHello(s); m.frameLoaded(s); m.frameHello(s); r.push(m.mayReply(s, asked))     // Back: a new widget document
+        s = m.newFrame(); m.frameHello(s); const early = s.gen          // the widget asks before its own load event
+        m.frameLoaded(s); r.push(m.mayReply(s, early)); m.frameHello(s); r.push(m.mayReply(s, early))
+        return r""")
+    assert out == [False, False, False, False, True]
 
 
 def test_a_link_to_a_chat_that_is_gone_keeps_the_team_header():
@@ -627,3 +644,122 @@ def test_the_demo_server_knows_the_phone_notifications(tmp_path):
     finally:
         proc.terminate()
         proc.wait(5)
+
+
+def test_theme_cards_are_drawn_in_the_mode_they_get_once_picked():
+    # With a dark-only theme in use and Mode = light, Solid and Glass were drawn dark although picking them gives light.
+    src = (WEB / "pages" / "settings" / "sections" / "Appearance.tsx").read_text(encoding="utf-8")
+    picker = re.search(r"function ThemePicker\(\).*?\n}\n", src, re.S)
+    assert picker and "shownMode(" not in picker[0] and "resolveTheme(useUI((s) => s.theme))" in picker[0]
+
+
+def test_a_resize_handle_removed_mid_drag_gives_back_the_cursor_and_text_selection():
+    # The sidebar closed during a drag: no pointerup reached the handle, body kept col-resize and user-select: none.
+    src = (WEB / "components" / "shell" / "ResizeEdge.tsx").read_text(encoding="utf-8")
+    assert "addEventListener('lostpointercapture', onUp)" in src
+    assert "removeEventListener('lostpointercapture', onUp)" in src
+
+
+def test_a_tooltip_switched_off_while_open_does_not_reopen_by_itself():
+    # Radix never asks to close a tooltip whose controlled value is already false: `open` stayed true while off.
+    src = (WEB / "components" / "ui" / "tooltip.tsx").read_text(encoding="utf-8")
+    body = src[src.index("export function Tooltip("):]
+    assert re.search(r"React\.useEffect\(\(\) => \{\s*if \(off\) setOpen\(false\)\s*\}, \[off\]\)", body)
+    assert body.index("setOpen(false)") < body.index("if (off && !keep) return")      # a hook before the early return
+
+
+def test_the_cpu_panel_hides_unit_names_in_presentation_mode():
+    src = (WEB / "components" / "shell" / "HealthIndicator.tsx").read_text(encoding="utf-8")
+    panel = src[src.index("function CpuPanel("):]
+    panel = panel[:panel.index("\n}\n")]
+    assert "const present = useUI((u) => u.presentation)" in panel
+    assert "title={u.unit}" not in panel and "title={present ? undefined : u.unit}" in panel
+
+
+def test_every_health_issue_has_an_open_button():
+    health = (WEB.parents[1] / "server" / "maxxing" / "health.py").read_text(encoding="utf-8")
+    codes = set(re.findall(r'_issue\("[^,]*, "([a-z_]+)"', health))
+    src = (WEB / "components" / "shell" / "HealthIndicator.tsx").read_text(encoding="utf-8")
+    table = src[src.index("const ISSUE_TO"):]
+    keys = set(re.findall(r"^\s+([a-z_]+): '/", table[:table.index("\n}\n")], re.M))
+    assert "claude_login_ends" in codes and "disk_full" in codes
+    assert codes <= keys, codes - keys
+
+
+def test_pages_shown_while_the_settings_load_are_the_ones_a_new_install_has_on():
+    core = (WEB.parents[1] / "server" / "maxxing" / "cmd_core.py").read_text(encoding="utf-8")
+    new_on = set(re.findall(r'\("(\w+_page)", not older\)', core))
+    nav = (WEB / "components" / "shell" / "nav.ts").read_text(encoding="utf-8")
+    shown = set(re.findall(r"setting: '(\w+_page)', defaultOn: true", nav))
+    assert new_on == {"agents_page"} and shown == new_on
+    warm = (WEB / "lib" / "prefetchIdle.ts").read_text(encoding="utf-8")
+    assert "s.tasks_page !== false" not in warm and "if (!s || s.agents_page !== false) tops.push('agents')" in warm
+
+
+def test_the_extensions_folder_is_marked_on_an_extension_page_typed_in_capitals():
+    src = (WEB / "components" / "shell" / "Sidebar.tsx").read_text(encoding="utf-8")
+    assert "const onExt = useLocation().pathname.toLowerCase().startsWith('/x/')" in src
+
+
+def test_a_cpu_the_server_could_not_read_is_shown_as_a_dash_not_zero():
+    # health.cpu_pct() is None when /proc/stat cannot be read: Math.round(null) showed "0 %".
+    types = (WEB / "lib" / "types.ts").read_text(encoding="utf-8")
+    assert re.search(r"\n  cpu_pct: number \| null\n", types)
+    src = (WEB / "components" / "shell" / "HealthIndicator.tsx").read_text(encoding="utf-8")
+    assert "value={h.cpu_pct == null ? '–' :" in src and "pct: h.cpu_pct ?? null" in src
+    assert "(n: number | null) => (n == null ? '–' :" in src
+    assert "Math.round(h.cpu_pct ?? 0)" in (WEB / "components" / "shell" / "mood.ts").read_text(encoding="utf-8")
+
+
+def test_the_sidebar_mark_glides_from_where_the_old_row_is_when_it_leaves():
+    # Measured only when mounted: a row moved since (page switched on above it, reordered, shorter rows) made the
+    # next glide start from a stale place.
+    src = (WEB / "components" / "shell" / "ActiveMark.tsx").read_text(encoding="utf-8")
+    effect = src[src.index("React.useLayoutEffect("):src.index("}, [collapsed])")]
+    leave = re.search(r"const leave = \(\) => \{(.*?)\n    \}", effect, re.S)
+    assert leave and "getBoundingClientRect()" in leave[1] and "last = {" in leave[1]
+    returns = re.findall(r"\breturn\b[^\n]*", effect)
+    assert returns and all(r.strip() == "return leave" for r in returns[1:]), returns
+
+
+def test_many_quick_add_labels_are_deduplicated_in_linear_time(tmp_path):
+    """Each #label checked against the ones already taken through a Set: a long pasted list of tags stays fast."""
+    out = _run_ts(tmp_path, WEB / "features" / "tasks" / "model.ts", """
+        const text = Array.from({ length: 20000 }, (_, i) => '#l' + i).join(' ') + ' #l1 x'
+        const t0 = performance.now()
+        const r = m.parseQuickAdd(text, [], '2026-11-25')
+        return [performance.now() - t0, r.labels.length, r.labels[1], r.title]""")
+    assert out[1:] == [20000, "l1", "x"] and out[0] < 100
+
+
+def test_a_quick_add_at_token_with_no_letters_names_no_project(tmp_path):
+    out = _run_ts(tmp_path, WEB / "features" / "tasks" / "model.ts", """
+        const ps = [{ id: 'p1', name: 'Alpha' }, { id: 'p2', name: 'harness-maxxing' }]
+        return ['Buy milk @-', 'Buy milk @_', 'Buy milk @--', 'Buy milk @\\u0301', 'Buy milk @alp'].map((t) => {
+          const r = m.parseQuickAdd(t, ps, '2026-11-25')
+          return [r.project_id ?? null, r.title]
+        })""")
+    assert out == [[None, "Buy milk @-"], [None, "Buy milk @_"], [None, "Buy milk @--"], [None, "Buy milk @́"],
+                   ["p1", "Buy milk"]]
+
+
+def test_a_value_just_under_zero_keeps_the_chart_scale_at_zero(tmp_path):
+    out = _run_ts(tmp_path, WEB / "pages" / "dashboard" / "chartScale.ts",
+                  "return [[-0.001, 50], [-1e-17, 3], [-10, 50], [-3, -1], [0, 8]].map((v) => m.chartScale(v).ticks)")
+    assert out == [[0, 25, 50], [0, 2.5, 5], [-10, 0, 50], [-5, 0, 1], [0, 5, 10]]
+
+
+def test_a_mail_port_corrected_after_a_known_one_keeps_its_security(tmp_path):
+    """465/ssl -> 587 (starttls) -> 58 -> 588: the user stopped on 587, the security stays starttls; typing on through
+    a known port ("25" on the way to "2525") gives the earlier one back."""
+    out = _run_ts(tmp_path, WEB / "features" / "mail" / "portTls.ts", """
+        const known = { '25': 'none', '465': 'ssl', '587': 'starttls', '143': 'starttls', '993': 'ssl' }
+        const walk = (start, ports) => {
+          let tls = start, kept
+          for (const p of ports) ({ tls, kept } = m.portTls(p, tls, kept, known))
+          return tls
+        }
+        return [walk('ssl', ['465', '46', '5', '58', '587', '58', '588']), walk('ssl', ['587', '58', '2525']),
+                walk('starttls', ['143', '14', '1', '19', '199', '1993']), walk('ssl', ['2', '25', '252', '2525']),
+                walk('ssl', ['587']), walk('ssl', ['constructor'])]""")
+    assert out == ["starttls", "starttls", "starttls", "ssl", "starttls", "ssl"]

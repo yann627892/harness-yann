@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/claude", tags=["claude"], dependencies=[Depends(
 TEST_MODEL = "haiku"          # Claude Code's name for its newest Haiku; a gateway uses its own ids
 TEST_PROMPT = "Reply with the single word: ok"
 TEST_TIMEOUT_S = 90
-PERMISSION_MODES = ("bypass", "acceptEdits", "default", "ask")
+PERMISSION_MODES = ("bypass", "sandbox", "acceptEdits", "default", "ask")
 SECRET_FOR = {"oauth_token": "claude_oauth_token", "api_key": "anthropic_api_key"}
 _version_cache: dict[str, tuple[float, str | None]] = {}
 
@@ -90,6 +90,7 @@ def run_test(model: str | None = None, source: str = "test", timeout_s: int = TE
         data = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
     except ValueError:
         data = {}
+    data = data if isinstance(data, dict) else {}       # a last line of null, 42 or [1]: no answer
     text = str(data.get("result") or "")
     if r.returncode == 0 and not data.get("is_error") and text.strip():
         out["ok"] = True
@@ -214,7 +215,14 @@ async def set_auth(body: AuthIn):
         for kind, name in SECRET_FOR.items():
             config.set_secret(name, value if kind == body.kind else None)
         service.forget_models_cache()                    # ...and the picker gains the Anthropic ids back
-        res = await asyncio.to_thread(run_test, provider="anthropic")
+        try:
+            res = await asyncio.to_thread(run_test, provider="anthropic")
+        except Exception:                               # the test itself broke: never keep an unchecked credential
+            for name, old in before.items():
+                config.set_secret(name, old or None)
+            service.forget_models_cache()
+            claude_auth.forget()
+            raise
         if not res["ok"] and any(before.values()):      # a token that fails its test: the one stored before stays
             for name, old in before.items():
                 config.set_secret(name, old or None)
@@ -280,7 +288,7 @@ async def settings(body: SettingsIn):
     if body.permission_mode is not None:
         if body.permission_mode not in PERMISSION_MODES:
             raise HTTPException(400, detail={"error": "invalid",
-                                             "message": "permission_mode: bypass, acceptEdits, default or ask"})
+                                             "message": "permission_mode: bypass, sandbox, acceptEdits, default or ask"})
         changes["permission_mode"] = body.permission_mode
     if body.claude_provider is not None:
         p = body.claude_provider.strip().lower()

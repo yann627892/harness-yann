@@ -19,7 +19,12 @@ export type AuthState = {
 export type SetupBody = { token: string; password: string }
 export type LoginBody = { password: string }
 /** A sign-in (or turning two-step sign-in on) waiting for an approval in Telegram. */
-export type TwoFactorChallenge = { challenge: string; expires_in: number }
+export type TwoFactorChallenge = { challenge: string; expires_in: number; methods?: ('telegram' | 'totp')[] }
+export type SecondFactor = { telegram: boolean; totp: boolean; recovery_left: number }
+export type TotpEnrol = { secret: string; uri: string }
+export type RecoveryCodes = { recovery_codes: string[] }
+export type SignedInBrowser = { id: string; label: string; ip: string; created: number; seen: number; current: boolean }
+export type SignedInBrowsers = { devices: SignedInBrowser[]; legacy: boolean; legacy_current: boolean }
 export type LoginResult = { ok: boolean; two_factor?: TwoFactorChallenge }
 export type TwoFactorPoll = { ok: boolean; status: 'pending' | 'approved'; expires_in?: number }
 export type ChangePasswordBody = { current: string; new: string }
@@ -35,7 +40,7 @@ export type ClaudeAuthMethod = 'oauth_token' | 'credentials' | 'api_key' | 'gate
  *  sessions saved before several gateways existed, it means the default gateway. */
 export type ClaudeProvider = 'anthropic' | 'gateway' | `gateway:${ClaudeGatewayProvider}`
 /** `ask`: what is not pre-allowed waits for the user's Allow / Deny (topics, global setting, jobs; not agents). */
-export type PermissionMode = 'bypass' | 'acceptEdits' | 'default' | 'ask'
+export type PermissionMode = 'bypass' | 'sandbox' | 'acceptEdits' | 'default' | 'ask'
 export type ClaudeModel = {
   id: string
   label: string
@@ -116,6 +121,8 @@ export type Topic = {
   telegram_thread: number | null
   /** The topic's "Always allow" rules (Claude Code rules added from an approval card). */
   allowed_tools?: string[]
+  /** Sessions in the order chosen by drag and drop (ids); the others (new ones) come first, by activity. */
+  session_order?: string[]
   /** The topic's own permission mode for Claude turns; '' = the global setting. */
   permission_mode?: '' | PermissionMode
   /** Agents of the topic (Settings -> Features -> agents_page), without their status fields. */
@@ -455,6 +462,8 @@ export type Approval = {
   clipped?: boolean
   /** The rule "Always allow" would add to the session's topic ("" = not offered: agents, multi-line commands...). */
   always_rule?: string
+  /** the session runs in its topic's sandbox: the request offers "Full access for this topic" */
+  full_access?: boolean
 }
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type Effort = (typeof EFFORTS)[number]
@@ -1014,11 +1023,11 @@ export type TokenStats = {
 }
 export type ChangelogEntry = { version: string; label: string; current: boolean; body: string }
 export type Changelog = { version: string; entries: ChangelogEntry[] }
-export type Secret = { name: string; note: string; expose: boolean; updated: number; preview: string }
+export type Secret = { name: string; note: string; expose: boolean; /** projects / topics the key is given to; [] = every topic */ topics?: string[]; updated: number; preview: string }
 /** A file of the Keys vault: only its description, the content never reaches the browser. */
-export type SecretFile = { name: string; filename: string; size: number; sha256: string; note: string; expose: boolean; updated: number }
-export type SecretFilePutBody = { file?: File; note?: string; expose?: boolean; create?: boolean }
-export type SecretPutBody = { value?: string; note?: string; expose?: boolean; create?: boolean }
+export type SecretFile = { name: string; filename: string; size: number; sha256: string; note: string; expose: boolean; topics?: string[]; updated: number }
+export type SecretFilePutBody = { file?: File; note?: string; expose?: boolean; topics?: string[]; create?: boolean }
+export type SecretPutBody = { value?: string; note?: string; expose?: boolean; topics?: string[]; create?: boolean }
 
 /* ---------------------------------------------------------------- System */
 /** `seen`: marked as seen - it does not count in the sidebar until it changes or for 24 h. */
@@ -1026,7 +1035,8 @@ export type HealthIssue = { level: 'info' | 'warn' | 'error'; code: string; text
 export type Health = {
   ok: boolean
   issues: HealthIssue[]
-  cpu_pct: number
+  /** null when the server could not read /proc/stat */
+  cpu_pct: number | null
   /** `some` line of /proc/pressure/cpu: share of time programs waited for the processor (null without PSI) */
   cpu_pressure?: CpuPressure | null
   /** pressure avg10 >= 20 %: the CPU meter says "waiting" */

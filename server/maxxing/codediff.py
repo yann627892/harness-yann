@@ -271,6 +271,7 @@ def repo_head(repo: Path) -> dict:
         if len(lr) == 2:
             behind, ahead = int(lr[0]), int(lr[1])
     remote = _run(repo, "config", "--get", "remote.origin.url", check=False).stdout.strip()
+    remote = re.sub(r"//[^/]*@", "//", remote)       # never the credentials embedded in a remote URL (as gitview)
     return {"root": str(repo), "name": repo.name, "branch": branch or None, "upstream": up or None,
             "ahead": ahead, "behind": behind, "remote": remote or None}
 
@@ -342,7 +343,7 @@ def _disk_names(repo: Path, a: str, b: str) -> dict[str, str]:
         r = subprocess.run(["git", *SAFE_GIT, *_filter_overrides(repo), "-C", str(repo), "diff", "--no-color",
                             "--no-ext-diff", "-M", "--name-status", "-z", a, b],
                            capture_output=True, timeout=GIT_TIMEOUT, env=_env())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired, GitError):
         return {}
     return {n.decode("utf-8", "replace"): os.fsdecode(n) for n in r.stdout.split(b"\0") if not n.isascii()}
 

@@ -63,6 +63,8 @@ _lock = config.ProcessLock("team")          # team.json: also written by `maxxin
 _slots = threading.BoundedSemaphore(4)          # files of the others: 4 downloads at a time
 _queued = [0]                                   # downloads started or waiting (at most QUEUE_MAX, the others fail)
 QUEUE_MAX = 100
+SENDER_QUEUE_MAX, SENDER_SLOTS = 25, 2          # one sender never fills the queue nor holds every slot
+_by_sender: dict[str, list] = {}                # address -> [queued, its semaphore]
 TYPING_S = 6                    # "is writing" lasts this long after the last signal
 TYPING_EVERY = 3                # the user's own signal goes out at most this often per chat
 _typing: dict[str, dict[str, float]] = {}       # chat -> person -> until (memory only, never saved)
@@ -336,6 +338,9 @@ def send(cid: str, text: str, reply_to: str | None = None, files: list[dict] | N
             for f in clean:
                 f["fid"] = teampeer.share_file(f["path"], cid, f)
     return _post_mine(cid, text, check=check, **extra)
+
+
+GROUP_ID_RE = re.compile(r"g_[0-9a-f]{16}")    # what create_chat makes: a remote group id is never anything else
 
 
 def dm_id(a: str, b: str) -> str:
@@ -859,7 +864,7 @@ def apply_remote(frm: str, contact: bool, event: dict) -> None:
         doc = _load()
         chat = next((c for c in doc["chats"] if c["id"] == cid), None)
         if kind == "chat":
-            if not contact or not cid.startswith("g_") or (chat and chat.get("admin") != who):
+            if not contact or not GROUP_ID_RE.fullmatch(cid) or (chat and chat.get("admin") != who):
                 raise TeamError(403, "forbidden", "Only a contact may add you to a group, only its creator may change it")
             roster = [m for m in (event.get("members") if isinstance(event.get("members"), list) else []) if isinstance(m, dict)][:50]
             keys = event.get("keys") if isinstance(event.get("keys"), dict) else {}
@@ -1002,11 +1007,13 @@ def _fetch(frm: str, cid: str, mid: str, f: dict) -> None:
     d = files_dir()
     ok, dest = False, None
     with _lock:
+        mine = _by_sender.setdefault(frm, [0, threading.BoundedSemaphore(SENDER_SLOTS)])
         _queued[0] += 1
-        room = _queued[0] <= QUEUE_MAX
+        mine[0] += 1
+        room = _queued[0] <= QUEUE_MAX and mine[0] <= SENDER_QUEUE_MAX
     try:
         if room and (not max_b or f["size"] <= max_b) and free_bytes(d) - f["size"] >= reserve:
-            with _slots:
+            with mine[1], _slots:
                 try:
                     dest, fd = reserve_path(d, f["name"])  # the name is taken at once: two "image.png" never collide
                 except OSError:                         # a name the file system refuses: marked failed below
@@ -1022,6 +1029,9 @@ def _fetch(frm: str, cid: str, mid: str, f: dict) -> None:
     finally:
         with _lock:
             _queued[0] -= 1
+            mine[0] -= 1
+            if not mine[0]:
+                _by_sender.pop(frm, None)
     with _lock:
         doc = _load()
         try:

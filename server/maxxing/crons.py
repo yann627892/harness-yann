@@ -529,7 +529,7 @@ DEFAULTS: dict[str, Any] = {
     "once_at": "", "delete_after": False,     # one-time job: its date (then `schedule` is ""), removed once it ran
     "catch_up": True, "retries": 0,           # make up for a missed run; automatic retries of a shell job
 }
-PERMISSION_MODES = ("", "bypass", "acceptEdits", "default", "ask")
+PERMISSION_MODES = ("", "bypass", "sandbox", "acceptEdits", "default", "ask")
 
 
 def _clean(job: dict) -> dict:
@@ -571,7 +571,7 @@ def _clean(job: dict) -> dict:
         except UnicodeEncodeError:
             raise CronError(f"{s} is not valid text", f"invalid_{s.split('_')[0]}") from None
     if j["permission_mode"] not in PERMISSION_MODES:
-        raise CronError("permission_mode must be bypass, acceptEdits, default, ask or empty", "invalid_permission_mode")
+        raise CronError("permission_mode must be bypass, sandbox, acceptEdits, default, ask or empty", "invalid_permission_mode")
     if j["kind"] == "shell":
         if not j["command"].strip():           # multi-line scripts are fine: run via bash -lc
             raise CronError("a shell job needs a command", "invalid_command")
@@ -1180,17 +1180,18 @@ def _tail(path: Path, n: int = OUTPUT_TAIL) -> str:
 def _job_env(job: dict) -> dict[str, str]:
     """The environment of a Claude turn, so a script can call `claude -p`: PATH with `claude`, HOME, Harness'
     own Claude Code folder (CLAUDE_CONFIG_DIR when set), the Claude credentials stored in Harness and the
-    vault keys flagged `expose`."""
+    vault keys flagged `expose` (a key limited to topics: only when the job's `topic_path` is one of them)."""
+    topic = str(job.get("topic_path") or "")
     try:
         from .sessions import spawn
         env = spawn.base_env()
-        env.update(spawn.auth_env())
+        env.update(spawn.auth_env(path=topic))
     except Exception:
         env = dict(os.environ)
         try:
             from . import vault, vault_files
-            env.update(vault.exposed_env())
-            env.update(vault_files.exposed_files_env())
+            env.update(vault.exposed_env(topic))
+            env.update(vault_files.exposed_files_env(topic))
         except Exception:
             pass
     env.update(MAXXING_CRON_ID=job["id"], MAXXING_CRON_NAME=job["name"])
@@ -1490,7 +1491,12 @@ def text_reset(text: str, now: float) -> float | None:
 
 def limit_retry_on() -> bool:
     """config limit_retry (Settings -> Usage): a run stopped by the usage limit starts again after the reset."""
-    return config.load_config().get("limit_retry", True) is not False
+    v = config.load_config().get("limit_retry", True)
+    if isinstance(v, str):                          # config.json edited by hand: "false", "off", "0" turn it off
+        return v.strip().lower() not in ("false", "off", "no", "0")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v != 0
+    return v is not False
 
 
 def limit_retry_delay() -> float:
